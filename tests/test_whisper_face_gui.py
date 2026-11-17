@@ -7870,6 +7870,60 @@ class EditorSheetAppKitTests(unittest.TestCase):
         self.assertEqual(remaining, [])
         return seen
 
+    def assert_no_text_is_cut(self, sheet):
+        """Where a sheet's body stops, no header or note is cut in two:
+        each lies wholly inside what shows, or wholly below it."""
+        shown = float(sheet.scroll.frame().size.height)
+        checked = 0
+        for header, _group, notes, trailing in sheet.document.sections:
+            for view in (header, trailing, *notes):
+                if view is None or bool(view.isHidden()):
+                    continue
+                frame = view.frame()
+                top = float(frame.origin.y)
+                bottom = top + float(frame.size.height)
+                checked += 1
+                self.assertTrue(
+                    bottom <= shown + 0.5 or top >= shown - 0.5,
+                    f"{view.stringValue()!r} is cut by the fold: "
+                    f"{top}-{bottom} against {shown}")
+        return checked
+
+    def test_a_scrolling_sheet_never_cuts_a_note_in_two(self):
+        import dataclasses
+        entries = []
+        self.model.actions = dataclasses.replace(
+            self.model.actions,
+            recent_dictations=lambda: tuple(entries),
+            reveal_recent_dictation=lambda _entry_id: "words")
+        self.model.state = dataclasses.replace(
+            self.model.state, recent_dictations=True)
+        checked = 0
+        catalog = gui_module.STRING_CATALOGS["en"]
+        key = "settings.dialog.recent.message"
+        # From a list that fits to one that scrolls, under a header that
+        # grows half a line at a time, so the note under the list meets
+        # the fold at every offset a line can have.
+        for halves in range(1, 17):
+            message = " ".join(["Words that fill half a line."] * halves)
+            for count in range(1, 11):
+                entries[:] = [
+                    {"id": f"take-{index}", "at": 0.0,
+                     "age_seconds": 60.0, "words": 9, "app": "Mail",
+                     "receipt": ("interrupted", "proven")[index % 2]}
+                    for index in range(count)]
+                with self.subTest(halves=halves, count=count), \
+                        patch.dict(catalog, {key: message}):
+                    (sheet,) = self.drive("browseRecentDictations_", "done")
+                    checked += self.assert_no_text_is_cut(sheet)
+        for action, answer in (
+                ("editVocabulary_", "cancel"),
+                ("reviewCorrections_", "done")):
+            with self.subTest(action=action):
+                (sheet,) = self.drive(action, answer)
+                checked += self.assert_no_text_is_cut(sheet)
+        self.assertGreater(checked, 10)
+
     def test_every_editor_is_a_sheet_and_leaving_it_changes_nothing(self):
         for action, answer in (
                 ("editTone_", "cancel"), ("editSnippets_", "done"),

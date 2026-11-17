@@ -683,7 +683,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.self_correction.help": "Off by default. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm”: between two numbers, days, months or times, only the second is kept. A sentence contrasting two things, like “I thought it was Tuesday, actually Wednesday”, changes too.",
         "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",
         "settings.dialog.recent.title": "Recent dictations",
-        "settings.dialog.recent.message": "Each dictation and what became of it. Its words stay hidden until you show them. To insert one again, click where it should go and use Recent Dictations in the menu bar.",
+        "settings.dialog.recent.message": "What became of each dictation. Words stay hidden until you show them; to insert one again, use Recent Dictations in the menu bar.",
         "settings.dialog.recent.empty": "Nothing recorded yet.",
         "settings.dialog.recent.row": "{when} · {words} · {app}",
         "settings.dialog.recent.words": "{count} words",
@@ -7349,6 +7349,29 @@ if APPKIT_AVAILABLE:
                 y += NOTE_GAP + height
         return y
 
+    def sheet_fold(document: Any, fold: float) -> float:
+        """Where a scrolling sheet body may stop: ``fold``, or higher, so
+        that no header or note of ``document`` is cut in two by it.
+
+        A row may be cut; text outside a group may not. A line that the
+        fold would cut moves below it whole, with a gap above it.
+        """
+        texts = [view for header, _group, notes, trailing
+                 in document.sections
+                 for view in (header, trailing, *notes)
+                 if view is not None and not bool(view.isHidden())]
+        moved = True
+        while moved:
+            moved = False
+            for view in texts:
+                frame = view.frame()
+                top = float(frame.origin.y)
+                bottom = top + float(frame.size.height)
+                if top < fold - 0.5 and bottom > fold + 0.5:
+                    fold = max(0.0, top - SHEET_FOLD_GAP)
+                    moved = True
+        return fold
+
     class GroupedPageView(NSView):
         """A settings page's scrolling document: headers, groups, notes.
 
@@ -8506,6 +8529,9 @@ if APPKIT_AVAILABLE:
     # as far from the footer's rule as from the header.
     SHEET_BODY_FOOT = PAGE_TOP
     SHEET_FOOTER_GAP = 16.0     # body to the footer's buttons
+    # Clear space left above a header or note that a scrolling sheet body
+    # moved below its fold rather than cut in two.
+    SHEET_FOLD_GAP = 6.0
     SHEET_BUTTON_MIN_WIDTH = 76.0
     # The sheet stays this far inside the window at its minimum size; a
     # body taller than that leaves scrolls.
@@ -12508,6 +12534,17 @@ if APPKIT_AVAILABLE:
             sheet.scroll.setFrame_(NSMakeRect(
                 SHEET_INSET, body_top, body_width, body_height))
             document.arrange(force=True)
+            if content_height > body_height + 0.5:
+                # The body scrolls. Where it stops, it may cut a group's
+                # row (the group's edge goes on, so more is plainly
+                # there), but never a line of a header or a note: that
+                # reads as text clipped by mistake. Such a line goes
+                # below the fold whole, and is reached by scrolling.
+                folded = sheet_fold(document, body_height)
+                if folded < body_height:
+                    body_height = folded
+                    sheet.scroll.setFrame_(NSMakeRect(
+                        SHEET_INSET, body_top, body_width, body_height))
             document.scrollPoint_((0.0, 0.0))
             self._tip_what_is_cut(document)
             body_foot = body_top + body_height
