@@ -34,8 +34,12 @@ every side effect; nearly every algorithm is imported from pure modules
    speculation and rolling chunk cuts decode long speech during the hold
    ([[asr-cascade]]); only the [[stable-prefix]] reaches the HUD caption.
 4. Key-up: an opaque lease is sealed, a release-order ticket is issued,
-   at most a 0.3 s tail is captured, and exactly one remainder decode
-   runs. An energy gate drops too-short or too-quiet audio.
+   and at most a 0.3 s tail is captured. If speech ran into the key-up,
+   what was heard is already decoding while the tail is captured, and
+   that decode stands when the tail held no speech; otherwise exactly one
+   remainder decode runs after the tail. The microphone stream is
+   stopped off this path. An energy gate drops too-short or too-quiet
+   audio.
 5. Chunks assemble into one Recognition with offset-corrected word
    timings; hallucinations, decode loops, and prompt echoes are dropped.
 6. The [[voice-compiler]] builds VoiceIR and compiles;
@@ -64,6 +68,11 @@ every side effect; nearly every algorithm is imported from pure modules
 - [[protected-anchor]]s never invent words.
 - [[consequence-receipts]] are evidence-only.
 - Release order is preserved even though ASR overlaps.
+- Every stage from the key-up event to the paste keystroke is timed on
+  the monotonic clock: the `release_path` trace and the record's
+  `release_path_ms` hold contiguous stages that add up to
+  `release_to_paste_ms`, and `uv run performance_lab.py release-path
+  --record transcripts.jsonl` prints p50/p95 per stage, timings only.
 - Correction learning is strictly downstream of a verified receipt.
 - Private state is written atomically at 0600; a flock enforces a
   single instance.
@@ -77,7 +86,8 @@ every side effect; nearly every algorithm is imported from pure modules
 MIN_SECONDS 0.4 · TAIL_SECONDS 0.30 · GATE_PEAK_RMS 0.002 ·
 LOW_CONFIDENCE 0.52 · FAST_ACCEPT_CONFIDENCE 0.70 ·
 PARAKEET_ROUTE_CONFIDENCE 0.84 · CHUNK_MIN_SECONDS 4.0 ·
-CHUNK_CUT_SILENCE 0.6 · LLM_CLEANUP_TIMEOUT (1, 4) s ·
+CHUNK_CUT_SILENCE 0.6 · WHOLE_TAKE_MAX_SECONDS 14.96 ·
+LLM_CLEANUP_TIMEOUT (1, 4) s ·
 CORRECTION_DELAY 10 s · VOICE_OUTBOX_MAX_ITEMS 20 · PHONE_PORT 8787.
 
 ## Related Concepts

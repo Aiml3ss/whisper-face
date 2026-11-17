@@ -383,6 +383,7 @@ from parrot_core import (  # noqa: E402
     parakeet_confidence_from_agreement,
     parakeet_result,
     should_escalate_uncertain,
+    words_settle_route,
     infer_revised_insertion,
     mode_from_modifiers,
     recognition_words_from_segments,
@@ -734,6 +735,16 @@ PERFORMANCE_TRACE_SCHEMAS = {
         "release_ms", "asr_ms", "compiler_ms",
         "cleanup_ms", "context_ms", "insertion_ms",
     ),
+    # One per pasted dictation (release_path_metrics). The first eight are
+    # contiguous stages from the key-up event to the paste keystroke and add
+    # up to release_to_paste_ms, the headline; receipt_ms follows the paste;
+    # the last four are measured inside or beside those stages.
+    "release_path": (
+        "dispatch_ms", "tail_ms", "stop_ms", "asr_ms", "order_ms",
+        "compile_ms", "cleanup_ms", "pre_paste_ms", "release_to_paste_ms",
+        "receipt_ms", "asr_native_ms", "crosscheck_ms", "escalation_ms",
+        "audio_ms",
+    ),
 }
 CONSEQUENCE_RISK_IDS = frozenset({
     "name", "number", "currency", "date", "time", "recipient", "contact",
@@ -956,6 +967,14 @@ CHUNK_MIN_SECONDS = 4.0      # never cut a segment shorter than this
 CHUNK_CUT_SILENCE = 0.6      # a pause this long marks a safe cut point
 SPECULATIVE_MIN_SECONDS = 0.8
 SPECULATIVE_SILENCE = 0.25   # likely end pause: decode before key release
+# On the Parakeet route a take this long or shorter is decoded whole: no
+# rolling chunk is cut, so release sends the whole take as one request (or
+# reuses a speculation of the whole take) and the text is exactly the
+# offline decode of the recording, with no joins. Parakeet's encoder reads
+# fixed 14.96 s windows (WindowLayout in native/ParrotSpeechRuntime), so a
+# whole take up to one window costs one encoder pass, the same as a
+# remainder. Longer takes still cut rolling chunks, once past this length.
+WHOLE_TAKE_MAX_SECONDS = 14.96
 CAPTURE_BLOCK_SECONDS = 8     # bound ndarray count during long dictations
 
 SNIPPETS_FILE = HERE / "snippets.json"
@@ -3281,7 +3300,7 @@ def hud_caption_text(caption: str) -> str:
 
 
 def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
-                 language=LANGUAGE_DEFAULT):
+                 language=LANGUAGE_DEFAULT, replace=False):
     try:
         result = fut.result()
         if isinstance(result, Recognition):
@@ -3298,7 +3317,8 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
     evidence = result if isinstance(result, Recognition) else None
     if t and not is_hallucination(t, language, evidence):
         current = CAPTION["text"]
-        if current == "Listening" or current.endswith(" mode"):
+        if (replace or current == "Listening"
+                or current.endswith(" mode")):
             current = ""
         CAPTION["text"] = join_recognized_parts((current, t), language)
         CAPTION["stable_prefix"] = True
@@ -5601,6 +5621,7 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
     language = normalize_language(
         current_language() if language is None else language)
     segment = np.concatenate(frames).flatten()
+    fast_started_at = time.perf_counter()
     fast = ASR_POOL.submit(
         transcribe_detailed,
         segment,
@@ -5612,6 +5633,7 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
         # working cross-check.
         language=language,
     ).result()
+    fast_s = time.perf_counter() - fast_started_at
     if still_valid is not None and not still_valid():
         return fast
     # On Mac, the warm Parakeet batch path is both more accurate and faster
@@ -5634,6 +5656,9 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
         crosscheck_text=fast.text or None, language=language).result()
     if fast.text and fast.text != accurate.text:
         accurate.alternative = fast.text
+    if getattr(accurate, "crosscheck_s", None) is None and fast.text:
+        # Tiny's pass above was this decode's cross-check.
+        accurate.crosscheck_s = fast_s
     return accurate
 
 
@@ -5753,6 +5778,17 @@ class Recorder:
         self.speculative_start = 0
         self.speculative_end = 0
         self.speculative_invalid = False
+        # The sample count at the end of the last block loud enough to count
+        # as speech.
+        self.voiced_until = 0
+        # No rolling chunk is cut until the take is longer than this many
+        # samples; 0 keeps the rolling plan from the first pause. Set per
+        # take by the hotkey worker (whole_take_limit_samples).
+        self.whole_take_samples = 0
+        # Held by the audio callback for each block and by stop() to end
+        # capture, so the take's last sample is exact the moment stop()
+        # returns, without waiting for the stream itself to stop.
+        self.capture_lock = threading.Lock()
 
     def start(self, press_at=None):
         self.frames = CapturedAudio()
@@ -5761,6 +5797,7 @@ class Recorder:
         self.total_samples = 0
         self.silent_samples = 0
         self.voiced_since_cut = False
+        self.voiced_until = 0
         self.speculative_future = None
         self.speculative_start = 0
         self.speculative_end = 0
@@ -5804,6 +5841,10 @@ class Recorder:
         self.source = "flight"
 
     def _callback(self, indata, frames, time_info, status):
+        with self.capture_lock:
+            self._capture_block(indata, status)
+
+    def _capture_block(self, indata, status):
         if not self.recording:
             return
         self.last_frame_at = time.perf_counter()
@@ -5828,6 +5869,7 @@ class Recorder:
         else:
             self.silent_samples = 0
             self.voiced_since_cut = True
+            self.voiced_until = self.total_samples
             if self.speculative_future is not None:
                 if self.speculative_future.cancel():
                     self.speculative_future = None
@@ -5856,7 +5898,14 @@ class Recorder:
                 lambda: not self.speculative_invalid,
                 self.language,
             )
+            if self.whole_take_samples and self.speculative_start == 0:
+                # No rolling chunk feeds the caption while the take is
+                # decoded whole, so a still-current decode of the whole take
+                # so far does, replacing what it showed.
+                self.speculative_future.add_done_callback(
+                    self._caption_whole_take)
         if (self.voiced_since_cut
+                and self.total_samples > self.whole_take_samples
                 and segment_samples >= CHUNK_MIN_SECONDS * SAMPLE_RATE
                 and self.silent_samples >= CHUNK_CUT_SILENCE * SAMPLE_RATE):
             if can_reuse_speculation(
@@ -5876,11 +5925,15 @@ class Recorder:
                 decode_end = self.total_samples
             # Only compiler-approved stable text reaches the HUD. Provisional
             # text is never typed into the focused application.
+            # A chunk from the start of the take replaces the caption, which
+            # can only hold "Listening" or a whole-take speculation of the
+            # same audio; a later chunk adds to it.
             decode_future.add_done_callback(
                 lambda done, terms=tuple(self.context_terms),
                 bundle=self.bundle_at_press, pack=self.context_pack,
-                language=self.language:
-                    _caption_add(done, terms, bundle, pack, language))
+                language=self.language, replace=decode_start == 0:
+                    _caption_add(done, terms, bundle, pack, language,
+                                 replace=replace))
             self.chunks.append(BoundedRecognitionFuture(
                 decode_future, decode_start, decode_end))
             self.speculative_future = None
@@ -5892,6 +5945,13 @@ class Recorder:
             # speech, so it opens the next segment rather than being skipped.
             self.cut_samples = decode_end
             self.voiced_since_cut = False
+
+    def _caption_whole_take(self, done):
+        if (self.recording and self.speculative_future is done
+                and not self.speculative_invalid):
+            _caption_add(done, tuple(self.context_terms),
+                         self.bundle_at_press, self.context_pack,
+                         self.language, replace=True)
 
     def snapshot(self) -> np.ndarray:
         """Audio so far, without stopping the stream."""
@@ -5907,14 +5967,26 @@ class Recorder:
             latest = max(latest, self.last_frame_at)
         return now - latest >= NO_AUDIO_SECONDS
 
-    def stop(self) -> np.ndarray:
+    def stop(self, *, wait_for_stream: bool = True) -> np.ndarray:
+        """End capture and return the take.
+
+        The take ends the moment this takes the capture lock: no block is
+        added after it. With ``wait_for_stream`` false the microphone
+        stream is stopped on AUDIO_STOP_POOL instead of here, because
+        stopping a PortAudio stream waits on the audio device and the take
+        is already complete without it.
+        """
         delivered_audio = not self.audio_stalled(time.perf_counter())
-        self.recording = False
+        with self.capture_lock:
+            self.recording = False
         if self.captured_via_flight:
             FLIGHT.detach(self, delivered_audio=delivered_audio)
         if self.slot is not None:
             slot, self.slot = self.slot, None
-            AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
+            if wait_for_stream:
+                AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
+            else:
+                release_stream_later(slot, delivered_audio)
         if self.audio_status:
             print(f"! audio callback status: {'; '.join(self.audio_status)}")
         audio = self.frames.array()
@@ -5927,6 +5999,42 @@ class Recorder:
         if self.captured_via_flight and self.source == "hold":
             FLIGHT.clear()                   # never let a hold paste twice
         return audio
+
+
+def whole_take_limit_samples(language: str) -> int:
+    """How long a take may run before rolling chunks are cut, in samples.
+
+    WHOLE_TAKE_MAX_SECONDS on the route _speculative_frames sends to
+    Parakeet (macOS, the model and its program present, a language it
+    decodes); 0, the rolling plan from the first pause, everywhere else.
+    """
+    try:
+        parakeet_route = (
+            IS_MACOS and PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
+            and normalize_language(language) in PARAKEET_LANGUAGES)
+    except Exception:
+        parakeet_route = False
+    return int(WHOLE_TAKE_MAX_SECONDS * SAMPLE_RATE) if parakeet_route else 0
+
+
+# One worker: streams stop one at a time and in release order, off the
+# path from key release to the paste.
+AUDIO_STOP_POOL = ThreadPoolExecutor(max_workers=1)
+
+
+def release_stream_later(slot, delivered_audio: bool = True):
+    """Stop a finished take's stream and return it to AUDIO_POOL, later.
+
+    The slot stays busy until then, so no take can start on it. A failed
+    stop marks the pool for recovery, as it does when stopped in place; the
+    finished take keeps its audio either way.
+    """
+    def release():
+        try:
+            AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
+        except Exception as error:
+            print(f"! microphone stop failed: {type(error).__name__}")
+    return AUDIO_STOP_POOL.submit(release)
 
 
 def stalled_take_action(rec, now: float) -> str | None:
@@ -9069,21 +9177,36 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     duration = len(audio) / SAMPLE_RATE
     helper_future = PARAKEET_IO_POOL.submit(PARAKEET.transcribe, audio)
     tiny_text = crosscheck_text
-    if (tiny_text is None and verify and PARAKEET_CROSSCHECK
-            and duration <= PARAKEET_CROSSCHECK_MAX_SECONDS
-            and asr_model_is_cached(FAST_WHISPER_REPO)):
+    crosscheck_s = None
+    wants_crosscheck = (
+        tiny_text is None and verify and PARAKEET_CROSSCHECK
+        and duration <= PARAKEET_CROSSCHECK_MAX_SECONDS
+        and asr_model_is_cached(FAST_WHISPER_REPO))
+
+    def run_crosscheck():
+        nonlocal crosscheck_s
+        started_at = time.perf_counter()
         try:
             # English explicitly, rather than whatever the preference says:
             # this decode exists only to cross-check Parakeet, which is
             # reached for English alone, and the comparison means nothing if
             # the two engines decode different languages.
-            tiny_text = transcribe_detailed(
+            return transcribe_detailed(
                 audio, prompt, verify=False,
                 model_repo=FAST_WHISPER_REPO, language="en",
                 _prepared=True).text
         except Exception as error:
             print(f"! Tiny cross-check unavailable: {error}")
-            tiny_text = None
+            return None
+        finally:
+            crosscheck_s = time.perf_counter() - started_at
+
+    # With word-confidence routing on, the runtime's own word scores decide
+    # whether the cross-check is needed before the paste, so the helper
+    # answers first. Off (the default), Tiny runs here while the helper
+    # request waits on the I/O pool, exactly as before.
+    if wants_crosscheck and not PARAKEET_WORD_CONFIDENCE_ROUTING:
+        tiny_text = run_crosscheck()
     parakeet = helper_future.result()
     if parakeet is None or not parakeet[0]:
         return None
@@ -9099,6 +9222,15 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         status = "native" if words else "misaligned"
     elif status == "native":
         status = "absent"
+    if wants_crosscheck and PARAKEET_WORD_CONFIDENCE_ROUTING:
+        if words_settle_route(words, status):
+            # Every word the runtime wrote is one it is sure of: the route
+            # confidence is the fixed prior PARROT_ASR_CROSSCHECK=off uses,
+            # the words carry the per-span evidence, and neither Tiny nor a
+            # Turbo escalation runs before the paste.
+            wants_crosscheck = False
+        else:
+            tiny_text = run_crosscheck()
     agreement = None
     confidence = PARAKEET_ROUTE_CONFIDENCE
     alternative = None
@@ -9117,6 +9249,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         native_processing_s=_clean_native_processing_s(parakeet[1]),
         acoustic_confidence=getattr(parakeet, "avg_confidence", None),
         word_evidence_status=status,
+        crosscheck_s=crosscheck_s,
     )
     # Escalation needs a third engine. asr_decode_target would quietly decode
     # with Tiny when Turbo is not installed, and Tiny is the engine that just
@@ -9132,6 +9265,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         # an optional upgrade: if the decode itself fails, the primary
         # transcript must survive rather than turn a working dictation into a
         # dropped one.
+        escalation_started_at = time.perf_counter()
         try:
             fallback = transcribe_detailed(
                 audio, prompt, verify=False, model_repo=WHISPER_REPO,
@@ -9139,6 +9273,9 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         except Exception as error:
             print(f"! Turbo escalation unavailable: {error}")
             return recognition
+        finally:
+            recognition.escalation_s = (
+                time.perf_counter() - escalation_started_at)
         if not fallback.text:
             return recognition
         with_parakeet = crosscheck_agreement(text, fallback.text)
@@ -9149,6 +9286,8 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
             # Turbo's transcript is delivered, never Tiny's.
             fallback.alternative = text
             fallback.verified = True
+            fallback.crosscheck_s = recognition.crosscheck_s
+            fallback.escalation_s = recognition.escalation_s
             return fallback
         if fallback.text != text:
             recognition.alternative = fallback.text
@@ -11016,8 +11155,19 @@ def commit_insertion(rec, text: str, bundle: str,
     # separator included, so it is published here rather than reconstructed
     # from the pre-join text a caller happens to still be holding.
     rec.committed_text = text
+    rec.paste_posted_at = None
+
+    def paste_and_mark(staged: str):
+        """Paste, and note when the keystroke was posted (the release-path
+        trace's headline ends here)."""
+        paste(staged)
+        try:
+            rec.paste_posted_at = time.perf_counter()
+        except Exception:
+            pass    # timing only: it never stands in the way of a paste
+
     if lease is None:
-        paste(text)
+        paste_and_mark(text)
         PIPELINE_STATE["last_insertion_state"] = "legacy"
         rec.insertion_receipt = None
         return None
@@ -11063,7 +11213,7 @@ def commit_insertion(rec, text: str, bundle: str,
             getattr(rec, "focus_at_press", None),
             getattr(rec, "bundle_at_press", bundle),
         ),
-        paste,
+        paste_and_mark,
         readback,
     )
     PIPELINE_STATE["last_insertion_state"] = receipt.state.value
@@ -13038,6 +13188,12 @@ WINDOWS_CLIPBOARD_EXCLUSIONS = (
 # clipboard comes back instead of the previous dictation.
 PASTE_RESTORE = {"lock": threading.Lock(), "timer": None, "saved": None,
                  "still_ours": None}
+# The wait between writing the clipboard and pressing paste. Inherited from
+# the first release with no measurement behind it, and the largest fixed
+# cost before the paste. It stays until the insertion matrix
+# (scripts/capture_app_matrix.py) shows that with 0 every app in it still
+# verifies every paste by readback, at least as often as with 0.05.
+PASTE_SETTLE_SECONDS = 0.05
 
 
 def write_private_pasteboard(pb, text: str) -> int:
@@ -13127,7 +13283,7 @@ def paste(text: str):
                 write_private_windows_clipboard(text)
             except Exception:
                 pyperclip.copy(text)
-            time.sleep(0.05)
+            time.sleep(PASTE_SETTLE_SECONDS)
             with kb.pressed(keyboard.Key.ctrl):
                 kb.press("v")
                 kb.release("v")
@@ -13141,7 +13297,7 @@ def paste(text: str):
 
         saved = _begin_paste_burst(lambda: snapshot_pasteboard(pb))
         our_change = write_private_pasteboard(pb, text)
-        time.sleep(0.05)
+        time.sleep(PASTE_SETTLE_SECONDS)
         with kb.pressed(keyboard.Key.cmd):
             kb.press("v")
             kb.release("v")
@@ -13511,6 +13667,14 @@ def assemble_raw(chunk_futs: list, pre_future,
                 acoustic_confidences.append(acoustic)
             if result.engine:
                 engines.append(result.engine)
+            for seconds, times in (
+                    (getattr(result, "crosscheck_s", None), crosscheck_times),
+                    (getattr(result, "escalation_s", None),
+                     escalation_times)):
+                if (isinstance(seconds, (int, float))
+                        and not isinstance(seconds, bool)
+                        and math.isfinite(seconds) and seconds >= 0.0):
+                    times.append(float(seconds))
             verifications.append(result.verified)
             if result.alternative:
                 alternatives.append(result.alternative)
@@ -13525,6 +13689,7 @@ def assemble_raw(chunk_futs: list, pre_future,
     timing_reliable = not bool(chunk_futs)
     native_processing_times = []
     native_processing_complete = True
+    crosscheck_times, escalation_times = [], []
     for f in chunk_futs:
         harvest(f, parts, confidences, alternatives)
     if pre_future is not None:
@@ -13561,76 +13726,190 @@ def assemble_raw(chunk_futs: list, pre_future,
         acoustic_confidence=(
             min(acoustic_confidences) if acoustic_confidences else None),
         word_evidence_status=combine_word_evidence_status(evidence_statuses),
+        crosscheck_s=sum(crosscheck_times) if crosscheck_times else None,
+        escalation_s=sum(escalation_times) if escalation_times else None,
     )
+
+
+def release_path_metrics(marks, recognition, audio_seconds) -> dict | None:
+    """Milliseconds per release-path stage, from monotonic marks.
+
+    ``marks`` are perf_counter readings, in order: key-up event, dispatch
+    to the finishing thread, tail quiet, capture stopped, recognition
+    joined, release order reached, compiled (with the risk and context
+    checks), text ready, paste keystroke posted, receipt settled. Each
+    stage is the gap between two neighbouring marks, so the eight stages
+    up to the paste add up to ``release_to_paste_ms`` and nothing between
+    release and paste goes untimed. Returns None when a mark is missing,
+    not a finite number, or out of order: a dictation with no paste has no
+    release-to-paste time, and none is made up.
+    """
+    try:
+        values = [float(mark) for mark in marks]
+    except (TypeError, ValueError):
+        return None
+    if (len(values) != 10 or not all(math.isfinite(v) for v in values)
+            or any(later < earlier
+                   for earlier, later in zip(values, values[1:]))):
+        return None
+
+    def ms(seconds) -> float:
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(seconds) or seconds < 0.0:
+            return 0.0
+        return round(seconds * 1000.0, 3)
+
+    gaps = [later - earlier for earlier, later in zip(values, values[1:])]
+    metrics = dict(zip(
+        ("dispatch_ms", "tail_ms", "stop_ms", "asr_ms", "order_ms",
+         "compile_ms", "cleanup_ms", "pre_paste_ms"),
+        (ms(gap) for gap in gaps[:8])))
+    metrics["release_to_paste_ms"] = ms(values[8] - values[0])
+    metrics["receipt_ms"] = ms(gaps[8])
+    # Zero when the stage did not run: no Parakeet program answered, no
+    # cross-check, no escalation.
+    metrics["asr_native_ms"] = ms(
+        getattr(recognition, "native_processing_s", None))
+    metrics["crosscheck_ms"] = ms(getattr(recognition, "crosscheck_s", None))
+    metrics["escalation_ms"] = ms(getattr(recognition, "escalation_s", None))
+    metrics["audio_ms"] = ms(audio_seconds)
+    return metrics
+
+
+def release_tail_is_silent(rec, audio: np.ndarray, end_sample: int) -> bool:
+    """Whether nothing after ``end_sample`` counts as speech.
+
+    The rule that already decides whether a speculation may stand for the
+    rest of the take (Recorder._callback and Recorder.stop): no block after
+    it was loud enough for the rolling threshold, and no 100 ms of it
+    reaches the speech gate.
+    """
+    return (int(getattr(rec, "voiced_until", 0) or 0) <= end_sample
+            and peak_rms(audio[end_sample:]) < GATE_PEAK_RMS)
+
+
+def capture_release(rec):
+    """End the take at key release and choose what decodes its last part.
+
+    Returns ``(audio, cut, chunks, remainder_future, tail_done_at)``.
+
+    If speech had already ended, capture stops at once. If it was still
+    going, the microphone keeps running until the tail goes quiet
+    (wait_for_tail_silence). When the take already ends in at least half
+    of that quiet, the audio heard by the release starts decoding at once,
+    beside the tail, and the decode stands only when the tail adds nothing
+    that counts as speech, under the same rule as a speculation
+    (release_tail_is_silent). Otherwise it is dropped and the whole
+    remainder is decoded after the tail, as before. Either way the
+    microphone stream is stopped off this path.
+
+    The early decode differs from the old one only by the quiet tail it
+    does not include, the difference a reused speculation already accepts;
+    requiring some quiet at the end of what it decodes keeps a word that
+    stops exactly at the key-up from being decoded without any.
+    """
+    early = None
+    if release_should_wait_for_tail(rec):
+        with rec.capture_lock:
+            early_cut = rec.cut_samples
+            early_end = rec.total_samples
+            quiet_samples = rec.silent_samples
+            speculating = (rec.speculative_future is not None
+                           and not rec.speculative_invalid)
+        early_audio = rec.snapshot()[early_cut:early_end]
+        # A speculation still standing at release is reused after the tail
+        # exactly as before, so nothing new is decoded for it.
+        if (not speculating
+                and 2 * quiet_samples >= (
+                    calibrated_end_silence_seconds() * SAMPLE_RATE)
+                and len(early_audio) / SAMPLE_RATE >= 0.25
+                and peak_rms(early_audio) >= GATE_PEAK_RMS):
+            early = BoundedRecognitionFuture(
+                ASR_POOL.submit(
+                    transcribe_detailed, early_audio, rec.prompt,
+                    language=rec.language),
+                early_cut,
+                early_end,
+            )
+        wait_for_tail_silence(rec)
+        tail_done_at = time.perf_counter()
+        full_audio = rec.stop(wait_for_stream=False)
+        cut = rec.cut_samples
+        chunk_futs = list(rec.chunks)
+        if (early is not None and early.start_sample == cut
+                and release_tail_is_silent(rec, full_audio,
+                                           early.end_sample)):
+            return full_audio, cut, chunk_futs, early, tail_done_at
+        if early is not None:
+            early.future.cancel()
+        if can_reuse_speculation(
+                rec.speculative_future is not None,
+                rec.speculative_invalid,
+                rec.speculative_start,
+                cut):
+            return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+                rec.speculative_future,
+                rec.speculative_start,
+                rec.speculative_end,
+            ), tail_done_at
+        rem = full_audio[cut:]
+        if (len(rem) / SAMPLE_RATE >= 0.25
+                and peak_rms(rem) >= GATE_PEAK_RMS):
+            return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+                ASR_POOL.submit(
+                    transcribe_detailed, rem, rec.prompt,
+                    language=rec.language),
+                cut,
+                cut + len(rem),
+            ), tail_done_at
+        return full_audio, cut, chunk_futs, None, tail_done_at
+    # Speech already ended. Quiesce the callback before reading the
+    # chunk/cut plan so one final callback cannot add an overlapping
+    # rolling chunk after the remainder boundary was captured.
+    tail_done_at = time.perf_counter()
+    full_audio = rec.stop(wait_for_stream=False)
+    cut = rec.cut_samples
+    chunk_futs = list(rec.chunks)
+    rem = full_audio[cut:]
+    if can_reuse_speculation(
+            rec.speculative_future is not None,
+            rec.speculative_invalid,
+            rec.speculative_start,
+            cut):
+        return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+            rec.speculative_future,
+            rec.speculative_start,
+            rec.speculative_end,
+        ), tail_done_at
+    if (len(rem) / SAMPLE_RATE >= (
+            MIN_SECONDS if not chunk_futs else 0.25)
+            and peak_rms(rem) >= GATE_PEAK_RMS):
+        return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+            ASR_POOL.submit(
+                transcribe_detailed, rem, rec.prompt,
+                language=rec.language),
+            cut,
+            cut + len(rem),
+        ), tail_done_at
+    return full_audio, cut, chunk_futs, None, tail_done_at
 
 
 def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     """Runs at key release: chunks cut during the hold are already decoding;
-    kick off the remainder in parallel with the tail capture, then join."""
+    the last part decodes while the tail is captured (capture_release), then
+    everything is joined, compiled, cleaned and pasted. Each stage's end is
+    marked on the monotonic clock for the release-path trace."""
     global LAST_INSERTION
     released_at = rec.released_at or time.perf_counter()
+    dispatched_at = time.perf_counter()
     phase = "capture-finalize"
     delivery_reported = False
     try:
-        wait_for_tail = release_should_wait_for_tail(rec)
-        pre_future = None
-        if wait_for_tail:
-            # Do not start a decode that would be discarded if the tail adds
-            # speech. Capture first, then decode the expanded remainder once.
-            wait_for_tail_silence(rec)
-            full_audio = rec.stop()
-            cut = rec.cut_samples
-            chunk_futs = list(rec.chunks)
-            if can_reuse_speculation(
-                    rec.speculative_future is not None,
-                    rec.speculative_invalid,
-                    rec.speculative_start,
-                    cut):
-                pre_future = BoundedRecognitionFuture(
-                    rec.speculative_future,
-                    rec.speculative_start,
-                    rec.speculative_end,
-                )
-            else:
-                rem = full_audio[cut:]
-                if (len(rem) / SAMPLE_RATE >= 0.25
-                        and peak_rms(rem) >= GATE_PEAK_RMS):
-                    pre_future = BoundedRecognitionFuture(
-                        ASR_POOL.submit(
-                            transcribe_detailed, rem, rec.prompt,
-                            language=rec.language),
-                        cut,
-                        cut + len(rem),
-                    )
-        else:
-            # Speech already ended. Quiesce the callback before reading the
-            # chunk/cut plan so one final callback cannot add an overlapping
-            # rolling chunk after the remainder boundary was captured.
-            full_audio = rec.stop()
-            cut = rec.cut_samples
-            chunk_futs = list(rec.chunks)
-            rem = full_audio[cut:]
-            if can_reuse_speculation(
-                    rec.speculative_future is not None,
-                    rec.speculative_invalid,
-                    rec.speculative_start,
-                    cut):
-                pre_future = BoundedRecognitionFuture(
-                    rec.speculative_future,
-                    rec.speculative_start,
-                    rec.speculative_end,
-                )
-            else:
-                if (len(rem) / SAMPLE_RATE >= (
-                        MIN_SECONDS if not chunk_futs else 0.25)
-                        and peak_rms(rem) >= GATE_PEAK_RMS):
-                    pre_future = BoundedRecognitionFuture(
-                        ASR_POOL.submit(
-                            transcribe_detailed, rem, rec.prompt,
-                            language=rec.language),
-                        cut,
-                        cut + len(rem),
-                    )
+        full_audio, cut, chunk_futs, pre_future, tail_done_at = \
+            capture_release(rec)
         capture_done_at = time.perf_counter()
 
         duration, peak = audio_gate_measurements(full_audio)
@@ -13658,12 +13937,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         recognition = assemble_raw(
             chunk_futs, pre_future, full_audio[cut:], rec.prompt,
             rec.language)
-        t_asr = time.perf_counter() - asr_started_at
+        recognized_at = time.perf_counter()
+        t_asr = recognized_at - asr_started_at
         # A later take may finish ASR first, but user-visible cleanup, commands,
         # and insertion must follow release order. Capture is already stopped,
         # so waiting here never holds the microphone.
         phase = "release-order"
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
+        ordered_at = time.perf_counter()
         raw = recognition.text
         if not raw or is_hallucination(raw, rec.language, recognition):
             report_dictation_problem(
@@ -13743,6 +14024,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         # cannot replace this active result or affect downstream routing.
         t_context_firewall = runtime_context_firewall_evidence(
             voice_ir, compiler_result)
+        compiled_at = time.perf_counter()
         raw = compiler_result.text
         alternatives = []
         if recognition.alternative:
@@ -14064,6 +14346,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             )
             return
 
+        text_ready_at = time.perf_counter()
         learn_correction = not verbatim and rec.mode != "edit"
         if rec.insertion_lease is not None:
             insertion_target = resolve_insertion_target(rec)
@@ -14074,7 +14357,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
-        t_insert = time.perf_counter() - insertion_started_at
+        receipt_at = time.perf_counter()
+        t_insert = receipt_at - insertion_started_at
         receipt = committed_paste_receipt(
             rec, insertion_target, text, bundle, rec.mode, event_id) \
             if learn_correction else None
@@ -14274,6 +14558,19 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 })
         except Exception:
             pass
+        # The release path, stage by stage, from the key-up event to the
+        # paste keystroke. Contiguous stages that add up to the headline,
+        # release_to_paste_ms; None when no paste was sent.
+        release_path = release_path_metrics(
+            (released_at, dispatched_at, tail_done_at, capture_done_at,
+             recognized_at, ordered_at, compiled_at, text_ready_at,
+             getattr(rec, "paste_posted_at", None), receipt_at),
+            recognition, duration)
+        if release_path is not None:
+            try:
+                emit_performance_trace("release_path", release_path)
+            except Exception:
+                pass
         append_transcript(recognized_raw, text, bundle, path, metrics={
             "release_s": round(release_total, 4),
             "press_s": round(press_total, 4),
@@ -14288,6 +14585,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "context_firewall_s": round(t_context_firewall, 4),
             "cleanup_s": round(t_clean, 4),
             "insertion_s": round(t_insert, 4),
+            # Milliseconds per release-path stage (RELEASE_PATH_STAGES);
+            # None when no paste was sent.
+            "release_path_ms": release_path,
             "asr_engine": recognition.engine or "unknown",
             "confidence": round(compiler_result.confidence, 4),
             # Second-pass ASR agreement, never insertion. Insertion truth is
@@ -15327,6 +15627,8 @@ def main():
                         rec.language = current_language()
                         active["rec"] = rec
                         rec.start(event_at)
+                        rec.whole_take_samples = whole_take_limit_samples(
+                            rec.language)
                         rec.bundle_at_press = frontmost_bundle()
                         if IS_MACOS:
                             rec.input_signature_at_press = user_input_signature()

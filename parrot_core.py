@@ -256,6 +256,11 @@ class Recognition:
     acoustic_confidence: float | None = None
     # One of WORD_EVIDENCE_STATUSES: what became of the helper's words.
     word_evidence_status: str = "absent"
+    # Wall seconds spent on the Whisper Tiny cross-check and on the Turbo
+    # escalation for this decode; None when neither ran. Timings only: they
+    # let the release-path trace say where recognition time went.
+    crosscheck_s: float | None = None
+    escalation_s: float | None = None
 
 
 # --- word evidence from the Parakeet helper (protocol 2) ---------------------
@@ -1520,6 +1525,27 @@ def parakeet_confidence_from_agreement(agreement: float) -> float:
     agreement = min(1.0, max(0.0, float(agreement)))
     return PARAKEET_AGREEMENT_FLOOR + (
         PARAKEET_AGREEMENT_CEILING - PARAKEET_AGREEMENT_FLOOR) * agreement
+
+
+# A word the recognizer scored at least this sure of needs no review flag
+# (voice_compiler's "word-confidence" uncertainty starts below it).
+CONFIDENT_WORD = 0.78
+
+
+def words_settle_route(words, status: str) -> bool:
+    """Whether the helper's own word scores make a cross-check unnecessary.
+
+    Only native word evidence counts, and only when there is some and every
+    word is at or above CONFIDENT_WORD. Anything else (no words, words that
+    did not line up with the text, one unsure word) leaves the decision to
+    the cross-check, as before.
+    """
+    if status != "native" or not words:
+        return False
+    try:
+        return all(float(word.confidence) >= CONFIDENT_WORD for word in words)
+    except (TypeError, ValueError):
+        return False
 
 
 def should_escalate_uncertain(agreement: float, duration_s: float) -> bool:

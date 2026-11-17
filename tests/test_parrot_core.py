@@ -36,6 +36,8 @@ from parrot_core import (  # noqa: E402
     hypothesis_agreement,
     parakeet_confidence_from_agreement,
     should_escalate_uncertain,
+    words_settle_route,
+    CONFIDENT_WORD,
     normalize_spacing,
     confidence_from_segments,
     recognition_words_from_segments,
@@ -1272,6 +1274,24 @@ class AgreementConfidenceTests(unittest.TestCase):
         self.assertFalse(should_escalate_uncertain(0.5, 5.0))
         self.assertFalse(should_escalate_uncertain(0.2, 30.0))
         self.assertFalse(should_escalate_uncertain(0.2, 0.0))
+    def test_only_native_words_all_at_the_floor_settle_the_route(self):
+        sure = (RecognitionWord("ship", 0, 0.2, 0.99),
+                RecognitionWord("it", 0.2, 0.4, CONFIDENT_WORD))
+        unsure = sure + (RecognitionWord("now", 0.4, 0.6, 0.77),)
+        self.assertTrue(words_settle_route(sure, "native"))
+        self.assertFalse(words_settle_route(unsure, "native"))
+        self.assertFalse(words_settle_route((), "native"))
+        for status in ("misaligned", "rejected", "v1-helper", "absent"):
+            self.assertFalse(words_settle_route(sure, status))
+        self.assertFalse(words_settle_route(
+            (RecognitionWord("x", 0, 0.1, None),), "native"))
+
+    def test_the_floor_is_the_compilers_word_confidence_line(self):
+        source = (ROOT / "voice_compiler.py").read_text(encoding="utf-8")
+        self.assertIn("< CONFIDENT_WORD:", source)
+        self.assertNotIn("< 0.78", source)
+
+
 class NonEnglishCleanupTests(unittest.TestCase):
     """Every rule in compile_cleanup is English by construction."""
 

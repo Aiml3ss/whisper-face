@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
 from parrot_core import (
+    CONFIDENT_WORD,
     HELPER_WORD_SOURCE,
     RecognitionWord,
     find_self_correction,
@@ -1123,7 +1124,7 @@ def build_consequence_plan(
             uncertainty.append("word-evidence-unavailable")
         elif not voice.trust_word_confidence:
             uncertainty.append("word-confidence-uncalibrated")
-        elif min(word.confidence for word in evidence) < 0.78:
+        elif min(word.confidence for word in evidence) < CONFIDENT_WORD:
             uncertainty.append("word-confidence")
         if any(_change_affects_span(
                 change, (char_start, char_end)) for change in disagreements):

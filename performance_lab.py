@@ -165,7 +165,39 @@ RUNTIME_TRACE_SCHEMAS = {
         "release_ms", "asr_ms", "compiler_ms",
         "cleanup_ms", "context_ms", "insertion_ms",
     ),
+    # One per pasted dictation (release_path_metrics). The first eight are
+    # contiguous stages from the key-up event to the paste keystroke and add
+    # up to release_to_paste_ms, the headline; receipt_ms follows the paste;
+    # the last four are measured inside or beside those stages.
+    "release_path": (
+        "dispatch_ms", "tail_ms", "stop_ms", "asr_ms", "order_ms",
+        "compile_ms", "cleanup_ms", "pre_paste_ms", "release_to_paste_ms",
+        "receipt_ms", "asr_native_ms", "crosscheck_ms", "escalation_ms",
+        "audio_ms",
+    ),
 }
+# The release_path stages that run back to back from key release to the
+# paste keystroke; their sum is release_to_paste_ms.
+RELEASE_PATH_STAGES = (
+    "dispatch_ms", "tail_ms", "stop_ms", "asr_ms", "order_ms",
+    "compile_ms", "cleanup_ms", "pre_paste_ms",
+)
+# What the per-dictation record held before release_path_ms existed, as
+# (report label, metric keys summed). release_s ran from key release to the
+# end of insertion, readback included; "unattributed" is what no stage held.
+LEGACY_RELEASE_STAGES = (
+    ("tail+stop", ("tail_s",)),
+    ("asr", ("asr_s",)),
+    ("compile", ("compiler_s", "consequence_s", "context_firewall_s")),
+    ("cleanup", ("cleanup_s",)),
+    ("insertion", ("insertion_s",)),
+)
+# Take-length bands for the headline: within one Parakeet window, and past.
+TAKE_LENGTH_BANDS = (
+    ("up to 5 s", 0.0, 5_000.0),
+    ("5 to 15 s", 5_000.0, 15_000.0),
+    ("over 15 s", 15_000.0, math.inf),
+)
 STARTUP_TRACE_EVENTS = (
     "warmup_audio_pool",
     "warmup_asr_tiny",
@@ -592,6 +624,185 @@ def summarize_warm_path(path: Path) -> dict[str, Any]:
             aggregate["records"] - warm_path_records,
         "latency_ms": latency_ms,
     }
+
+
+def _release_path_from_record(value: Any) -> dict[str, float] | None:
+    """The release_path_ms object of one per-dictation record, or None.
+
+    Only the closed set of numeric fields is read; nothing else in the
+    record (its text, app, or other metrics) is looked at.
+    """
+    if not isinstance(value, dict):
+        return None
+    metrics = value.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    stages = metrics.get("release_path_ms")
+    if not isinstance(stages, dict):
+        return None
+    fields = RUNTIME_TRACE_SCHEMAS["release_path"]
+    numbers = {field: _number(stages.get(field)) for field in fields}
+    if any(number is None for number in numbers.values()):
+        return None
+    return numbers
+
+
+def _legacy_release_from_record(value: Any) -> dict[str, float] | None:
+    """Seconds-based timings of a record written before release_path_ms."""
+    if not isinstance(value, dict):
+        return None
+    metrics = value.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    release = _number(metrics.get("release_s"))
+    if release is None:
+        return None
+    row = {"release": release * 1000.0}
+    attributed = 0.0
+    for label, keys in LEGACY_RELEASE_STAGES:
+        total = 0.0
+        for key in keys:
+            number = _number(metrics.get(key))
+            if number is None:
+                return None
+            total += number * 1000.0
+        row[label] = total
+        attributed += total
+    row["unattributed"] = max(0.0, row["release"] - attributed)
+    return row
+
+
+def summarize_release_path(path: Path) -> dict[str, Any]:
+    """Per-stage release-path percentiles from a record or a runtime log.
+
+    Reads the per-dictation record (``transcripts.jsonl``) and/or runtime
+    log lines carrying ``release_path`` traces. Only numeric timing fields
+    are read and only aggregates are returned: no text, application, path
+    or identifier can reach the report. Records written before
+    release_path_ms existed are summarised separately from their older
+    timing fields, with what no stage accounted for shown as unattributed.
+    """
+    rows: list[dict[str, float]] = []
+    legacy: list[dict[str, float]] = []
+    rejected = 0
+    ignored = 0
+    with path.open(encoding="utf-8", errors="replace") as source:
+        for raw_line in source:
+            line = raw_line.rstrip("\r\n")
+            if not line:
+                continue
+            if len(line) > 1_000_000:
+                ignored += 1
+                continue
+            if line.startswith(RUNTIME_TRACE_PREFIX):
+                try:
+                    value = json.loads(line[len(RUNTIME_TRACE_PREFIX):])
+                except json.JSONDecodeError:
+                    rejected += 1
+                    continue
+                validated, _reason = _validate_runtime_trace(value)
+                if validated is None:
+                    rejected += 1
+                elif validated[0] == "release_path":
+                    rows.append(validated[1])
+                else:
+                    ignored += 1
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                ignored += 1
+                continue
+            row = _release_path_from_record(value)
+            if row is not None:
+                rows.append(row)
+                continue
+            old = _legacy_release_from_record(value)
+            if old is not None:
+                legacy.append(old)
+            else:
+                ignored += 1
+
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "privacy": "numeric-aggregates-only",
+        "records": len(rows),
+        "legacy_records": len(legacy),
+        "rejected_records": rejected,
+        "ignored_lines": ignored,
+        "release_path_ms": {},
+        "coverage": None,
+        "by_take_length": {},
+        "legacy_ms": {},
+    }
+    if rows:
+        for field in RUNTIME_TRACE_SCHEMAS["release_path"]:
+            report["release_path_ms"][field] = _distribution(
+                [row[field] for row in rows])
+        # What share of the headline the contiguous stages hold, per
+        # dictation; 1.0 means nothing between release and paste was untimed.
+        shares = [
+            sum(row[stage] for stage in RELEASE_PATH_STAGES)
+            / row["release_to_paste_ms"]
+            for row in rows if row["release_to_paste_ms"] > 0.0]
+        if shares:
+            report["coverage"] = {
+                "p50": round(_percentile(shares, 0.50), 4),
+                "min": round(min(shares), 4),
+            }
+        for label, low, high in TAKE_LENGTH_BANDS:
+            band = [row["release_to_paste_ms"] for row in rows
+                    if low < row["audio_ms"] <= high
+                    or (low == 0.0 and row["audio_ms"] == 0.0)]
+            if band:
+                report["by_take_length"][label] = _distribution(band)
+    if legacy:
+        for label in ("release", *(name for name, _ in LEGACY_RELEASE_STAGES),
+                      "unattributed"):
+            report["legacy_ms"][label] = _distribution(
+                [row[label] for row in legacy])
+    return report
+
+
+def render_release_path(report: dict[str, Any]) -> str:
+    lines = [
+        "RELEASE PATH · key release to paste keystroke",
+        f"records: {report['records']} with stage marks, "
+        f"{report['legacy_records']} older; rejected traces: "
+        f"{report['rejected_records']}; other lines ignored: "
+        f"{report['ignored_lines']}",
+    ]
+    if report["release_path_ms"]:
+        lines.append("stage                  p50 ms   p95 ms   max ms")
+        for field in (*RELEASE_PATH_STAGES, "release_to_paste_ms",
+                      "receipt_ms", "asr_native_ms", "crosscheck_ms",
+                      "escalation_ms", "audio_ms"):
+            stage = report["release_path_ms"][field]
+            marker = "=" if field == "release_to_paste_ms" else " "
+            lines.append(
+                f"{marker}{field.removesuffix('_ms'):<20} "
+                f"{stage['p50']:>8.1f} {stage['p95']:>8.1f} "
+                f"{stage['max']:>8.1f}")
+        if report["coverage"] is not None:
+            lines.append(
+                "stages account for "
+                f"{report['coverage']['p50']:.1%} of release-to-paste at "
+                f"the median (lowest {report['coverage']['min']:.1%})")
+        for label, band in report["by_take_length"].items():
+            lines.append(
+                f"release-to-paste, takes {label}: p50 {band['p50']:.1f} ms"
+                f" · p95 {band['p95']:.1f} ms · n={band['samples']}")
+    if report["legacy_ms"]:
+        lines.append(
+            "older records (release to end of insertion, readback included):")
+        lines.append("stage                  p50 ms   p95 ms   max ms")
+        for label, stage in report["legacy_ms"].items():
+            lines.append(
+                f" {label:<20} {stage['p50']:>8.1f} {stage['p95']:>8.1f} "
+                f"{stage['max']:>8.1f}")
+    if not report["release_path_ms"] and not report["legacy_ms"]:
+        lines.append("no release timings found")
+    return "\n".join(lines)
 
 
 def load_budgets(path: Path = DEFAULT_BUDGETS) -> dict[str, Any]:
@@ -1804,6 +2015,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     warm_path.add_argument(
         "--format", choices=("table", "json"), default="table")
 
+    release_path = commands.add_parser(
+        "release-path",
+        help="per-stage release-to-paste latency from the dictation record "
+             "(transcripts.jsonl) or a runtime log; timings only")
+    release_path.add_argument("--record", type=Path, required=True)
+    release_path.add_argument(
+        "--format", choices=("table", "json"), default="table")
+
     lifecycle = commands.add_parser(
         "lifecycle", help="run deterministic lifecycle adapter simulation")
     lifecycle.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -1910,6 +2129,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload["records"] == 0
                 or payload["rejected_records"] > 0
                 or ("budget" in payload and not payload["budget"]["passed"]))
+        elif args.command == "release-path":
+            payload = summarize_release_path(args.record)
+            rendered = render_release_path(payload)
+            status = int(
+                payload["records"] == 0 and payload["legacy_records"] == 0)
         elif args.command == "lifecycle":
             payload = run_lifecycle_simulation(
                 load_corpus(args.corpus), iterations=args.iterations)
@@ -2014,7 +2238,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             except OSError:
                 pass
         detail = "runtime trace input unavailable" \
-            if args.command in {"traces", "startup", "warm-path"} else str(exc)
+            if args.command in {"traces", "startup", "warm-path",
+                                "release-path"} else str(exc)
         print(f"performance lab configuration error: {detail}", file=sys.stderr)
         return 2
     print(json.dumps(payload, indent=2, sort_keys=True)
