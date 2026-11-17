@@ -1722,6 +1722,7 @@ class InstallerContractTests(unittest.TestCase):
         for name in ("use_app_uv", "app_mode_dry_run", "resolve_app_mode"):
             self.assertNotIn("python3", shell_function(name))
 
+    @needs_bash
     def test_app_mode_announces_the_phases_the_setup_window_lists(self):
         import importlib.util
         specification = importlib.util.spec_from_file_location(
