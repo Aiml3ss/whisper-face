@@ -2533,6 +2533,17 @@ def voice_outbox_menu_title(count, needs_home=None) -> str:
     return f"Voice Outbox — {count} recoverable"
 
 
+SAID_MENU_TITLE = "Replace with What You Said"
+
+
+def said_menu_title(status) -> str:
+    """Name the raw-words row; say why when there is nothing to put back."""
+    if (isinstance(status, dict) and status.get("available")
+            and not status.get("said_available")):
+        return f"{SAID_MENU_TITLE} — clean-up changed nothing"
+    return SAID_MENU_TITLE
+
+
 def undo_menu_title(status, hotkey_label: str = "") -> str:
     """Name the undo row from bounded state; never from the dictated text."""
     if not isinstance(status, dict) or not status.get("available"):
@@ -3973,6 +3984,12 @@ class StatusBar(NSObject):
         # title carries a length and an app — never any dictated text.
         self.undo_item = mk("Undo Last Dictation", "undoLastDictation:")
         self.undo_item.setHidden_(True)
+        # Beside Undo and only with it: the raw transcript put back where
+        # the cleaned text stands. Dimmed, saying why, when clean-up
+        # changed nothing.
+        self.said_item = mk(
+            SAID_MENU_TITLE, "replaceWithWhatYouSaid:")
+        self.said_item.setHidden_(True)
         # Recent dictations are off by default and stay metadata-only until
         # an explicit reveal, exactly like the Voice Inbox.
         self.recent_root = mk("Recent Dictations", None)
@@ -4011,6 +4028,7 @@ class StatusBar(NSObject):
         menu.addItem_(self.faces_root)
         menu.addItem_(self.recognition_item)
         menu.addItem_(self.undo_item)
+        menu.addItem_(self.said_item)
         menu.addItem_(self.recent_root)
         menu.addItem_(self.voice_outbox_item)
         menu.addItem_(self.voice_inbox_item)
@@ -4169,10 +4187,27 @@ class StatusBar(NSObject):
         self.undo_item.setTitle_(undo_menu_title(
             status, hotkey_label_for(UNDO_HOTKEY_NAME)))
         self.undo_item.setEnabled_(bool(status["available"]))
+        self.said_item.setHidden_(not status["available"])
+        self.said_item.setTitle_(said_menu_title(status))
+        self.said_item.setEnabled_(bool(status.get("said_available")))
 
     def undoLastDictation_(self, sender):
         """Run the undo transaction off the main thread; it synthesizes keys."""
         threading.Thread(target=undo_last_dictation, daemon=True).start()
+
+    def replaceWithWhatYouSaid_(self, sender):
+        """Put the raw words back, off the main thread like Undo; a refusal
+        comes back to the main thread to be said."""
+        threading.Thread(
+            target=replace_with_what_you_said,
+            args=(self.show_said_refusal,), daemon=True).start()
+
+    def show_said_refusal(self, detail):
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(SAID_MENU_TITLE)
+        alert.setInformativeText_(str(detail))
+        alert.addButtonWithTitle_("OK")
+        alert.runModal()
 
     def rebuild_recent_dictations(self):
         """Rebuild the metadata-only recent list from the log on disk.
@@ -11384,6 +11419,11 @@ class UndoableInsertion:
     inserted: str
     before: str
     selection: tuple[int, int]
+    # What was said, as the recogniser heard it and before any clean-up,
+    # with the inserted text's joining whitespace. Empty when there is no
+    # other form to offer: a mode whose words were an instruction, or a
+    # clean-up that changed nothing.
+    said: str = ""
 
     @property
     def replaced(self) -> str:
@@ -11430,16 +11470,24 @@ UNDO_COORDINATOR = InsertionCoordinator()
 
 def build_undoable_insertion(rec, snapshot: "FocusSnapshot | None",
                              bundle: str,
-                             utterance_id: str) -> "UndoableInsertion | None":
+                             utterance_id: str,
+                             said: str = "") -> "UndoableInsertion | None":
     """Describe an undoable insertion, or None when nothing can be restored.
 
     A destination whose text or selection Accessibility would not report has
     no recorded prior state, so there is nothing honest to put back and undo
-    stays unavailable rather than guessing.
+    stays unavailable rather than guessing. ``said`` is the raw transcript,
+    offered back by "Replace with What You Said" when it differs from what
+    was inserted; it takes the inserted text's leading join whitespace.
     """
     inserted = getattr(rec, "committed_text", None)
     if not isinstance(inserted, str) or not inserted:
         return None
+    spoken = said.strip() if isinstance(said, str) else ""
+    if spoken:
+        spoken = inserted[:len(inserted) - len(inserted.lstrip())] + spoken
+    if spoken == inserted:
+        spoken = ""
     if snapshot is None or snapshot.text is None or snapshot.selection is None:
         return None
     start, length = snapshot.selection
@@ -11456,6 +11504,7 @@ def build_undoable_insertion(rec, snapshot: "FocusSnapshot | None",
         inserted=inserted,
         before=snapshot.text,
         selection=(int(start), int(length)),
+        said=spoken,
     )
 
 
@@ -11470,11 +11519,14 @@ def undoable_insertion_status() -> dict:
     with UNDOABLE_INSERTION["lock"]:
         record = UNDOABLE_INSERTION["record"]
     if record is None:
-        return {"available": False, "characters": 0, "app": ""}
+        return {"available": False, "characters": 0, "app": "",
+                "said_available": False}
     return {
         "available": True,
         "characters": len(record.inserted),
         "app": app_display_name(record.bundle) if record.bundle else "",
+        # Whether "Replace with What You Said" has anything to put back.
+        "said_available": bool(record.said),
     }
 
 
@@ -11497,6 +11549,47 @@ def utterance_was_undone(utterance_id: str) -> bool:
 def undo_refusal(reason: str) -> dict:
     """One shape for every refusal: a state and a reason, never any text."""
     return {"undone": False, "reason": reason}
+
+
+# Why "Replace with What You Said" did nothing, in the words the person sees.
+# Every reason leaves the field exactly as it was, except the last group,
+# where the replacement was sent and could not be checked.
+SAID_UNDO_REASONS = {
+    "nothing_to_undo": "There is no dictation to change back.",
+    "nothing_to_change": "Clean-up changed nothing in that dictation.",
+    "too_long_to_undo": "That dictation is too long to change back safely.",
+    "already_undone": "That dictation was already changed back.",
+    "focus_drift": "You are in a different place now. Nothing was changed.",
+    "selection_drift": (
+        "The cursor moved since the dictation. Nothing was changed."),
+    "surrounding_text_drift": (
+        "The text there changed since the dictation. Nothing was changed."),
+    "target_unreadable": (
+        "Whisper Face cannot read that field now. Nothing was changed."),
+}
+SAID_UNDO_UNCHECKED = (
+    "Your words were put back, but Whisper Face could not check them. "
+    "Look at the field.")
+
+
+def said_undo_refusal_text(reason: str) -> str:
+    """Plain words for why the raw words were not put back."""
+    return SAID_UNDO_REASONS.get(str(reason or ""), SAID_UNDO_UNCHECKED)
+
+
+def replace_with_what_you_said(presenter=None, *, undo=None) -> dict:
+    """Run "Replace with What You Said" and say why when it did nothing.
+
+    ``presenter`` is handed the plain-words reason on the main thread; the
+    log gets the closed reason name only, never any text.
+    """
+    result = (undo or undo_last_dictation)(said=True)
+    if not result.get("undone"):
+        reason = str(result.get("reason") or "")
+        print(f"[undo] what was said was not put back ({reason})")
+        if presenter is not None:
+            AppHelper.callAfter(presenter, said_undo_refusal_text(reason))
+    return result
 
 
 def _grapheme_attaches(character: str) -> bool:
@@ -11617,7 +11710,8 @@ def _ax_select_text_range(element, text: str, selection: tuple[int, int],
 @with_cocoa_pool
 def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                         coordinator=None, presser=None, paster=None,
-                        readback=None, selector=None) -> dict:
+                        readback=None, selector=None,
+                        said: bool = False) -> dict:
     """Put the destination back exactly as it was before the last insertion.
 
     Undo is an insertion in reverse and is held to the same standard: it
@@ -11626,6 +11720,11 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
     readback, and reports the same content-free receipt vocabulary. If focus
     moved, the caret moved, or the surrounding text changed, it refuses and
     says which, rather than deleting whatever happens to be there now.
+
+    With ``said`` it is "Replace with What You Said": the same transaction,
+    with the raw transcript put where the cleaned text was instead of the
+    text the dictation replaced. Proven, it leaves the raw words undoable in
+    turn, so one more undo still takes the whole dictation away.
     """
     snapshot_reader = snapshot_reader or focused_snapshot
     bundle_reader = bundle_reader or frontmost_bundle
@@ -11638,10 +11737,16 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
         record = UNDOABLE_INSERTION["record"]
         if record is None:
             return undo_refusal("nothing_to_undo")
+        if said and not record.said:
+            return undo_refusal("nothing_to_change")
         if len(record.inserted) > UNDO_MAX_CHARACTERS:
             return undo_refusal("too_long_to_undo")
 
-    undo_id = undo_utterance_id(record.utterance_id)
+    # What goes where the dictation stands: the text it replaced, or what
+    # was said. Each has its own id, so each can happen once.
+    replacement = record.said if said else record.replaced
+    undo_id = (f"said:{record.utterance_id}" if said
+               else undo_utterance_id(record.utterance_id))
     lease = InsertionLease.capture(
         undo_id,
         record.destination_id,
@@ -11666,7 +11771,7 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
             return undo_refusal("nothing_to_undo")
         UNDOABLE_INSERTION["record"] = None
     try:
-        coordinator.stage(lease, record.replaced)
+        coordinator.stage(lease, replacement)
     except ValueError:
         # Already staged: this insertion has been undone once already.
         return undo_refusal("already_undone")
@@ -11700,13 +11805,14 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                 text=record.expected,
                 selection=record.inserted_range,
             ),
-            record.replaced,
+            replacement,
             timeout=READBACK_TIMEOUT,
         )
 
     receipt = coordinator.commit(undo_id, observation, perform, prove)
-    # What undo staged is the text the dictation replaced, never something
-    # waiting to be delivered, so no payload outlives the attempt.
+    # What undo staged is the text the dictation replaced, or the words that
+    # were said, never something waiting to be delivered, so no payload
+    # outlives the attempt.
     coordinator.acknowledge(undo_id)
     if receipt.state == ReceiptState.VERIFIED:
         # Suppress before announcing: the correction watcher may still be
@@ -11716,7 +11822,23 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
         if LAST_INSERTION is not None \
                 and LAST_INSERTION.get("utterance_id") == record.utterance_id:
             LAST_INSERTION = None
-        print(f"[undo] restored ({receipt.log_reason})")
+        if said:
+            # The raw words now stand where the dictation did, proven by
+            # readback, so they can be undone like any insertion.
+            with UNDOABLE_INSERTION["lock"]:
+                if UNDOABLE_INSERTION["record"] is None:
+                    UNDOABLE_INSERTION["record"] = UndoableInsertion(
+                        element=record.element,
+                        bundle=record.bundle,
+                        destination_id=record.destination_id,
+                        utterance_id=undo_id,
+                        inserted=record.said,
+                        before=record.before,
+                        selection=record.selection,
+                    )
+            print(f"[undo] put back what was said ({receipt.log_reason})")
+        else:
+            print(f"[undo] restored ({receipt.log_reason})")
         return {"undone": True, "reason": receipt.reason.value}
     if receipt.paste_attempted:
         # The substitution ran but could not be proven. The field was still
@@ -14337,8 +14459,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # A new dictation replaces whatever was undoable; a destination
             # the runtime could not read is not undoable at all, because
             # there is no prior state to restore.
+            # Only a plain dictation offers its raw words back: in the
+            # rewriting modes they were an instruction, and in code mode
+            # spoken symbols, not the text anyone wants in place.
             record_undoable_insertion(build_undoable_insertion(
-                rec, insertion_target, bundle, event_id)
+                rec, insertion_target, bundle, event_id,
+                said=recognized_raw if rec.mode == "capture" else "")
                 if text_verified else None)
         elif integrity_receipt.pasted_unchecked:
             # Sent into an app that hides its text, so there was never

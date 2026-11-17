@@ -14434,6 +14434,138 @@ class UndoLastDictationTests(unittest.TestCase):
         self.assertTrue(result["undone"])
         self.assertEqual(ns["_state"]["pasted"], ["hello"])
 
+    SAID = "um thanks for the note"
+
+    def _said_record(self, ns, said=None):
+        return ns["UndoableInsertion"](
+            element=ns["_element"],
+            bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-1",
+            inserted=self.INSERTED,
+            before=self.BEFORE,
+            selection=(len(self.BEFORE), 0),
+            said=self.SAID if said is None else said,
+        )
+
+    def test_replace_with_what_you_said_puts_the_raw_words_in_place(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._said_record(ns))
+        self.assertTrue(ns["undoable_insertion_status"]()["said_available"])
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), said=True)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE + self.SAID)
+        # Selected exactly the cleaned text, then pasted the raw words in
+        # one step: nothing was deleted on its own.
+        self.assertEqual(ns["_state"]["keys"].count(("shift", "left")),
+                         len(self.INSERTED))
+        self.assertNotIn(("backspace",), ns["_state"]["keys"])
+        self.assertEqual(ns["_state"]["pasted"], [self.SAID])
+        # The correction watcher must not learn from it.
+        self.assertTrue(ns["utterance_was_undone"]("utterance-1"))
+        # The raw words are now the undoable insertion, with nothing more
+        # to put back, and one more undo takes the dictation away.
+        status = ns["undoable_insertion_status"]()
+        self.assertTrue(status["available"])
+        self.assertFalse(status["said_available"])
+        again = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(
+                ns, caret=(len(self.BEFORE + self.SAID), 0)))
+        self.assertTrue(again["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_replace_with_what_you_said_refuses_when_nothing_differs(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._said_record(ns, said=""))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), said=True)
+
+        self.assertEqual(result, {"undone": False,
+                                  "reason": "nothing_to_change"})
+        self.assertEqual(ns["_state"]["keys"], [])
+        # The ordinary undo is still there.
+        self.assertTrue(ns["undoable_insertion_status"]()["available"])
+
+    def test_replace_with_what_you_said_is_held_to_undos_checks(self):
+        for reason, reader, bundle in (
+                ("selection_drift",
+                 lambda ns: self._snapshot(ns, caret=(3, 0)),
+                 "com.apple.mail"),
+                ("focus_drift", lambda ns: self._snapshot(ns),
+                 "com.tinyspeck.slackmacgap"),
+                ("target_unreadable", lambda ns: None, "com.apple.mail")):
+            with self.subTest(reason=reason):
+                ns = self.namespace()
+                record = self._said_record(ns)
+                ns["record_undoable_insertion"](record)
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=lambda: reader(ns),
+                    bundle_reader=lambda: bundle, said=True)
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual(ns["_state"]["text"],
+                                 self.BEFORE + self.INSERTED)
+                self.assertEqual(ns["_state"]["keys"], [])
+                self.assertIs(ns["UNDOABLE_INSERTION"]["record"], record)
+
+    def test_the_raw_words_keep_the_insertions_join_and_differ_from_it(self):
+        ns = self.namespace()
+        build = ns["build_undoable_insertion"]
+        snapshot = ns["FocusSnapshot"](
+            element=ns["_element"], text="Dear Ada,", selection=(9, 0))
+        ns["focus_destination_id"] = lambda *_args: "mail:field-1"
+        rec = SimpleNamespace(committed_text=" Thanks for the note.")
+        record = build(rec, snapshot, "com.apple.mail", "u-1",
+                       said="um thanks for the note")
+        self.assertEqual(record.said, " um thanks for the note")
+        same = build(rec, snapshot, "com.apple.mail", "u-1",
+                     said="Thanks for the note.")
+        self.assertEqual(same.said, "")
+        self.assertEqual(build(rec, snapshot, "com.apple.mail", "u-1").said,
+                         "")
+
+    def test_a_refusal_is_said_in_plain_words_and_logged_without_text(self):
+        ns = load_definitions(
+            "replace_with_what_you_said", "said_undo_refusal_text",
+            assignments=("SAID_UNDO_REASONS", "SAID_UNDO_UNCHECKED"))
+        logs, shown = [], []
+        ns["print"] = lambda *args: logs.append(" ".join(map(str, args)))
+        ns["AppHelper"] = SimpleNamespace(
+            callAfter=lambda function, *args: function(*args))
+        for reason in ("nothing_to_change", "selection_drift",
+                       "focus_drift", "surrounding_text_drift",
+                       "target_unreadable", "readback_conflict"):
+            with self.subTest(reason=reason):
+                ns["replace_with_what_you_said"](
+                    shown.append,
+                    undo=lambda said: {"undone": False, "reason": reason})
+                self.assertTrue(shown[-1])
+                self.assertNotIn("_", shown[-1])
+        self.assertIn("Nothing was changed", ns["said_undo_refusal_text"](
+            "selection_drift"))
+        self.assertIn("could not check", ns["said_undo_refusal_text"](
+            "readback_conflict"))
+        before = len(shown)
+        ns["replace_with_what_you_said"](
+            shown.append, undo=lambda said: {"undone": True, "reason": "x"})
+        self.assertEqual(len(shown), before)
+        for line in logs:
+            self.assertRegex(line, r"^\[undo\] what was said was not put "
+                                   r"back \([a-z_]+\)$")
+
+    def test_the_said_row_names_why_it_is_dimmed(self):
+        title = load_definitions(
+            "said_menu_title",
+            assignments=("SAID_MENU_TITLE",))["said_menu_title"]
+        self.assertEqual(title({"available": True, "said_available": True}),
+                         "Replace with What You Said")
+        self.assertEqual(
+            title({"available": True, "said_available": False}),
+            "Replace with What You Said — clean-up changed nothing")
+        self.assertEqual(title({"available": False}),
+                         "Replace with What You Said")
+
     def test_undo_refuses_when_focus_moved(self):
         ns = self.namespace()
         ns["record_undoable_insertion"](self._record(ns))
@@ -17205,6 +17337,24 @@ class DictationKillTests(unittest.TestCase):
         [kept] = coordinator.recoverable()
         self.assertIn("station", kept.text)
         self.assertEqual(history[-1]["path"], "outbox/recovered")
+
+
+class SaidWordsDeliveryTests(unittest.TestCase):
+    """A proven plain dictation keeps its raw words for "Replace with What
+    You Said"; one whose clean-up changed nothing has none to offer."""
+
+    def test_a_cleaned_dictation_offers_its_raw_words(self):
+        seen = UncheckedPasteDeliveryTests().deliver(
+            "verified", spoken="um, meet me at the station")
+        [record] = [item for item in seen.undoable if item is not None]
+        self.assertNotEqual(record.inserted.strip(),
+                            "um, meet me at the station")
+        self.assertEqual(record.said.strip(), "um, meet me at the station")
+
+    def test_an_unchanged_dictation_has_nothing_to_offer(self):
+        seen = UncheckedPasteDeliveryTests().deliver("verified")
+        [record] = [item for item in seen.undoable if item is not None]
+        self.assertEqual(record.said, "")
 
 
 class UncheckedPasteDeliveryTests(unittest.TestCase):
