@@ -8,6 +8,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -124,10 +125,19 @@ class InstallerContractTests(unittest.TestCase):
         cls.script = (ROOT / "dictate.py").read_text(encoding="utf-8")
         cls.lock = (ROOT / "dictate.py.lock").read_text(encoding="utf-8")
 
+    def shell_personal_files(self):
+        """The source of setup.sh's personal_files array, which the
+        uninstall inventory names its personal tier by."""
+        match = re.search(r"(?ms)^personal_files=\(\n.*?^\)\n", self.shell)
+        self.assertIsNotNone(match, "setup.sh no longer names personal_files")
+        return match.group(0)
+
     def shell_uninstall(self):
-        """The uninstall block of setup.sh, up to the install path proper."""
+        """The uninstall block of setup.sh, up to the install path proper,
+        after the personal-file list it removes from."""
         start = self.shell.index("# --- Uninstall ---")
-        return self.shell[start:self.shell.index("\nrequired=(", start)]
+        return (self.shell_personal_files()
+                + self.shell[start:self.shell.index("\nrequired=(", start)])
 
     def powershell_uninstall(self):
         """The uninstall block of setup.ps1, up to the install path proper."""
@@ -387,13 +397,20 @@ class InstallerContractTests(unittest.TestCase):
             self.powershell.index("if ($Uninstall) {\n    $UninstallStatus"),
             self.powershell.index("\n$Required = @("))
 
+    def mac_personal_files(self):
+        """setup.sh's one list of personal files, in its own order."""
+        source = self.shell_personal_files()
+        return tuple(source[source.index("(") + 1:source.rindex(")")].split())
+
     def test_uninstall_keeps_personal_files_unless_explicitly_asked(self):
         shell = self.shell_uninstall()
         powershell = self.powershell_uninstall()
         # Every personal file is listed, and listed only behind its own flag.
+        # On the Mac the list is one array, which an update of the drag
+        # install also carries across, so the two can never disagree.
+        self.assertEqual(self.mac_personal_files(), PERSONAL_FILES)
         for personal in PERSONAL_FILES:
             with self.subTest(personal=personal):
-                self.assertIn(personal, shell)
                 self.assertIn(personal, powershell)
         mac_personal = shell[shell.index('step "personal files'):]
         mac_personal = mac_personal[:mac_personal.index('step "never touched')]
@@ -401,11 +418,19 @@ class InstallerContractTests(unittest.TestCase):
             powershell.index('Write-Step "personal files'):]
         windows_personal = windows_personal[
             :windows_personal.index('Write-Step "never touched')]
+        self.assertIn('for personal_file in "${personal_files[@]}"; do',
+                      mac_personal)
         for personal in PERSONAL_FILES:
             with self.subTest(personal=personal, tier="personal"):
-                self.assertIn(personal, mac_personal)
                 self.assertIn(personal, windows_personal)
         self.assertIn('remove_installed_path "$REMOVE_PERSONAL"', mac_personal)
+        # The copies an update of the drag install keeps hold copies of
+        # these files, so they go only with them.
+        for kept in ("checkout.previous", "checkout.incoming"):
+            with self.subTest(kept=kept):
+                self.assertIn(
+                    'remove_installed_path "$REMOVE_PERSONAL" \\\n'
+                    f'            "$service_receipt_dir/{kept}"', mac_personal)
         self.assertIn("Remove-InstalledPath $RemovePersonalData",
                       windows_personal)
         # No personal file may be reachable from an unconditional removal.
@@ -1543,6 +1568,106 @@ class InstallerContractTests(unittest.TestCase):
             self.assertNotIn("refused:", result.stderr)
             self.assertFalse((managed / "install.log").exists())
 
+    def run_whole_setup(self, home, checkout, *arguments):
+        """The whole installer from a staged copy, with every tool refused.
+
+        The staged copy holds setup.sh alone, so the installer stops at its
+        check for the repository's files, before any tool, download or
+        service: what it did before that is what a test can see.
+        """
+        bin_dir = Path(home) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        for tool in REFUSED_TOOLS:
+            stub = bin_dir / tool
+            stub.write_text('#!/bin/bash\necho "refused: $0" >&2\nexit 97\n')
+            stub.chmod(0o755)
+        return subprocess.run(
+            ["/bin/bash", str(Path(checkout) / "setup.sh"), *arguments],
+            env={"HOME": str(home), "LANG": "C",
+                 "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin"},
+            text=True, capture_output=True, timeout=60,
+            stdin=subprocess.DEVNULL)
+
+    @needs_bash
+    def test_an_update_carries_every_personal_file_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "home"
+            app = self.fake_drag_app(root)
+            support = home / "Library/Application Support/Whisper Face"
+            previous = support / "checkout.previous"
+            current = support / "checkout"
+            for folder in (previous, current):
+                folder.mkdir(parents=True)
+            (previous / "setup.sh").write_text("# the old release\n")
+            (previous / "dictate.py").write_text("# the old release\n")
+            shutil.copyfile(ROOT / "setup.sh", current / "setup.sh")
+            (current / "setup.sh").chmod(0o755)
+            for name in self.mac_personal_files():
+                (previous / name).write_text(f"mine: {name}\n")
+                (previous / name).chmod(0o644)
+            # A link is never followed, and nothing off the list moves.
+            (previous / "snippets.json").unlink()
+            (previous / "snippets.json").symlink_to(root / "elsewhere.json")
+            (root / "elsewhere.json").write_text("not mine to copy\n")
+            (previous / "notes-of-my-own.txt").write_text("stays\n")
+            # A copy an earlier attempt left is replaced by the current one.
+            (current / "dictionary.txt").write_text("stale\n")
+
+            run = self.run_whole_setup(home, current, "--app", str(app),
+                                       "--carry-over-from", str(previous))
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("repository is incomplete", run.stdout + run.stderr)
+            self.assertNotIn("refused:", run.stderr)
+            carried = [name for name in self.mac_personal_files()
+                       if name != "snippets.json"]
+            for name in carried:
+                with self.subTest(name=name):
+                    destination = current / name
+                    self.assertTrue(destination.is_file())
+                    self.assertFalse(destination.is_symlink())
+                    self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+                    if name != "install.log":
+                        self.assertEqual(destination.read_text(),
+                                         f"mine: {name}\n")
+                    # The copy being replaced keeps its own.
+                    self.assertEqual((previous / name).read_text(),
+                                     f"mine: {name}\n")
+            self.assertFalse((current / "snippets.json").exists())
+            self.assertFalse((current / "notes-of-my-own.txt").exists())
+            self.assertIn("not carried over, not a regular file: snippets.json",
+                          run.stdout)
+            # install.log came across whole, and this run appended to it.
+            log = (current / "install.log").read_text()
+            self.assertTrue(log.startswith("mine: install.log\n"), log[:200])
+            self.assertIn(f"== carried over from {previous}: "
+                          f"{len(carried)} private file(s)", log)
+            self.assertIn("repository is incomplete", log)
+            self.assertEqual(log.count("== carried over from"), 1)
+
+            # Only the app's update may ask for it, and only for another copy.
+            for arguments, words in (
+                    (("--carry-over-from", str(previous)), "needs --app"),
+                    (("--app", str(app), "--carry-over-from"),
+                     "needs the path of the copy"),
+                    (("--app", str(app), "--carry-over-from", str(previous),
+                      "--verify"), "needs --app and an install")):
+                with self.subTest(arguments=arguments):
+                    refused = self.run_whole_setup(home, current, *arguments)
+                    self.assertEqual(refused.returncode, 2)
+                    self.assertIn(words, refused.stderr)
+            for source, words in (
+                    (current, "names this copy itself"),
+                    (root / "Applications", "is not a copy of Whisper Face"),
+                    (root / "missing", "is not a folder"),
+                    (Path("relative"), "needs the full path")):
+                with self.subTest(source=str(source)):
+                    refused = self.run_whole_setup(
+                        home, current, "--app", str(app),
+                        "--carry-over-from", str(source))
+                    self.assertEqual(refused.returncode, 1)
+                    self.assertIn(words, refused.stderr)
+
     @needs_bash
     def test_app_mode_runs_the_service_through_the_app_and_skips_homebrew(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1628,7 +1753,7 @@ class InstallerContractTests(unittest.TestCase):
                 "prune_empty_directory", "unload_installed_agent",
                 "remove_ollama_cleanup_model", "uninstall_whisper_face")]
             result = run_setup_functions(
-                names, "uninstall_whisper_face\n",
+                names, self.shell_personal_files() + "uninstall_whisper_face\n",
                 variables={
                     "DIR": root / "checkout", "VERIFY_ONLY": 0,
                     "ASSUME_YES": 0, "REMOVE_MODELS": 0, "REMOVE_PERSONAL": 0,
@@ -1654,6 +1779,10 @@ class InstallerContractTests(unittest.TestCase):
             self.assertIn("drag it to the Trash yourself", result.stdout)
             self.assertNotIn(f"would remove  {app}", result.stdout)
             self.assertTrue(app.exists())
+            # The copies an update keeps are named, in the personal tier.
+            for kept in ("checkout.previous", "checkout.incoming"):
+                with self.subTest(kept=kept):
+                    self.assertIn(str(root / "state" / kept), result.stdout)
 
     @needs_bash
     def test_a_server_only_install_says_where_the_bearer_token_is(self):

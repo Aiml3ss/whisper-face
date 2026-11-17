@@ -67,15 +67,26 @@ REMOVE_PERSONAL=0
 APP_BUNDLE=""
 APP_REQUESTED=0
 DRY_RUN=0
+# An update of a drag install: the checkout this one replaces, whose private
+# files come across. See carry_over_private_files below.
+CARRY_FROM=""
+CARRY_REQUESTED=0
 expect_app_path=0
+expect_carry_path=0
 for arg in "$@"; do
     if [ "$expect_app_path" -eq 1 ]; then
         APP_BUNDLE="$arg"
         expect_app_path=0
         continue
     fi
+    if [ "$expect_carry_path" -eq 1 ]; then
+        CARRY_FROM="$arg"
+        expect_carry_path=0
+        continue
+    fi
     case "$arg" in
         --app) APP_REQUESTED=1; expect_app_path=1 ;;
+        --carry-over-from) CARRY_REQUESTED=1; expect_carry_path=1 ;;
         --dry-run) DRY_RUN=1 ;;
         --server-only) MODE="server-only" ;;
         --verify) VERIFY_ONLY=1 ;;
@@ -101,6 +112,9 @@ for arg in "$@"; do
             echo "  --dry-run      with app mode, check everything and print the"
             echo "                 plan, then stop before any download, service,"
             echo "                 launcher, or receipt change"
+            echo "  --carry-over-from PATH  with app mode, first copy your private"
+            echo "                 files (the --remove-personal-data list) from the"
+            echo "                 copy at PATH that this release replaces"
             echo
             echo "Uninstall (prints a plan and changes nothing unless --yes):"
             echo "  --uninstall    list every file and service this installer"
@@ -135,6 +149,17 @@ if [ "$expect_app_path" -eq 1 ] || { [ "$APP_REQUESTED" -eq 1 ] && [ -z "$APP_BU
 fi
 if [ "$APP_REQUESTED" -eq 1 ] && [ "$MODE" != "full" ]; then
     echo "!! --app sets up the desktop app; it cannot be combined with --server-only" >&2
+    exit 2
+fi
+if [ "$expect_carry_path" -eq 1 ] \
+        || { [ "$CARRY_REQUESTED" -eq 1 ] && [ -z "$CARRY_FROM" ]; }; then
+    echo "!! --carry-over-from needs the path of the copy being replaced" >&2
+    exit 2
+fi
+if [ "$CARRY_REQUESTED" -eq 1 ] && { [ "$APP_REQUESTED" -ne 1 ] \
+        || [ "$UNINSTALL" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ] \
+        || [ "$MODELS_ONLY" -eq 1 ]; }; then
+    echo "!! --carry-over-from is for the Whisper Face app's update; it needs --app and an install" >&2
     exit 2
 fi
 if [ "$UNINSTALL" -eq 1 ]; then
@@ -372,6 +397,31 @@ speech_runtime_cache="$HOME/Library/Caches/parrot-speech-runtime"
 dictate_log="$DIR/dictate.log"
 ollama_log="$DIR/ollama.log"
 install_log="$DIR/install.log"
+# The personal files: your words, corrections, history, drafts and logs.
+# No download restores them. This one list is what --uninstall keeps unless
+# --remove-personal-data names them, and what an update of a drag install
+# carries into the next release's checkout (--carry-over-from). It is the
+# backup list in docs/distribution/update-and-rollback.md. Models live
+# outside the checkout, in caches every release shares, so they need no copy.
+personal_files=(
+    dictionary.txt
+    snippets.json
+    tones.json
+    preferences.json
+    learned.json
+    transcripts.jsonl
+    voice_inbox.json
+    demonstrations.json
+    acoustic_keyword_memory.json
+    delayed_cleanup_activation.json
+    acoustic_keyword_activation.json
+    acoustic_calibration_activation.json
+    relisten_activation.json
+    phone_token.txt
+    dictate.log
+    ollama.log
+    install.log
+)
 # Whisper Face's Ollama service sets no OLLAMA_MODELS, so its models live in
 # Ollama's default store. A value exported in the user's shell names another
 # Ollama's store, and the manifest check dictate.py runs would read it too.
@@ -473,6 +523,73 @@ if [ "${APP_MODE:-0}" -eq 1 ]; then
     checkout_uv="$DIR/.models/bin/uv"
 fi
 
+# --- Carrying private files into an update ----------------------------------
+# A drag install updates by unpacking the newer release beside the old copy
+# and switching to it (scripts/app_update.py). That copy's setup runs with
+# --carry-over-from naming the copy it replaces, and before anything else it
+# copies every personal file across, over any copy an earlier attempt left.
+# The copy being replaced keeps its own files untouched, so an update that
+# fails goes back to exactly what was there. Only regular files are copied,
+# never a link, and each arrives readable by you alone.
+carry_summary=""
+
+carry_over_private_files() {
+    # $1 = 1 to copy, 0 to print the plan only.
+    local copy="$1" source_dir name source destination temporary
+    local carried=() absent=0
+    case "$CARRY_FROM" in
+        /*) ;;
+        *) fail "--carry-over-from needs the full path of the copy being replaced" ;;
+    esac
+    [ -d "$CARRY_FROM" ] && [ ! -L "$CARRY_FROM" ] \
+        || fail "the copy to carry private files from is not a folder: $CARRY_FROM"
+    source_dir="$(cd "$CARRY_FROM" && pwd -P)"
+    [ "$source_dir" != "$(cd "$DIR" && pwd -P)" ] \
+        || fail "--carry-over-from names this copy itself"
+    [ -f "$source_dir/setup.sh" ] && [ -f "$source_dir/dictate.py" ] \
+        || fail "$CARRY_FROM is not a copy of Whisper Face"
+    for name in "${personal_files[@]}"; do
+        source="$source_dir/$name"
+        destination="$DIR/$name"
+        if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+            absent=$((absent + 1))
+            continue
+        fi
+        if [ -L "$source" ] || [ ! -f "$source" ]; then
+            echo "== not carried over, not a regular file: $name"
+            continue
+        fi
+        if [ -L "$destination" ] \
+                || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
+            fail "cannot carry $name over: $destination is not a regular file"
+        fi
+        if [ "$copy" -eq 1 ]; then
+            temporary="$(mktemp "$DIR/.$name.carry.XXXXXX")" \
+                || fail "could not carry $name over"
+            if ! cat "$source" > "$temporary" \
+                    || ! chmod 600 "$temporary" \
+                    || ! mv -f "$temporary" "$destination"; then
+                rm -f -- "$temporary"
+                fail "could not carry $name over from $source_dir"
+            fi
+        fi
+        carried+=("$name")
+    done
+    if [ "$copy" -eq 1 ]; then
+        carry_summary="== carried over from $source_dir: ${#carried[@]} private file(s)${carried[*]:+: ${carried[*]}}"
+    else
+        carry_summary="== private files: would carry ${#carried[@]} over from $source_dir${carried[*]:+: ${carried[*]}}"
+    fi
+    echo "$carry_summary"
+}
+
+# Once, before the log opens, so install.log itself comes across whole and
+# this run appends to it. The rerun under the log sees the variable and skips.
+if [ -n "$CARRY_FROM" ] && [ "$DRY_RUN" -eq 0 ] \
+        && [ -z "${WHISPER_FACE_INSTALL_LOG:-}" ]; then
+    carry_over_private_files 1
+fi
+
 # --- Installer log ----------------------------------------------------------
 # A failed install used to leave nothing to read. Homebrew, a multi-gigabyte
 # model download, and the readiness waits emit far more output than a Terminal
@@ -524,6 +641,7 @@ run_with_install_log() {
 if [ -z "${WHISPER_FACE_INSTALL_LOG:-}" ] && [ "$UNINSTALL" -eq 0 ] \
         && [ "$VERIFY_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] \
         && start_install_log; then
+    [ -z "$carry_summary" ] || printf '%s\n' "$carry_summary" >> "$install_log"
     install_status=0
     run_with_install_log "$@" || install_status=$?
     exit "$install_status"
@@ -740,27 +858,21 @@ uninstall_whisper_face() {
     step "personal files (removed only with --remove-personal-data)"
     echo "   These are your words and your corrections. No download restores"
     echo "   them. They are kept unless you ask for them to go."
-    for personal_file in \
-            "$DIR/dictionary.txt" \
-            "$DIR/snippets.json" \
-            "$DIR/tones.json" \
-            "$DIR/preferences.json" \
-            "$DIR/learned.json" \
-            "$DIR/transcripts.jsonl" \
-            "$DIR/voice_inbox.json" \
-            "$DIR/demonstrations.json" \
-            "$DIR/acoustic_keyword_memory.json" \
-            "$DIR/delayed_cleanup_activation.json" \
-            "$DIR/acoustic_keyword_activation.json" \
-            "$DIR/acoustic_calibration_activation.json" \
-            "$DIR/relisten_activation.json" \
-            "$DIR/phone_token.txt" \
-            "$DIR/dictate.log" \
-            "$DIR/ollama.log" \
-            "$DIR/install.log"; do
-        remove_installed_path "$REMOVE_PERSONAL" "$personal_file" \
+    for personal_file in "${personal_files[@]}"; do
+        remove_installed_path "$REMOVE_PERSONAL" "$DIR/$personal_file" \
             "personal file"
     done
+    if [ "${APP_MODE:-0}" -eq 1 ]; then
+        # An update of the app keeps the copy it replaced, and one that did
+        # not finish keeps the new copy for Try Again. Both hold copies of
+        # the files above, so they go with them and stay with them.
+        remove_installed_path "$REMOVE_PERSONAL" \
+            "$service_receipt_dir/checkout.previous" \
+            "the copy an update replaced, kept to go back to"
+        remove_installed_path "$REMOVE_PERSONAL" \
+            "$service_receipt_dir/checkout.incoming" \
+            "a newer copy an update could not finish"
+    fi
 
     step "never touched by this uninstaller"
     echo "   Homebrew, and the shared packages uv, ffmpeg, and ollama"
@@ -1304,10 +1416,12 @@ app_mode_dry_run() {
     require_build_tools
     echo "== Apple's command line tools: present, with Swift 6 or newer"
     echo "== phases the app's window would show: prepare python speech-model helpers preview-model service"
+    [ -z "$CARRY_FROM" ] || carry_over_private_files 0
     set +e
     # --offline and --no-cache: a dry run neither downloads nor leaves a
-    # uv cache behind.
-    adopt_output="$("$app_uv" run --offline --no-cache --quiet --no-project \
+    # uv cache behind. Nor bytecode beside the scripts it reads.
+    adopt_output="$(PYTHONDONTWRITEBYTECODE=1 \
+        "$app_uv" run --offline --no-cache --quiet --no-project \
         --python "$PYTHON_VERSION" "$DIR/scripts/macos_launcher_app.py" adopt \
         --app "$APP_BUNDLE" --checkout "$DIR" --receipt "$launcher_receipt" \
         --folder-launcher "$launcher_app" --dry-run 2>&1)"

@@ -1063,16 +1063,26 @@ class DragInstallAppTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         home = self.root / "dry-run-home"
         home.mkdir()
+        # An update's copy to carry private files from; a dry run only
+        # names what it would bring across.
+        replaced = self.root / "dry-run-replaced"
+        replaced.mkdir()
+        for name in ("setup.sh", "dictate.py", "dictionary.txt",
+                     "transcripts.jsonl"):
+            (replaced / name).write_text(f"{name}\n")
         before = subprocess.run(
             ["git", "-C", str(ROOT), "status", "--porcelain", "--ignored"],
             text=True, capture_output=True, check=True).stdout
-        run = self.dry_run(home, "--app", str(app), "--dry-run")
+        run = self.dry_run(home, "--app", str(app), "--dry-run",
+                           "--carry-over-from", str(replaced))
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertNotIn("refused:", run.stderr)
         executable = f"{app.resolve()}/Contents/MacOS/Whisper Face"
         for line in (
                 "== dry run of app mode in",
                 "Homebrew is not used",
+                f"== private files: would carry 2 over from "
+                f"{replaced.resolve()}: dictionary.txt transcripts.jsonl",
                 "would write receipt",
                 f"== login service: would run {executable} --run",
                 "== dry run complete: nothing was changed"):
