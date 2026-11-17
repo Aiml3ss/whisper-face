@@ -512,13 +512,28 @@ class OfferedUpdateTests(unittest.TestCase):
         self.assertEqual(fetch.urls, [MODULE.MANIFEST_URL])
         self.assertEqual(MODULE.app_release(self.app)["version"], "0.6.0")
 
+    def test_an_older_release_is_never_installed_even_when_asked(self):
+        make_release(self.server, "0.5.9", NEW)
+        with self.assertRaises(MODULE.UpdateError) as caught:
+            self.install(FakeReleases(self.server), version="0.5.9")
+        self.assertIn("not the newer release", str(caught.exception))
+        self.assertEqual(MODULE.app_release(self.app)["version"], "0.6.0")
+
     def test_downloads_stay_on_https_inside_the_published_releases(self):
-        with self.assertRaises(MODULE.UpdateError):
-            MODULE.https_get("https://example.invalid/update-manifest.json",
-                             self.root / "x", 10)
-        with self.assertRaises(MODULE.UpdateError):
-            MODULE.https_get(MODULE.RELEASES.replace("https", "http") + "/x",
-                             self.root / "x", 10)
+        opened = []
+
+        def no_network(*_handlers):
+            opened.append(_handlers)
+            raise AssertionError("a download left the published releases")
+        original = MODULE.urllib.request.build_opener
+        MODULE.urllib.request.build_opener = no_network
+        self.addCleanup(setattr, MODULE.urllib.request, "build_opener", original)
+        for url in ("https://example.invalid/update-manifest.json",
+                    MODULE.RELEASES.replace("https", "http") + "/x",
+                    "https://github.com/someone-else/releases/x"):
+            with self.subTest(url=url), self.assertRaises(MODULE.UpdateError):
+                MODULE.https_get(url, self.root / "x", 10)
+        self.assertEqual(opened, [])
         handler = MODULE._HTTPSOnlyRedirects()
         request = urllib.request.Request(MODULE.MANIFEST_URL)
         with self.assertRaises(urllib.error.URLError):
