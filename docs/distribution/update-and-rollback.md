@@ -6,16 +6,77 @@ covers updating by hand and the release-operator tools. Keep the checkout you
 installed from, and make a backup of your private files before changing
 versions.
 
-## Check for Updates… (Mac menu)
+## Updating the app from the disk image
 
-A copy set up by the Whisper Face app from the disk image follows published
-releases, not git. For it, **Check for Updates…** answers "Updates come as a
-new download." and runs no `git` command; `self_update.py` refuses both the
-app's own checkout (`~/Library/Application Support/Whisper Face/checkout`) and
-any checkout its receipt binds to the app. Rerunning `Install.command` there
-stays in app mode and never builds a second launcher. Updating by dragging a
-newer app over the old one is not built yet, so no second drag-install
-release ships before it is.
+A copy set up by the Whisper Face app follows published releases, never git:
+`self_update.py` refuses its checkout
+(`~/Library/Application Support/Whisper Face/checkout`) and any checkout its
+receipt binds to the app, and rerunning `Install.command` there stays in app
+mode. It updates in one of two ways, and both end the same way.
+
+- **Drag the newer app over the old one**, then open it. It sees that the
+  install is an older release and offers **Update**.
+- **Check for Updates…** reads the latest published release's
+  `update-manifest.json` (one HTTPS request to the project's GitHub releases)
+  and offers **Download and Install** only for a strictly newer release on
+  the app's own channel (a preview app follows preview releases, a stable app
+  stable ones). Nothing is downloaded until you click. Then
+  `scripts/app_update.py` downloads that release's disk image and source
+  archive, verifies them as `safe_update_advisor.py` verifies any release
+  (sizes and SHA-256 against the manifest, channel, versions, and for a
+  stable release `codesign` and `stapler`), copies the app off the read-only
+  image, proves the copy with that release's own launcher contract and its
+  sealed source archive (and for a stable release, the Developer ID this
+  install pins), puts it where the old app was and opens it, which starts
+  the update at once.
+
+The update itself: the app checks its own archive against the digest sealed
+into it, unpacks it beside the install as `checkout.incoming`, and runs that
+copy's `scripts/app_update.py apply`. That applies the advisor's rule again
+(only a strictly newer version on another revision), keeps copies of the
+login service's definition and the receipt, stops the service, renames
+`checkout` to `checkout.previous` and the new copy to `checkout`, and runs
+the new copy's `setup.sh --app … --carry-over-from checkout.previous`. Before
+anything else, setup copies every personal file across from the one list
+`setup.sh` keeps (`personal_files`, the same list as the backup list below
+and the uninstaller's personal tier): dictionary, snippets, tones,
+preferences, transcripts, learned data, the voice outbox, demonstrations,
+the acoustic and activation files, the phone token, and the logs. Models
+live outside the checkout (the Parakeet model in
+`~/Library/Application Support/FluidAudio`, Whisper in the Hugging Face
+cache) and are shared, so nothing is downloaded again for them.
+
+If setup fails, the new copy goes back to `checkout.incoming` (kept, with
+what it downloaded, for **Try Again**), the old copy back to `checkout`
+with its own files untouched, the two saved files back in place, and the old
+service is started; the window says the update did not finish and that the
+old version is running again only once launchd shows it running. If that
+cannot be shown, the window says so, and the next **Try Again** finishes
+putting things back before it updates; a journal in
+`~/Library/Application Support/Whisper Face/update-in-progress.json` makes
+that work after a crash or power loss too. Each outcome is one line in
+`update.log`. After a successful update the replaced copy stays in
+`checkout.previous` until the next update; uninstalling lists it, and the
+newer copy a failed update keeps, with the personal files they hold copies
+of.
+
+An app older than the install refuses ("A newer Whisper Face is set up") and
+says to download the latest and drag it into Applications; one with the same
+version but other contents refuses too. Neither changes anything. To go back
+a version, the previous copy is in `checkout.previous`; no button does it
+yet.
+
+**Permissions after an update.** Until the app is signed with a Developer ID,
+every release has a new code identity, so macOS keeps Whisper Face listed
+under Accessibility and Input Monitoring but stops honouring the grant.
+After the update the runtime waits for permissions and its permission window
+opens by itself, with buttons for the exact Settings pages and **Still Not
+Working…** to clear Whisper Face's two entries. With a Developer ID build the
+identity is the bundle identifier plus the Team ID, which stay the same from
+release to release, so the grants are expected to survive an update; that is
+unverified until a signed build exists.
+
+## Check for Updates… for a folder or clone install
 
 For a folder or clone install, when you choose it, `self_update.py`:
 

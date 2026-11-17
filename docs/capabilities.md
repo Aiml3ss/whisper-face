@@ -236,8 +236,11 @@ Qwen3.5-4B, and has no Parakeet.
   tracked branch, checks out its tip, reruns the installer, and rolls back to
   the last revision that installed cleanly on failure; no background polling,
   no silent updates. It does not check release tags or signatures, so it
-  installs unreleased commits. A copy the drag-install app set up is
-  refused: its updates come as a new download.
+  installs unreleased commits. A copy the drag-install app set up follows
+  published releases instead: dragging a newer app over it, or Download and
+  Install from the same menu, sets the new release up beside the old one,
+  carries the personal files across, and puts the old one back if setup
+  fails. Only a newer release is offered, and only a click downloads it.
 
 ### Platform notes
 

@@ -81,13 +81,15 @@ class ReleaseManifestTests(unittest.TestCase):
             self.assertTrue(
                 installation["same_checkout_reinstall_preserves_private_state"]
             )
-            self.assertTrue(
+            # The disk image is the drag-install app, which manages one
+            # checkout of its own and carries private files into the next
+            # release's checkout itself.
+            self.assertFalse(
                 installation[
                     "separate_checkout_requires_manual_private_state_migration"
                 ]
             )
-            # The disk image is the drag-install app, which manages one
-            # checkout of its own.
+            self.assertTrue(installation["automatic_cross_checkout_migration"])
             self.assertEqual(installation["entrypoint"], "Whisper Face.app")
             self.assertEqual(installation["strategy"], "app-managed")
             self.assertIn("Application Support/Whisper Face/checkout/setup.sh",
@@ -161,6 +163,18 @@ class ReleaseManifestTests(unittest.TestCase):
             )
             self.assertEqual(state.returncode, 2)
             self.assertIn("must not be unconditional", state.stderr)
+
+            # A source bundle installed in place never claims to move private
+            # state between folders; only the drag-install app does.
+            payload["installation"]["preserves_private_state"] = False
+            payload["installation"]["automatic_cross_checkout_migration"] = True
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+            migration = self.run_tool(
+                "verify", "--manifest", str(manifest),
+                "--artifact-dir", str(output), check=False,
+            )
+            self.assertEqual(migration.returncode, 2)
+            self.assertIn("migration requirement", migration.stderr)
 
     def test_manifest_rejects_partial_rollback_and_false_notarization(self):
         with tempfile.TemporaryDirectory() as directory:

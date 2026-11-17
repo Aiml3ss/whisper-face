@@ -41,7 +41,7 @@ that checkout's own `setup.sh`, so the login service still executes a checkout.
 | Model loading or inference options | Confirm preload exercises the new path and service templates still supply required environment options. |
 | Runtime file or required asset | Add it to the required-file checks in `setup.sh` and `setup.ps1`; update packaging documentation. |
 | Startup argument, port, service, permission, or health behavior | Update both platform service definitions, readiness checks, verification, and user guidance. |
-| Private state or default preference | Update its template and preservation/permission logic on both platforms. Never overwrite an existing user's state. |
+| Private state or default preference | Update its template and preservation/permission logic on both platforms. Never overwrite an existing user's state. On the Mac, a new personal file joins `personal_files` in `setup.sh`: the uninstaller's personal tier and the drag install's update (`--carry-over-from`) both read that one list. |
 | Internal runtime-only implementation | Installer edits may be unnecessary because services run the current checkout. Record that conclusion and still run every release gate. |
 
 ## Required gates

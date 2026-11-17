@@ -46,8 +46,12 @@ MACOS_SOURCE_INSTALLATION = {
 # The Mac disk image holds the drag-install app. It unpacks its own copy of
 # the source ZIP into one managed checkout and runs that checkout's setup.sh,
 # so the checkout, and its verification command, are always in one place.
+# An update unpacks the next release beside it and carries the personal
+# files across itself (scripts/app_update.py, setup.sh --carry-over-from).
 MACOS_INSTALLATION = {
     **_SHARED_INSTALLATION,
+    "automatic_cross_checkout_migration": True,
+    "separate_checkout_requires_manual_private_state_migration": False,
     "entrypoint": "Whisper Face.app",
     "strategy": "app-managed",
     "verification": (
@@ -328,9 +332,13 @@ def verify_manifest(path: Path, artifact_dir: Path) -> dict:
         raise ManifestError("private-state preservation must not be unconditional")
     if installation.get("same_checkout_reinstall_preserves_private_state") is not True:
         raise ManifestError("same-checkout state preservation must be explicit")
+    # Only the drag-install app moves private state between checkouts
+    # itself; every install run in place leaves that to the person.
+    app_managed = installation.get("strategy") == "app-managed"
     if (
         installation.get("separate_checkout_requires_manual_private_state_migration")
-        is not True
+        is not (not app_managed)
+        or installation.get("automatic_cross_checkout_migration") is not app_managed
     ):
         raise ManifestError("separate-checkout migration requirement is missing")
     # A Windows bundle published under the Mac install contract would tell the

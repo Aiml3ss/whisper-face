@@ -57,6 +57,16 @@ plan without changing anything. The ZIP still expands to a writable source
 folder whose `Install.command` builds an unsigned local launcher, exactly as
 before.
 
+A drag install updates to a newer release when that release's app is dragged
+over the old one, or from **Check for Updates…**
+([how](update-and-rollback.md#updating-the-app-from-the-disk-image)). For the
+menu to offer a release, publish its `update-manifest.json`, disk image and
+source ZIP as assets of a GitHub release that is not marked as a prerelease:
+the app reads `releases/latest/download/update-manifest.json` and follows
+only its own channel, so a preview app is offered a preview manifest and a
+stable app a stable one. The release gates exercise this path only against
+fakes; nothing has yet been updated from a real published release.
+
 On a full Mac install, `setup.sh` installs `~/Applications/Whisper Face.app` as
 a generic Mac launcher app bundle. It contains only `Info.plist`, a minimal
 compiled Swift/AppKit launcher, and its source-contract hash;

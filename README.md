@@ -459,8 +459,13 @@ Opening the app again later simply starts Whisper Face.
 
 The app carries its release's exact source archive (the same bytes as the
 published `WhisperFace-X-source.zip`), checks it against its checksum, and
-runs that copy's own `setup.sh --app`; nothing needs Homebrew. Its copy
-updates by a new download, not by **Check for Updates…**. To remove it, run
+runs that copy's own `setup.sh --app`; nothing needs Homebrew. To update,
+drag a newer app over the old one and open it, or choose **Check for
+Updates…**, which offers a newer published release and downloads it only
+when you click. Either way the new version is set up beside the old one,
+your settings, dictionary, history and models come across, and if anything
+fails the old version is put back and keeps working
+([details](docs/distribution/update-and-rollback.md)). To remove it, run
 `"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh" --uninstall`,
 then drag the app to the Trash. Until a Developer ID signed build is
 published, the app is an unsigned preview that macOS blocks the first time
