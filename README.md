@@ -25,7 +25,7 @@ product is a future workstream, not a current setup promise.
 
 | Product promise | What Whisper Face does |
 |---|---|
-| **Setup is part of the product** | `Install.command` provisions the app, locked dependencies, models, native helper, login services, and health checks in one repeatable flow. |
+| **Setup is part of the product** | On a Mac, drag the app to Applications and open it: it provisions locked dependencies, models, the native helper, the login service, and health checks in one repeatable flow. From source, `Install.command` (`Install.cmd` on Windows) runs the same installer. |
 | **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias recognition but never replace a recognized word. Other on-screen text can only repair a word the recognizer was unsure of and itself wrote as a name or identifier (a visible "Qwen" repairs "Gwen"); it never replaces or introduces an ordinary word, and each repair is a recorded decision. The optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, and a typed self-correction only if you turn it on), described under [Daily use](#daily-use). |
 | **Fast by architecture** | Models stay warm, long speech is recognized while you talk, installed model paths resolve offline, and routine cleanup stays deterministic unless the words truly require semantic work. |
 | **Insertion is a transaction** | The target is leased and revalidated before one paste attempt; destination drift goes to a recoverable Voice Outbox instead of the wrong field. |
@@ -415,7 +415,7 @@ are never Supporter-only features.
 
 | Platform | Requirements |
 |---|---|
-| macOS | Apple Silicon, macOS 14 or newer (the installer refuses older), an administrator account (Homebrew asks for the password), the Xcode Command Line Tools with Swift 6 or newer, ~5 GB free on the install volume (~8 GB with `--with-all-models`) |
+| macOS | Apple Silicon, macOS 14 or newer (the installer refuses older), Apple's Command Line Tools with Swift 6 or newer (the app asks macOS to install them), ~5 GB free on the install volume (~8 GB with `--with-all-models`). An install from source also needs an administrator account (Homebrew asks for the password) |
 | Windows | Windows 10/11 x64, winget, ~8 GB free; NVIDIA GPU preferred, CPU fallback supported |
 
 A default Mac install downloads only the models dictation needs: Parakeet
@@ -423,10 +423,11 @@ Unified (~565 MB, primary English recognition) and Whisper Tiny (~75 MB, the
 agreement check and the recognizer for other languages). It also builds a
 pinned FluidAudio helper, Whisper Face's own speech runtime for the same model
 (`native/ParrotSpeechRuntime`, no package dependencies) and the launcher app
-with your Swift toolchain. On a
-fresh Mac the Command Line Tools and Homebrew come first, so expect to
-download a few gigabytes in all and allow 15–45 minutes; no install time has
-been measured. Two models are optional quality upgrades and are skipped
+with your Swift toolchain. The app download needs no Homebrew: its setup
+window downloads about 1 GB, after the Command Line Tools if this Mac lacks
+them. From source on a fresh Mac the Command Line Tools and Homebrew come
+first, so expect to download a few gigabytes in all and allow 15–45 minutes.
+No install time has been measured. Two models are optional quality upgrades and are skipped
 unless you ask for them:
 
 | Optional model | Size | What you lose without it |
@@ -444,36 +445,55 @@ must be re-audited if it moves.
 
 ## Install
 
-### Mac: the app download (from the next release)
+### Mac: download the app
 
-Releases built from this revision on carry a disk image that opens to
-**Whisper Face** and a shortcut to **Applications**. Drag the app onto
-Applications and open it. With nothing installed, it shows a setup window:
-it asks Apple to install its command line tools if this Mac lacks them,
-checks for 5 GB of free space, says what it will download, and then sets
-itself up in `~/Library/Application Support/Whisper Face/checkout`, ticking
-off each step. If a step fails it says why in plain words and offers
-**Try Again** and **Show Log**. When it finishes, Whisper Face's own
-first-run guide asks for the microphone, Accessibility and Input Monitoring.
+1. Download `WhisperFace-<version>-macOS-arm64.dmg` from the
+   [latest release](https://github.com/Aiml3ss/whisper-face/releases/latest)
+   and open it. Drag **Whisper Face** onto **Applications**.
+2. Open Whisper Face from Applications. It is not yet signed with an Apple
+   Developer ID or notarized, so macOS blocks the first open. On macOS 15 and
+   later, choose **Done**, then go to **System Settings → Privacy & Security**,
+   scroll down, choose **Open Anyway** for Whisper Face, and confirm with
+   your password. On macOS 14, Control-click the app, choose **Open**, then
+   confirm.
+3. A setup window opens. If this Mac lacks Apple's command line tools, it
+   asks macOS to install them first, in a window of macOS's own. It checks
+   for 5 GB of free space and says what it will download, about 1 GB: the
+   speech model (565 MB), a small preview model (75 MB) and the parts they
+   run on. Choose **Set Up** and it ticks off each step as it sets itself up
+   in `~/Library/Application Support/Whisper Face/checkout`. If a step fails
+   it says why in plain words and offers **Try Again** and **Show Log**.
+4. Grant the permissions. When setup finishes, Whisper Face's first-run
+   guide asks for them: in **System Settings → Privacy & Security**, turn on
+   **Whisper Face** under **Input Monitoring** (so it notices you holding the
+   key) and **Accessibility** (so it can paste); macOS asks about the
+   **Microphone** the first time you dictate. It starts listening by itself
+   once the first two are on. If macOS shows them switched on but they are
+   not working, Whisper Face opens a small window with one button per missing
+   permission.
+
 Opening the app again later simply starts Whisper Face.
 
 The app carries its release's exact source archive (the same bytes as the
-published `WhisperFace-X-source.zip`), checks it against its checksum, and
-runs that copy's own `setup.sh --app`; nothing needs Homebrew. To update,
-drag a newer app over the old one and open it, or choose **Check for
-Updates…**, which offers a newer published release and downloads it only
+published `WhisperFace-<version>-source.zip`), checks it against its
+checksum, and runs that copy's own `setup.sh --app`; nothing needs Homebrew.
+To update, drag a newer app over the old one and open it, or choose **Check
+for Updates…**, which offers a newer published release and downloads it only
 when you click. Either way the new version is set up beside the old one,
 your settings, dictionary, history and models come across, and if anything
 fails the old version is put back and keeps working
-([details](docs/distribution/update-and-rollback.md)). To remove it, run
+([details](docs/distribution/update-and-rollback.md)). Because the app is
+unsigned, macOS may ask for Input Monitoring and Accessibility again after an
+update. To remove it, run
 `"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh" --uninstall`,
-then drag the app to the Trash. Until a Developer ID signed build is
-published, the app is an unsigned preview that macOS blocks the first time
-(see Open Anyway below).
+then drag the app to the Trash.
 
-### From a folder or a clone
+### From source, and Windows
 
-Clone or download the repository, then use the launcher for your OS:
+Clone or download the repository, then use the launcher for your OS. On a
+Mac, `Install.command` still works from a clone; the app download above is
+the easier path for most people. The Windows download is a source folder set
+up this way.
 
 Copy or extract the complete source folder to a writable local directory first;
 do not run the installer from a read-only mounted DMG or protected folder. Both
@@ -483,11 +503,10 @@ to a cloud drive: for example `~/Whisper Face` on Mac or
 `C:\Users\<you>\Whisper Face` on Windows, rather than Documents or Desktop,
 which iCloud Drive and OneDrive often sync.
 
-The published disk image is not signed with a Developer ID or notarized, so
-macOS blocks `Install.command` the first time. On macOS 15 and later, open it
-once, dismiss the warning, then go to System Settings → Privacy & Security
-and choose **Open Anyway** (macOS asks for your password). On macOS 14,
-Control-click `Install.command`, choose **Open**, then confirm.
+A `git clone` runs as it is. If you downloaded the source as a ZIP instead,
+macOS may block `Install.command` the first time: get past it with **Open
+Anyway** as in step 2 above (on macOS 14, Control-click it and choose
+**Open**).
 
 - **Mac:** double-click `Install.command`.
 - **Windows:** double-click `Install.cmd`.

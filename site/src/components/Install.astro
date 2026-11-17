@@ -3,28 +3,29 @@ import { RELEASE } from '../data/release';
 
 const macSteps = [
   {
-    h: 'Download and open',
-    p: 'Grab the disk image and open it. No account, no sign-up wall.',
-  },
-  {
-    h: 'Copy it to a folder of its own',
-    p: 'Drag the Whisper Face folder and the app beside it out of the disk image into a new folder in your home folder, such as Whisper Face. Your dictation history lives in that folder, so avoid Documents or Desktop if iCloud Drive syncs them. The installer will not run from the read-only image.',
+    h: 'Download and drag to Applications',
+    p: 'Open the disk image and drag Whisper Face onto Applications. No account, no sign-up wall.',
   },
   ...(RELEASE.unsigned
     ? [
         {
-          h: 'Let macOS open it',
-          p: 'The build is not notarized, so macOS blocks Install.command the first time. On macOS 15 or later, open it once, choose Done, then go to System Settings → Privacy & Security and choose Open Anyway; macOS asks for your password. On macOS 14, Control-click Install.command, choose Open, then confirm.',
+          h: 'Open it, then Open Anyway',
+          p: 'Whisper Face is not yet signed with an Apple Developer ID, so macOS blocks the first open. On macOS 15 or later, choose Done, then go to System Settings → Privacy & Security, choose Open Anyway for Whisper Face, and enter your password. On macOS 14, Control-click the app in Applications, choose Open, then confirm.',
         },
       ]
-    : []),
+    : [
+        {
+          h: 'Open it',
+          p: 'Open Whisper Face from Applications.',
+        },
+      ]),
   {
-    h: 'Run Install.command',
-    p: 'It needs an administrator account and the Xcode Command Line Tools, installs Homebrew if you do not have it, and downloads a few gigabytes on a fresh Mac — allow 15 to 45 minutes. Then it builds the speech helper, sets up the login service, and checks its own work.',
+    h: 'Let it set itself up',
+    p: 'A setup window downloads about 1 GB: the speech model, a small preview model, and the parts they run on. If your Mac lacks Apple’s command line tools, it asks macOS to install them first. It ticks off each step, and if one fails it says why and offers Try Again.',
   },
   {
-    h: 'Turn on three permissions',
-    p: 'In System Settings → Privacy & Security, turn on Whisper Face under Input Monitoring (so it notices you holding the key), Accessibility (so it can type for you), and Microphone (macOS asks the first time you dictate).',
+    h: 'Turn on the permissions',
+    p: 'When setup finishes, Whisper Face asks for them. In System Settings → Privacy & Security, turn on Whisper Face under Input Monitoring (so it notices you holding the key) and Accessibility (so it can type for you). macOS asks about the Microphone the first time you dictate.',
   },
 ];
 
@@ -35,11 +36,11 @@ const platforms = [
     href: RELEASE.dmg,
     meta: `${RELEASE.version} · ${RELEASE.size} disk image`,
     requires:
-      'Apple Silicon, macOS 14 or newer, an administrator account, about 5 GB free. The disk image is small; the installer downloads the speech models and tools.',
+      'Apple Silicon, macOS 14 or newer, about 5 GB free. The app sets itself up and downloads the speech models and the parts they run on.',
     checksums: RELEASE.checksums,
     checksumLabel: 'SHA256SUMS (Mac)',
     warn: RELEASE.unsigned
-      ? 'This build is not signed or notarized yet, so macOS will warn you before it runs. Step 3 shows the way through.'
+      ? 'This build is not signed or notarized yet, so macOS blocks it the first time. Step 2 shows the way through.'
       : '',
     steps: macSteps,
   },
@@ -81,7 +82,7 @@ const platforms = [
   <div class="sec-head">
     <span class="kicker">Get started</span>
     <h2>Setup is part of the product.</h2>
-    <p>One installer sets everything up and checks its own work. Then hold your key and talk.</p>
+    <p>The app sets everything up and checks its own work. Then hold your key and talk.</p>
   </div>
 
   <div class="install-grid">
@@ -150,18 +151,18 @@ const platforms = [
       class="terminal"
       data-platform="mac"
       role="img"
-      aria-label="Terminal showing a first Mac install: it downloads Parakeet and Whisper Tiny, builds the speech helper, installs the login service, then asks for three permissions"
+      aria-label="The Mac setup window's checklist on a first install: getting ready, downloading the parts it runs on and the speech model, building the speech engine, downloading the preview model, and starting Whisper Face"
     >
       <div class="bar"><i></i><i></i><i></i></div>
-      <pre><code><span class="muted"># an abridged first run</span>
-<span class="p">you@mac</span> ~/Whisper Face $ <span class="c">./Install.command</span>
+      <pre><code><span class="muted"># the setup window, on a first open</span>
+<span class="p">Set up Whisper Face</span>
 
-<span class="c">==</span> downloading the pinned Parakeet Unified model <span class="muted">(~565 MB)</span>
-<span class="c">==</span> building the native Parakeet Unified helper
-<span class="c">==</span> downloading Whisper Tiny <span class="muted">(~75 MB)</span>
-<span class="c">==</span> installing the login LaunchAgent
-<span class="c">==</span> Not finished yet: turn on "Whisper Face" under
-<span class="c">==</span>   Input Monitoring, Accessibility, Microphone
+<span class="c">✓</span> Getting ready
+<span class="c">✓</span> Downloading the parts it runs on
+<span class="c">✓</span> Downloading the speech model <span class="muted">(565 MB)</span>
+<span class="c">✓</span> Building the speech engine
+<span class="c">✓</span> Downloading the preview model <span class="muted">(75 MB)</span>
+<span class="c">✓</span> Starting Whisper Face
 
 <span class="muted">Then hold Right Option and start talking →</span></code></pre>
     </div>

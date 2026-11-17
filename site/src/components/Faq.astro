@@ -14,19 +14,19 @@ const faqs = [
   },
   {
     q: 'Which Macs does it run on?',
-    a: 'Apple Silicon Macs on macOS 14 or newer. Installing needs an administrator account and the Xcode Command Line Tools; the installer stops before downloading anything if they are missing.',
+    a: 'Apple Silicon Macs on macOS 14 or newer. Setup needs Apple’s command line tools; if your Mac lacks them, the setup window asks macOS to install them before it downloads anything else.',
   },
   {
-    q: 'What does the installer put on my Mac?',
-    a: 'Homebrew (if you do not have it), uv, ffmpeg, a Python environment, the Parakeet and Whisper Tiny speech models (about 650 MB), a speech helper and a small launcher app it builds with your Swift tools, and a login service. The larger Whisper model and the Ollama cleanup model are added only if you ask (./setup.sh --models, about 5 GB). ./setup.sh --uninstall shows everything it would remove before removing anything.',
+    q: 'What does setup put on my Mac?',
+    a: 'The app you dragged to Applications, and in ~/Library/Application Support/Whisper Face a copy of its own source with a Python environment, the Parakeet and Whisper Tiny speech models (about 650 MB), a speech helper it builds with Apple’s command line tools, and a login service. No Homebrew. The larger Whisper model and the Ollama cleanup model are added only if you ask (setup.sh --models in that folder, about 5 GB). setup.sh --uninstall shows everything it would remove before removing anything.',
   },
   {
     q: 'How much disk and time does it take?',
-    a: 'Allow about 5 GB free on a default install and 8 GB with the optional models. On a fresh Mac, which also needs the Command Line Tools, expect a few gigabytes of downloads and 15 to 45 minutes. These are estimates: we have not yet measured a clean-machine install or the memory it uses.',
+    a: 'Allow about 5 GB free on a default install and 8 GB with the optional models. The setup window downloads about 1 GB, plus Apple’s command line tools if your Mac lacks them. These are estimates: we have not yet measured a clean-machine install, how long it takes, or the memory it uses.',
   },
   {
     q: 'Why does macOS warn me when I open it?',
-    a: 'The build is not signed with a Developer ID or notarized by Apple yet. On macOS 15 or later, open Install.command once, then choose Open Anyway in System Settings → Privacy & Security. On macOS 14, Control-click it and choose Open. You can check the download against the release’s SHA256SUMS first.',
+    a: 'Whisper Face is not signed with an Apple Developer ID or notarized by Apple yet, so macOS blocks the first open. On macOS 15 or later, open the app once and choose Done, then choose Open Anyway in System Settings → Privacy & Security. On macOS 14, Control-click the app and choose Open. You can check the download against the release’s SHA256SUMS first.',
   },
   {
     q: 'What about Windows or iPhone?',

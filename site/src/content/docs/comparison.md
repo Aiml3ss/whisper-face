@@ -130,8 +130,8 @@ If your language is not on that list, this is not the tool for you yet.
 notarized, so they open without a warning and keep their permissions across
 updates. Whisper Face is currently distributed as an unsigned preview: macOS
 will say it cannot verify the developer (on macOS 15 and later you get past it
-in System Settings → Privacy & Security → Open Anyway), installing needs an
-administrator account and Apple's developer tools, and because ad-hoc
+in System Settings → Privacy & Security → Open Anyway), setting up needs
+Apple's command line tools, and because ad-hoc
 signatures change every build, you may need to re-grant Input Monitoring,
 Accessibility, and Microphone permission after an update. This is the most annoying thing about using it right now, and
 it is being worked on.

@@ -20,8 +20,9 @@ The release produces:
 
 - `WhisperFace-VERSION-source.zip`, the architecture-neutral writable source
   bundle (its Mac installer currently requires Apple Silicon);
-- `WhisperFace-VERSION-macOS-arm64.dmg`, the signed/notarized transport with a
-  generic compiled launcher app beside the exact source folder;
+- `WhisperFace-VERSION-macOS-arm64.dmg`, the disk image people install
+  from: the drag-install app and a link to Applications (signed and notarized
+  once a Developer ID exists; an unsigned preview until then);
 - `PACKAGE-CONTENTS.json` inside both containers, a deterministic logical-tree
   receipt bound to the version, full revision, commit timestamp, entry count,
   executable bits, symlink targets, and file hashes;
@@ -244,7 +245,12 @@ publication; it has no Apple credentials.
    `spctl`/`stapler` verification before install. What each of those checks
    does and does not prove is set out in
    [release provenance](../security/release-provenance.md).
-6. Install from the extracted source and run `./setup.sh --verify`.
+6. Install the way a person will: drag the app from the disk image to
+   Applications, open it (an unsigned build needs **Open Anyway** in System
+   Settings → Privacy & Security first), let the setup window finish, then run
+   `"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh" --verify`.
+   On another Mac or account, also install from the extracted source ZIP and
+   run `./setup.sh --verify` there.
 7. Confirm Advanced -> Exact Source (and, for a `--server-only` install,
    `GET /source`) name the tagged
    revision. Do not announce availability before all checks pass.
