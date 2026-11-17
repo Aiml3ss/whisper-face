@@ -62,6 +62,7 @@ from parrot_core import (  # noqa: E402
     infer_revised_insertion,
     mode_from_modifiers,
     should_start_speculation,
+    words_settle_route,
 )
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
@@ -157,6 +158,11 @@ BASELINE_DEFINITIONS = (
     "capture_release",
     "release_tail_is_silent",
     "release_path_metrics",
+    "session_recognition",
+    # The pipe writes every helper request and session message makes.
+    "_write_helper_chunks",
+    "bounded_helper_write",
+    "speech_session_header",
 )
 BASELINE_ASSIGNMENTS = (
     "IS_MACOS",
@@ -179,7 +185,16 @@ BASELINE_ASSIGNMENTS = (
     "PASTE_SETTLE_SECONDS",
     "PROSODY_FORMATTING",
     "PARAKEET_WORD_CONFIDENCE_ROUTING",
+    "PARAKEET_CONFIDENT_SKIPS_ESCALATION",
     "PARAKEET_PROTOCOL",
+    # Protocol 3 sessions: the switch, the append size and the headers.
+    "SPEECH_SESSION_DECODE",
+    "SPEECH_SESSION_APPEND_SAMPLES",
+    "SPEECH_SESSION_BEGIN",
+    "SPEECH_SESSION_APPEND",
+    "SPEECH_SESSION_FINISH",
+    "SPEECH_SESSION_CANCEL",
+    "SPEECH_SESSION_OPERATION_SHIFT",
     # bounded_helper_exchange's bound for a start, and the runtime's client.
     "PARAKEET_RUNTIME_START_ALLOWANCE",
     # The window a check by position waits for the cursor to move.
@@ -252,6 +267,9 @@ def load_definitions(*names, assignments=(), extra=None):
         # Pure helpers the assembly and the compiler call on every decode.
         "HELPER_WORD_SOURCE": HELPER_WORD_SOURCE,
         "combine_word_evidence_status": combine_word_evidence_status,
+        # Whether the runtime is sure of every word: _parakeet_crosschecked
+        # asks on every Parakeet decode.
+        "words_settle_route": words_settle_route,
         # The pure readback comparisons dictate.py imports from
         # insertion_integrity, so a selected readback runs the real ones.
         **{name: getattr(insertion_integrity, name) for name in (
@@ -13603,13 +13621,234 @@ class ReleasePathMetricsTests(unittest.TestCase):
         self.assertTrue(ns["emit_performance_trace"]("release_path", metrics))
 
 
+class SpeechSessionTests(unittest.TestCase):
+    """A long take streamed to the runtime while it is captured, and when
+    its answer stands for the take at release (session_recognition)."""
+
+    from concurrent.futures import Future
+
+    class Pool:
+        """Runs each job at once, in order, and records it."""
+
+        def __init__(self):
+            self.jobs = []
+
+        def submit(self, fn, *args):
+            self.jobs.append(fn.__name__)
+            future = SpeechSessionTests.Future()
+            try:
+                future.set_result(fn(*args))
+            except Exception as error:      # pragma: no cover - reported
+                future.set_exception(error)
+            return future
+
+    class Client:
+        """The runtime's client, recording what a session sent."""
+
+        def __init__(self, begin=True, answer=None):
+            self.begin = begin
+            self.answer = answer
+            self.appended = []
+            self.finished = []
+            self.cancelled = 0
+
+        def begin_session(self):
+            return "token" if self.begin else None
+
+        def append_session(self, token, audio):
+            self.appended.append(np.array(audio))
+            return True
+
+        def finish_session(self, token, expected):
+            self.finished.append(expected)
+            return self.answer
+
+        def cancel_session(self, token):
+            self.cancelled += 1
+
+    def setUp(self):
+        self.ns = load_definitions(
+            "SpeechSession", "CapturedAudio",
+            extra={"np": np, "SPEECH_SESSION_POOL": None,
+                   "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                   "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                   "CAPTURE_BLOCK_SECONDS": 8, "SAMPLE_RATE": 16_000,
+                   "print": lambda *args, **kwargs: None})
+
+    def capture(self, client, total, *, start_after=1_000, block=512):
+        frames = self.ns["CapturedAudio"]()
+        pool = self.Pool()
+        session = self.ns["SpeechSession"](client, frames, start_after, pool)
+        audio = np.random.default_rng(3).normal(
+            0, 0.1, total).astype(np.float32)
+        captured = 0
+        while captured < total:
+            part = audio[captured:captured + block]
+            frames.append(part)
+            captured += len(part)
+            session.captured(captured)
+        return session, frames, audio, pool
+
+    def test_nothing_is_sent_until_the_take_outgrows_one_window(self):
+        client = self.Client()
+        session, _frames, _audio, pool = self.capture(
+            client, 1_000, start_after=1_000)
+        self.assertFalse(session.begun)
+        self.assertEqual(pool.jobs, [])
+        self.assertIsNone(session.finish(_frames, 1_000))
+        self.assertEqual(client.finished, [])
+
+    def test_the_take_is_sent_sample_for_sample_in_bounded_pieces(self):
+        client = self.Client(answer=("text", 0.01))
+        session, frames, audio, pool = self.capture(client, 50_000)
+        self.assertEqual(pool.jobs[0], "_begin")
+        self.assertEqual(session.finish(frames, len(audio)), ("text", 0.01))
+        self.assertEqual(client.finished, [len(audio)])
+        sent = np.concatenate(client.appended)
+        np.testing.assert_array_equal(sent, audio)
+        # Handed over at most once per SPEECH_SESSION_APPEND_SAMPLES of
+        # new audio (plus the first, and the rest at release), never per
+        # audio block.
+        self.assertLessEqual(len(client.appended), 50_000 // 8_000 + 2)
+
+    def test_a_session_that_did_not_begin_sends_nothing(self):
+        client = self.Client(begin=False, answer=("text", 0.01))
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        self.assertIsNone(session.finish(frames, len(audio)))
+        self.assertEqual(client.appended, [])
+        self.assertEqual(client.finished, [])
+
+    def test_other_audio_is_never_finished(self):
+        client = self.Client(answer=("text", 0.01))
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        # A take whose audio was replaced, or a different length.
+        other = self.ns["CapturedAudio"](audio)
+        self.assertIsNone(session.finish(other, len(audio)))
+        self.assertEqual(client.cancelled, 1)
+        client = self.Client(answer=("text", 0.01))
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        self.assertIsNone(session.finish(frames, len(audio) - 1))
+        self.assertEqual(client.finished, [])
+
+    # ---- session_recognition
+
+    SPOKEN = "Alpha beta gamma delta."
+
+    def recognize(self, *, words, chunks=(), cut=0, audio=None,
+                  crosscheck=True, skip_escalation=True, answer=True):
+        """session_recognition over a session whose answer has these word
+        confidences, one word a second; what it returned and the session."""
+        from parrot_core import HelperWord
+        from voice_compiler import project_word_evidence
+        tokens = self.SPOKEN.split()
+        result = ParakeetResult(
+            self.SPOKEN, 0.05, avg_confidence=0.9,
+            word_evidence_status="native",
+            words=tuple(HelperWord(token, float(index), index + 0.8, conf)
+                        for index, (token, conf)
+                        in enumerate(zip(tokens, words))))
+        audio = (np.full(16_000 * 5, 0.3, dtype=np.float32)
+                 if audio is None else audio)
+        session = SimpleNamespace(
+            begun=True, finished=[], cancelled=[],
+            finish=lambda frames, expected: (
+                session.finished.append(expected) or (
+                    result if answer else None)),
+            cancel=lambda: session.cancelled.append(True))
+        rec = SimpleNamespace(session=session, frames=object(), prompt=None)
+        ns = load_definitions(
+            "session_recognition", "_parakeet_crosschecked",
+            "_clean_native_processing_s", "crosscheck_agreement",
+            "prepare_asr_audio",
+            assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
+            extra={
+                "PARAKEET_CROSSCHECK": crosscheck,
+                "PARAKEET_CONFIDENT_SKIPS_ESCALATION": skip_escalation,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "SAMPLE_RATE": 16_000,
+                "np": np,
+                "active_calibration_settings": lambda: None,
+                "CalibrationSettings": type("CalibrationSettings", (), {}),
+                "project_word_evidence": project_word_evidence,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            })
+        chunk_futs = []
+        for engine, confidence in chunks:
+            future = self.Future()
+            future.set_result(Recognition(
+                "Alpha.", confidence, engine=engine))
+            chunk_futs.append(SimpleNamespace(future=future))
+        recognition = ns["session_recognition"](rec, audio, cut, chunk_futs)
+        self.assertIsNone(rec.session)
+        return recognition, session
+
+    def test_a_sure_take_is_the_sessions_whole_decode(self):
+        recognition, session = self.recognize(words=(0.95, 0.99, 0.9, 0.97))
+        self.assertEqual(recognition.text, self.SPOKEN)
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertAlmostEqual(recognition.confidence, 0.84)
+        self.assertEqual(session.finished, [16_000 * 5])
+        self.assertEqual(session.cancelled, [])
+
+    def test_only_words_after_the_last_cut_must_be_sure(self):
+        # The first two words were in a rolling chunk that the cross-check
+        # already checked during the hold; the last two were not.
+        recognition, _session = self.recognize(
+            words=(0.3, 0.5, 0.95, 0.99), cut=2 * 16_000,
+            chunks=(("parakeet-unified", 0.9),))
+        self.assertEqual(recognition.text, self.SPOKEN)
+        recognition, session = self.recognize(
+            words=(0.99, 0.99, 0.89, 0.99), cut=2 * 16_000,
+            chunks=(("parakeet-unified", 0.9),))
+        self.assertIsNone(recognition)
+        self.assertEqual(session.cancelled, [True])
+
+    def test_the_route_confidence_is_the_lowest_checked_chunks(self):
+        recognition, _session = self.recognize(
+            words=(0.99,) * 4, cut=16_000,
+            chunks=(("parakeet-unified", 0.62),))
+        self.assertAlmostEqual(recognition.confidence, 0.62)
+
+    def test_a_chunk_turbo_replaced_keeps_the_chunked_path(self):
+        recognition, session = self.recognize(
+            words=(0.99,) * 4, cut=16_000, chunks=(("turbo", 0.9),))
+        self.assertIsNone(recognition)
+        self.assertEqual(session.cancelled, [True])
+
+    def test_a_take_that_needs_gain_keeps_the_chunked_path(self):
+        # prepare_asr_audio lifts a quiet take, so the session's raw audio
+        # is not what one request would send; it is not even finished.
+        recognition, session = self.recognize(
+            words=(0.99,) * 4,
+            audio=np.full(16_000 * 5, 0.05, dtype=np.float32))
+        self.assertIsNone(recognition)
+        self.assertEqual(session.finished, [])
+
+    def test_switched_off_or_unanswered_keeps_the_chunked_path(self):
+        for changes in ({"skip_escalation": False}, {"answer": False}):
+            with self.subTest(**changes):
+                recognition, session = self.recognize(
+                    words=(0.99,) * 4, **changes)
+                self.assertIsNone(recognition)
+                self.assertEqual(session.cancelled, [True])
+
+    def test_with_the_cross_check_off_the_session_always_stands(self):
+        recognition, _session = self.recognize(
+            words=(0.2,) * 4, crosscheck=False, cut=16_000,
+            chunks=(("turbo", 0.9),))
+        self.assertEqual(recognition.text, self.SPOKEN)
+
+
 class ParakeetCrosscheckTests(unittest.TestCase):
     """Agreement-derived route confidence on the Parakeet primary path."""
 
     @staticmethod
     def crosschecked(*, parakeet_result, tiny_text=None, fallback=None,
                      crosscheck_enabled=True, tiny_cached=True,
-                     calls=None, routing=False):
+                     calls=None, routing=False, skip_escalation=True,
+                     crosscheck_text=None):
         from parrot_core import (
             hypothesis_agreement,
             parakeet_confidence_from_agreement,
@@ -13661,12 +13900,15 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                 "words_settle_route": words_settle_route,
                 "project_word_evidence": project_word_evidence,
                 "PARAKEET_WORD_CONFIDENCE_ROUTING": routing,
+                "PARAKEET_CONFIDENT_SKIPS_ESCALATION": skip_escalation,
                 "Recognition": Recognition,
                 "print": lambda *args, **kwargs: None,
             },
         )
         audio = np.zeros(16_000 * 4, dtype=np.float32)
-        return ns["_parakeet_crosschecked"](audio, None, verify=True), calls
+        return ns["_parakeet_crosschecked"](
+            audio, None, verify=True,
+            crosscheck_text=crosscheck_text), calls
 
     @staticmethod
     def worded(text, *confidences):
@@ -13693,8 +13935,9 @@ class ParakeetCrosscheckTests(unittest.TestCase):
     def test_routing_on_sure_words_need_no_crosscheck_before_the_paste(self):
         fallback = Recognition(
             text="One two three.", confidence=0.2, engine="turbo")
+        # Every word at or above CROSSCHECK_SKIP_CONFIDENCE (0.90).
         recognition, calls = self.crosschecked(
-            parakeet_result=self.worded("Alpha beta gamma.", 0.9, 0.8, 0.78),
+            parakeet_result=self.worded("Alpha beta gamma.", 0.99, 0.95, 0.9),
             tiny_text="one two three", fallback=fallback, routing=True)
         # Neither Tiny nor a Turbo escalation ran; the text is Parakeet's.
         self.assertEqual(calls, [])
@@ -13702,6 +13945,60 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         self.assertEqual(recognition.confidence, 0.84)
         self.assertIsNone(recognition.alternative)
         self.assertIsNone(recognition.crosscheck_s)
+
+    def test_a_sure_decode_is_never_escalated_and_tiny_still_runs(self):
+        # Tiny hears something else entirely (agreement 0): today that buys
+        # a Turbo decode before the paste. Every word at or above the
+        # calibrated line skips it; Tiny still ran beside the decode and
+        # still sets the route confidence and the alternative.
+        fallback = Recognition(
+            text="One two three.", confidence=0.2, engine="turbo")
+        for given in (None, "one two three"):
+            with self.subTest(tiny_from_speculation=given is not None):
+                recognition, calls = self.crosschecked(
+                    parakeet_result=self.worded(
+                        "Alpha beta gamma.", 0.99, 0.95, 0.9),
+                    tiny_text="one two three", fallback=fallback,
+                    crosscheck_text=given)
+                self.assertEqual(
+                    [repo for repo, _skip, _lang in calls],
+                    [] if given else ["tiny-repo"])
+                self.assertEqual(recognition.text, "Alpha beta gamma.")
+                self.assertEqual(recognition.engine, "parakeet-unified")
+                self.assertAlmostEqual(recognition.confidence, 0.45)
+                self.assertEqual(recognition.alternative, "one two three")
+                self.assertIsNone(recognition.escalation_s)
+
+    def test_one_word_under_the_line_escalates_exactly_as_before(self):
+        def run(**switches):
+            fallback = Recognition(
+                text="One two three.", confidence=0.2, engine="turbo")
+            return self.crosschecked(
+                parakeet_result=self.worded(
+                    "Alpha beta gamma.", 0.99, 0.899, 0.99),
+                tiny_text="one two three", fallback=fallback, **switches)
+
+        (recognition, calls), (before, before_calls) = (
+            run(), run(skip_escalation=False))
+        self.assertEqual(calls, before_calls)
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo", "turbo-repo"])
+        self.assertEqual(
+            (recognition.text, recognition.engine, recognition.verified,
+             recognition.alternative),
+            (before.text, before.engine, before.verified, before.alternative))
+        self.assertEqual(recognition.engine, "turbo")
+
+    def test_switched_off_a_sure_decode_escalates_as_before(self):
+        fallback = Recognition(
+            text="One two three.", confidence=0.2, engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=self.worded("Alpha beta gamma.", 0.99, 0.99, 0.99),
+            tiny_text="one two three", fallback=fallback,
+            skip_escalation=False)
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo", "turbo-repo"])
+        self.assertEqual(recognition.engine, "turbo")
 
     def test_routing_on_one_unsure_word_keeps_the_whole_crosscheck(self):
         def run(routing):
@@ -15568,13 +15865,15 @@ class HelperProtocolCompatibilityTests(unittest.TestCase):
             helper_words_override=words_override, parakeet_requests=[],
             recognize=lambda audio, _engine: heard)
 
-    def client(self, desktop, *, arguments=None):
+    def client(self, desktop, *, arguments=None, program=None):
         if os.name == "nt":
             self.skipTest("select() cannot wait on Windows pipes")
         spawned = []
 
         def factory(argv, **kwargs):
             spawned.append((list(argv), kwargs))
+            if program is not None:
+                argv = [program, *argv[1:]]
             if arguments is not None:
                 argv = [argv[0], *arguments]
             process = self.fake.HelperProcess(desktop, argv)
@@ -15620,7 +15919,7 @@ class HelperProtocolCompatibilityTests(unittest.TestCase):
     def test_old_helper_with_new_client_stays_protocol_1(self):
         client, spawned = self.client(self.desktop(1))
         result = client.transcribe(np.full(16_000, 0.1, dtype=np.float32))
-        self.assertEqual(spawned[0][0][1:4], ["--server", "--protocol", "2"])
+        self.assertEqual(spawned[0][0][1:4], ["--server", "--protocol", "3"])
         self.assertEqual(client.protocol, 1)
         self.assertEqual(result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
         self.assertEqual(
@@ -15657,6 +15956,105 @@ class HelperProtocolCompatibilityTests(unittest.TestCase):
                     result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
                 self.assertEqual(result.word_evidence_status, "rejected")
                 self.assertIsNone(result.words)
+
+    # ---- protocol 3: the runtime's sessions
+
+    def runtime(self, **changes):
+        """A client of the fake runtime, which speaks protocol 3."""
+        desktop = self.desktop(2)
+        desktop.runtime_requests = []
+        desktop.runtime_sessions = []
+        desktop.runtime_failure = None
+        for name, value in changes.items():
+            setattr(desktop, name, value)
+        client, _spawned = self.client(desktop,
+                                       program=self.fake.RUNTIME_NAME)
+        client.write = load_definitions(
+            "bounded_helper_write",
+            extra={"PARAKEET_MAX_REQUEST_TIMEOUT": 10.0, "os": os,
+                   "select": select, "time": time},
+        )["bounded_helper_write"]
+        client.retry_after_failure = True
+        return client, desktop
+
+    def test_a_session_is_decoded_beside_batch_requests(self):
+        client, desktop = self.runtime()
+        audio = np.full(48_000, 0.1, dtype=np.float32)
+        # A session never starts a program: none is loaded yet.
+        self.assertIsNone(client.begin_session())
+        self.assertIsNotNone(client.transcribe(audio[:16_000]))
+        self.assertEqual(client.protocol, 3)
+        token = client.begin_session()
+        self.assertIsNotNone(token)
+        self.assertTrue(client.append_session(token, audio[:20_000]))
+        # A batch request between two appends is answered as ever, and is
+        # not part of the session.
+        self.assertIsNotNone(client.transcribe(audio[:16_000]))
+        self.assertTrue(client.append_session(token, audio[20_000:]))
+        result = client.finish_session(token, len(audio))
+        self.assertEqual(result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
+        self.assertEqual(result.word_evidence_status, "native")
+        self.assertEqual(desktop.runtime_sessions, [len(audio)])
+        self.assertEqual(desktop.runtime_requests, [16_000, 16_000])
+        # Spent: the same token gets nothing more.
+        self.assertIsNone(client.finish_session(token, len(audio)))
+        self.assertFalse(client.append_session(token, audio))
+        self.assertIsNotNone(client.process)
+
+    def test_an_answer_for_other_audio_is_dropped_and_the_program_closed(self):
+        client, desktop = self.runtime()
+        audio = np.full(24_000, 0.1, dtype=np.float32)
+        client.transcribe(audio)
+        token = client.begin_session()
+        self.assertTrue(client.append_session(token, audio))
+        self.assertIsNone(client.finish_session(token, len(audio) + 1))
+        self.assertIsNone(client.process)
+        self.assertEqual(client.failed_starts, 1)
+
+    def test_a_failed_session_closes_and_benches_the_runtime(self):
+        client, desktop = self.runtime()
+        audio = np.full(24_000, 0.1, dtype=np.float32)
+        client.transcribe(audio)
+        token = client.begin_session()
+        self.assertTrue(client.append_session(token, audio))
+        desktop.runtime_failure = "session"
+        self.assertIsNone(client.finish_session(token, len(audio)))
+        self.assertIsNone(client.process)
+        self.assertEqual(client.failed_starts, 1)
+
+    def test_a_cancelled_session_cannot_be_finished(self):
+        client, desktop = self.runtime()
+        audio = np.full(24_000, 0.1, dtype=np.float32)
+        client.transcribe(audio)
+        token = client.begin_session()
+        self.assertTrue(client.append_session(token, audio))
+        client.cancel_session(token)
+        self.assertIsNone(client.finish_session(token, len(audio)))
+        self.assertEqual(desktop.runtime_sessions, [])
+        # Cancelling is not a failure: the runtime stays loaded.
+        self.assertIsNotNone(client.process)
+        self.assertIsNotNone(client.transcribe(audio))
+
+    def test_a_program_below_protocol_3_never_gets_a_session(self):
+        client, _spawned = self.client(self.desktop(2))
+        client.transcribe(np.full(16_000, 0.1, dtype=np.float32))
+        self.assertEqual(client.protocol, 2)
+        self.assertIsNone(client.begin_session())
+        self.assertFalse(client.append_session(
+            client.process, np.ones(8, dtype=np.float32)))
+        self.assertIsNone(client.finish_session(client.process, 8))
+
+    def test_a_session_header_puts_the_operation_above_any_count(self):
+        header = load_definitions(
+            "speech_session_header", extra={"struct": struct},
+        )["speech_session_header"]
+        (value,) = struct.unpack("<Q", header(2, 8_000))
+        self.assertEqual(value >> 56, 2)
+        self.assertEqual(value & ((1 << 56) - 1), 8_000)
+        # A batch request's count, ten minutes at most, never reaches the
+        # operation byte, so a protocol 1 or 2 program sees an invalid
+        # count, never a session.
+        self.assertLess(16_000 * 600, 1 << 56)
 
     def test_the_shipped_helper_reads_only_its_first_argument(self):
         # What lets a new client ask an old helper for protocol 2: the
@@ -16835,7 +17233,7 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
     def test_launched_the_old_way_it_answers_protocol_1(self):
         wire = self.code(self.source("Wire.swift"))
         main = self.code(self.source("main.swift"))
-        self.assertIn("static let supportedProtocol = 2", wire)
+        self.assertIn("static let supportedProtocol = 3", wire)
         # No --protocol, or an unreadable one, is protocol 1.
         self.assertIn('arguments.firstIndex(of: "--protocol")', wire)
         self.assertIn("let requested = Int(arguments[flag + 1]) else { return 1 }",
@@ -16874,6 +17272,58 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
         self.assertIn('"error": "invalid sample count"', main)
         self.assertIn("sampleRate * 10 * 60", helper)
         self.assertIn("static let maximumSamples = sampleRate * 10 * 60", wire)
+
+    def test_protocol_3_sessions_are_what_the_python_half_sends(self):
+        wire = self.code(self.source("Wire.swift"))
+        main = self.code(self.source("main.swift"))
+        recognizer = self.code(self.source("Recognizer.swift"))
+        names = load_definitions(assignments={
+            "SPEECH_SESSION_BEGIN", "SPEECH_SESSION_APPEND",
+            "SPEECH_SESSION_FINISH", "SPEECH_SESSION_CANCEL",
+            "SPEECH_SESSION_OPERATION_SHIFT"})
+        # The same operation codes and header layout on both sides.
+        for case, name in (("begin", "BEGIN"), ("append", "APPEND"),
+                           ("finish", "FINISH"), ("cancel", "CANCEL")):
+            with self.subTest(operation=case):
+                self.assertIn(
+                    f"case {case} = {names['SPEECH_SESSION_' + name]}", wire)
+        self.assertIn("case batch = 0", wire)
+        self.assertIn("static let operationShift: UInt64 = "
+                      f"{names['SPEECH_SESSION_OPERATION_SHIFT']}", wire)
+        self.assertIn("static let countMask: UInt64 = (1 << 56) - 1", wire)
+        # Below protocol 3 every header is a sample count, as it was: a
+        # session header is only an invalid count there.
+        self.assertIn("let operation: Wire.Operation? = wire >= 3\n"
+                      "        ? Wire.Operation(rawValue: header >> "
+                      "Wire.operationShift) : .batch", main)
+        self.assertIn("let requested = wire >= 3 ? header & Wire.countMask "
+                      ": header", main)
+        self.assertIn('if wire >= 3 {\n    status["capabilities"] = '
+                      '["words", "sessions"]', main)
+        # A finish answers what a batch request answers, plus the count.
+        finish = main[main.index("func answerFinish("):]
+        literal = re.search(r"var answer: \[String: Any\] = \[\n(.*?)\n"
+                            r"\s*\]\n", finish, re.S)
+        self.assertEqual(re.findall(r'^\s*"(\w+)":', literal.group(1),
+                                    re.MULTILINE),
+                         ["ok", "text", "processing_s", "samples"])
+        # A session decodes the windows transcribe() decodes, with the same
+        # functions, merged in the same order: the parity script's session
+        # mode measures that the text and words are the same.
+        transcribe = recognizer[recognizer.index("func transcribe("):
+                                recognizer.index("func merge(")]
+        session = recognizer[recognizer.index("final class Session"):]
+        for call in ("layout.chunkStarts(totalSamples:",
+                     "transcribeWindow(", "merge(merged, windowTokens)",
+                     "finished(merged)"):
+            with self.subTest(call=call):
+                self.assertIn(call, transcribe)
+                self.assertIn(call, session)
+        # Only a complete window is decoded before finish.
+        self.assertIn("guard start + layout.chunkSamples <= total else "
+                      "{ break }", session)
+        self.assertIn("guard samples.count <= Wire.maximumSamples - total",
+                      session)
 
     def test_protocol_2_is_what_the_python_half_reads(self):
         wire = self.code(self.source("Wire.swift"))
@@ -17088,7 +17538,7 @@ class ParakeetWordEvidenceRuntimeTests(unittest.TestCase):
                              ("hi", 0.1))
         argv, kwargs = spawned[0]
         self.assertEqual(argv[1:], [
-            "--server", "--protocol", "2",
+            "--server", "--protocol", "3",
             "--models", str(PARAKEET_CLIENT_NAMES["PARAKEET_MODEL_DIR"])])
         self.assertIn("KEEP_ME", kwargs["env"])
         self.assertFalse(any(key.startswith("FLUID_")
@@ -17101,7 +17551,9 @@ class ParakeetWordEvidenceRuntimeTests(unittest.TestCase):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
         for line in ("PROSODY_FORMATTING = False",
                      "PARAKEET_WORD_CONFIDENCE_ROUTING = False",
-                     "PARAKEET_PROTOCOL = 2",
+                     "PARAKEET_CONFIDENT_SKIPS_ESCALATION = True",
+                     "SPEECH_SESSION_DECODE = True",
+                     "PARAKEET_PROTOCOL = 3",
                      "PARAKEET_MAX_RESPONSE_BYTES = 1024 * 1024"):
             with self.subTest(line=line):
                 self.assertIn("\n" + line + "\n", source)

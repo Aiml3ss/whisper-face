@@ -375,18 +375,24 @@ def parse_helper_words(raw, duration) -> tuple[HelperWord, ...] | None:
 
 
 def helper_protocol(status) -> int:
-    """The protocol a helper's ready line declares; 1 unless it is exactly 2.
+    """The protocol a helper's ready line declares: 1 unless it is exactly
+    2 with the ``words`` capability, or exactly 3 with ``words`` and
+    ``sessions``.
 
-    A protocol 1 helper sends no ``protocol`` key. Anything that is not the
-    integer 2 with the ``words`` capability is treated as protocol 1.
+    A protocol 1 helper sends no ``protocol`` key. Anything else is treated
+    as protocol 1.
     """
     if not isinstance(status, dict):
         return 1
     value = status.get("protocol")
     capabilities = status.get("capabilities")
-    if (type(value) is int and value == 2 and isinstance(capabilities, list)
-            and "words" in capabilities):
+    if (type(value) is not int or not isinstance(capabilities, list)
+            or "words" not in capabilities):
+        return 1
+    if value == 2:
         return 2
+    if value == 3 and "sessions" in capabilities:
+        return 3
     return 1
 
 
@@ -1530,20 +1536,32 @@ def parakeet_confidence_from_agreement(agreement: float) -> float:
 # A word the recognizer scored at least this sure of needs no review flag
 # (voice_compiler's "word-confidence" uncertainty starts below it).
 CONFIDENT_WORD = 0.78
+# A Parakeet decode whose every word the runtime scored at least this sure
+# of needs no Tiny cross-check, and so no Turbo escalation, before the
+# paste (dictate.PARAKEET_CONFIDENT_SKIPS_CROSSCHECK). Calibrated on the
+# owner's 40 recorded sentences (experiment E3, 2026-11-17): word
+# confidence separates wrong words from right ones (ROC area 0.88), the
+# escalation path never fired on any of them, and every sentence Turbo
+# alone would have transcribed better had a lowest word confidence of at
+# most 0.867, so at 0.90 none of them skips the cross-check while 4 of the
+# 16 sentences Parakeet got right do. The private receipt is in
+# ~/whisper-face-evidence/runs/2026-11-17-e3-calibration/.
+CROSSCHECK_SKIP_CONFIDENCE = 0.90
 
 
-def words_settle_route(words, status: str) -> bool:
+def words_settle_route(words, status: str,
+                       floor: float = CROSSCHECK_SKIP_CONFIDENCE) -> bool:
     """Whether the helper's own word scores make a cross-check unnecessary.
 
     Only native word evidence counts, and only when there is some and every
-    word is at or above CONFIDENT_WORD. Anything else (no words, words that
-    did not line up with the text, one unsure word) leaves the decision to
-    the cross-check, as before.
+    word is at or above ``floor``. Anything else (no words, words that did
+    not line up with the text, one unsure word) leaves the decision to the
+    cross-check, as before.
     """
     if status != "native" or not words:
         return False
     try:
-        return all(float(word.confidence) >= CONFIDENT_WORD for word in words)
+        return all(float(word.confidence) >= floor for word in words)
     except (TypeError, ValueError):
         return False
 

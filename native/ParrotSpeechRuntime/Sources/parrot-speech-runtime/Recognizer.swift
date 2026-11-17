@@ -142,36 +142,51 @@ final class Recognizer {
     /// are merged on their overlap, then seam duplicates are collapsed.
     func transcribe(_ samples: [Float]) throws -> Transcript {
         var merged: [TokenWindow] = []
-        let merger = WindowMerger()
         for chunkStart in layout.chunkStarts(totalSamples: samples.count) {
             let chunkEnd = min(chunkStart + layout.chunkSamples, samples.count)
             let windowTokens = try autoreleasepool {
-                try transcribeWindow(samples: samples, chunkStart: chunkStart, chunkEnd: chunkEnd)
+                try transcribeWindow(
+                    samples: samples, from: chunkStart, count: chunkEnd - chunkStart,
+                    globalStart: chunkStart)
             }
-            merged =
-                merged.isEmpty
-                ? windowTokens
-                : merger.mergeChunks(
-                    merged,
-                    windowTokens,
-                    spliceSafeTokenIds: spliceSafeTokenIds,
-                    caseVariantIds: caseVariantIds
-                )
+            merged = merge(merged, windowTokens)
         }
+        return finished(merged)
+    }
+
+    /// The token stream so far with the next window's merged onto it. The
+    /// windows of one recording go through here in order, whether they are
+    /// decoded in one request or one at a time in a session, so both give
+    /// the same stream.
+    func merge(_ merged: [TokenWindow], _ windowTokens: [TokenWindow]) -> [TokenWindow] {
+        merged.isEmpty
+            ? windowTokens
+            : WindowMerger().mergeChunks(
+                merged,
+                windowTokens,
+                spliceSafeTokenIds: spliceSafeTokenIds,
+                caseVariantIds: caseVariantIds
+            )
+    }
+
+    /// The transcript of a recording whose every window has been merged.
+    func finished(_ windows: [TokenWindow]) -> Transcript {
+        let merger = WindowMerger()
+        var merged = windows
         merged.sort { $0.timestamp < $1.timestamp }
         merged = merger.collapseSeamWordDuplicates(merged, vocabulary: vocabulary.pieces)
         return Transcript(text: vocabulary.decode(ids: merged.map(\.token)), tokens: merged)
     }
 
-    private func transcribeWindow(
-        samples: [Float], chunkStart: Int, chunkEnd: Int
+    /// Decode one window: `count` samples of `samples` from index `from`,
+    /// which is sample `globalStart` of the recording.
+    func transcribeWindow(
+        samples: [Float], from localStart: Int, count validCount: Int, globalStart: Int
     ) throws -> [TokenWindow] {
-        let validCount = chunkEnd - chunkStart
-
         var buffer = [Float](repeating: 0, count: layout.windowSamples)
         samples.withUnsafeBufferPointer { src in
             buffer.withUnsafeMutableBufferPointer { dst in
-                dst.baseAddress!.update(from: src.baseAddress! + chunkStart, count: validCount)
+                dst.baseAddress!.update(from: src.baseAddress! + localStart, count: validCount)
             }
         }
         let (melArray, melLength) = try mel.features(window: buffer, validCount: validCount)
@@ -200,8 +215,112 @@ final class Recognizer {
         let emissions = try decoder.decode(
             encoded: encoded,
             frameRange: 0..<encoderLength,
-            globalFrameOffset: chunkStart / layout.frameSamples
+            globalFrameOffset: globalStart / layout.frameSamples
         )
         return emissions.map { (token: $0.token, timestamp: $0.frame, confidence: $0.prob, duration: 0) }
+    }
+}
+
+/// Protocol 3: one recording decoded while it is still being captured.
+///
+/// A window's audio is fixed as soon as the recording reaches its end, and
+/// every window decodes alone from a fresh state, so each window that is
+/// complete is decoded the moment it is, and merged onto the windows before
+/// it exactly as `transcribe` merges them. `finish` decodes what is left
+/// (the last window, which may be short) and returns what `transcribe`
+/// returns for the whole recording: the same windows, decoded the same way,
+/// merged in the same order. Only audio not yet decoded is kept.
+final class Session {
+    private let recognizer: Recognizer
+    /// The recording from sample `bufferStart` on.
+    private var buffer: [Float] = []
+    private var bufferStart = 0
+    /// Samples appended in all.
+    private(set) var total = 0
+    /// Windows decoded and merged so far; window k starts at k strides.
+    private(set) var decodedWindows = 0
+    private var merged: [TokenWindow] = []
+    /// Why the session can no longer give the recording's transcript.
+    private(set) var failure: String?
+
+    init(recognizer: Recognizer) {
+        self.recognizer = recognizer
+    }
+
+    private var layout: WindowLayout { recognizer.layout }
+
+    /// Add audio, and decode every window it completes. Once the session
+    /// has failed the audio is dropped; `finish` reports why.
+    func append(_ samples: [Float]) {
+        guard failure == nil else { return }
+        guard samples.count <= Wire.maximumSamples - total else {
+            fail("session longer than the maximum")
+            return
+        }
+        buffer += samples
+        total += samples.count
+        while failure == nil {
+            let start = decodedWindows * layout.strideSamples
+            guard start + layout.chunkSamples <= total else { break }
+            decodeWindow(at: start, count: layout.chunkSamples)
+            // The next window starts one stride on; nothing before it is
+            // read again.
+            let next = decodedWindows * layout.strideSamples
+            if failure == nil {
+                buffer.removeFirst(next - bufferStart)
+                bufferStart = next
+            }
+        }
+    }
+
+    /// The recording's transcript: the windows `transcribe` would decode
+    /// for `total` samples that are not decoded yet, merged on, then
+    /// finished as `transcribe` finishes. The session is spent afterwards.
+    func finish() throws -> Transcript {
+        if let failure {
+            throw RuntimeError.decoding(failure)
+        }
+        guard total > 0 else {
+            throw RuntimeError.decoding("empty session")
+        }
+        let starts = layout.chunkStarts(totalSamples: total)
+        guard decodedWindows <= starts.count else {
+            throw RuntimeError.decoding("session windows out of step")
+        }
+        for start in starts[decodedWindows...] {
+            decodeWindow(at: start, count: min(start + layout.chunkSamples, total) - start)
+            if let failure {
+                throw RuntimeError.decoding(failure)
+            }
+        }
+        buffer = []
+        return recognizer.finished(merged)
+    }
+
+    private func decodeWindow(at start: Int, count: Int) {
+        // Every window start is a whole number of strides, and the buffer
+        // is cut only at the next one.
+        guard start == decodedWindows * layout.strideSamples, start >= bufferStart,
+              start - bufferStart + count <= buffer.count else {
+            fail("session windows out of step")
+            return
+        }
+        do {
+            let windowTokens = try autoreleasepool {
+                try recognizer.transcribeWindow(
+                    samples: buffer, from: start - bufferStart, count: count,
+                    globalStart: start)
+            }
+            merged = recognizer.merge(merged, windowTokens)
+            decodedWindows += 1
+        } catch {
+            fail("transcription failed: \(error)")
+        }
+    }
+
+    private func fail(_ reason: String) {
+        failure = reason
+        buffer = []
+        merged = []
     }
 }

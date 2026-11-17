@@ -196,10 +196,10 @@ class BootTests(unittest.TestCase):
         # beside it but, with its switch off as shipped, never started.
         self.assertEqual(Path(helper[0][0]).name, fake_platform.HELPER_NAME)
         self.assertTrue(mac.dictate.PARAKEET_RUNTIME_HELPER.is_file())
-        # Protocol 2 is asked for, and the models folder Python verified is
+        # Protocol 3 is asked for, and the models folder Python verified is
         # named; a protocol 1 helper reads only "--server".
         self.assertEqual(helper[0][1:], [
-            "--server", "--protocol", "2",
+            "--server", "--protocol", "3",
             "--models", str(mac.dictate.PARAKEET_MODEL_DIR)])
         # Every other process the runtime asks for, by program. A new entry
         # here is a new thing the app runs on the user's Mac.
@@ -1008,7 +1008,7 @@ class HelperWordEvidenceTests(unittest.TestCase):
         booted()
         self.assertEqual(
             SHIPPED_SWITCHES,
-            {"prosody": False, "routing": False, "protocol": 2})
+            {"prosody": False, "routing": False, "protocol": 3})
 
     def test_every_replayed_sentence_types_and_routes_as_origin_main(self):
         mac = booted()
@@ -1041,7 +1041,7 @@ class HelperWordEvidenceTests(unittest.TestCase):
                 self.assertEqual(v2["status"], "native")
                 self.assertGreater(v2["words"], 0)
         spawned = mac.desktop.helper_spawns[-1][1:]
-        self.assertEqual(spawned[:3], ["--server", "--protocol", "2"])
+        self.assertEqual(spawned[:3], ["--server", "--protocol", "3"])
 
     def test_malformed_words_are_dropped_and_the_text_is_kept(self):
         mac = booted()
@@ -1757,6 +1757,78 @@ class SpeechRuntimeTests(unittest.TestCase):
         self.assertIn("[asr] Parakeet helper is loading; Whisper answers "
                       "until it is ready", log)
         self.assertNotIn("Parakeet helper did not start", log)
+
+    # 15.5 s of speech, a pause that cuts a rolling chunk, then 1.5 s more:
+    # past one 14.96 s window, so the take is streamed to the runtime.
+    def long_take(self):
+        return np.concatenate([
+            fake_platform.speech_audio(15.5, 0.8, seed=21),
+            fake_platform.speech_audio(1.5, 0.3, seed=22)])
+
+    def test_a_long_take_is_decoded_whole_by_its_session(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        self.assertEqual(self.mac.dictate.OWN_PARAKEET.protocol, 3)
+        audio = self.long_take()
+        sessions = len(desktop.runtime_sessions)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio, timeout=20.0).text
+        # One decode of the whole take: the session's, which the runtime
+        # answers as its offline decode of the recording (the fake hears the
+        # sentence once in any audio). Joined chunks would have typed it
+        # once per chunk.
+        self.assertEqual(typed, self.SPOKEN)
+        self.assertEqual(desktop.runtime_sessions[sessions:], [len(audio)])
+        # The rolling chunk was still cut and checked during the hold.
+        self.assertTrue(desktop.runtime_requests)
+
+    def test_an_unsure_ending_takes_the_chunked_path(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        audio = self.long_take()
+        sessions = len(desktop.runtime_sessions)
+        desktop.word_confidence = 0.5
+        try:
+            typed = self.mac.dictate_sentence(
+                self.SPOKEN, field=TextField(), audio=audio,
+                timeout=20.0).text
+        finally:
+            desktop.word_confidence = 0.95
+        # The session answered, but a word after the last cut is under the
+        # line: the take is decoded exactly as without a session, the rolling
+        # chunk and the remainder joined.
+        self.assertEqual(desktop.runtime_sessions[sessions:], [len(audio)])
+        self.assertEqual(typed, f"{self.SPOKEN} {self.SPOKEN}")
+
+    def test_a_short_take_never_opens_a_session(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        sessions = len(desktop.runtime_sessions)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(desktop.runtime_sessions[sessions:], [])
+
+    def test_a_failed_session_falls_back_to_the_chunked_path(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        desktop.runtime_failure = "session"
+        try:
+            typed = self.mac.dictate_sentence(
+                self.SPOKEN, field=TextField(), audio=self.long_take(),
+                timeout=20.0).text
+        finally:
+            desktop.runtime_failure = None
+        self.assertEqual(typed, f"{self.SPOKEN} {self.SPOKEN}")
+        self.assertIn("! Speech runtime session failed; the take is decoded "
+                      "the usual way", self.mac.log.getvalue())
+
+    def test_with_the_runtime_off_a_long_take_is_chunked_as_before(self):
+        desktop = self.mac.desktop
+        sessions = len(desktop.runtime_sessions)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=self.long_take(),
+            timeout=20.0).text
+        self.assertEqual(typed, f"{self.SPOKEN} {self.SPOKEN}")
+        self.assertEqual(desktop.runtime_sessions[sessions:], [])
 
     def test_when_both_fail_whisper_types_as_it_always_has(self):
         desktop = self.mac.desktop

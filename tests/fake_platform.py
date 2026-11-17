@@ -559,7 +559,10 @@ class HelperProcess:
     reads only its first argument and ignores the request.
 
     Started as ``parrot-speech-runtime`` it is Whisper Face's own runtime,
-    which always speaks protocol 2 when asked, and fails the way
+    which speaks up to protocol 3 when asked: protocol 3 adds sessions, a
+    take's audio appended while it is captured and answered at ``finish``
+    (each finished session's sample count is in
+    ``Desktop.runtime_sessions``). It fails the way
     ``Desktop.runtime_failure`` says: "start" (a model that will not load:
     an error line, then it exits) or "request" (every request answered with
     an error). ``Desktop.helper_failure`` does the same to the FluidAudio
@@ -577,7 +580,7 @@ class HelperProcess:
         self.argv = list(argv)
         self.runtime = Path(self.argv[0]).name == RUNTIME_NAME
         self.protocol = 1
-        speaks = 2 if self.runtime else desktop.helper_protocol
+        speaks = 3 if self.runtime else desktop.helper_protocol
         if speaks >= 2 and "--protocol" in self.argv:
             flag = self.argv.index("--protocol")
             try:
@@ -627,13 +630,41 @@ class HelperProcess:
             ready = {"ready": True, "load_s": 0.01,
                      "model": "parakeet-unified"}
             if self.protocol >= 2:
-                ready.update(protocol=2, capabilities=["words"],
+                ready.update(protocol=self.protocol, capabilities=(
+                    ["words", "sessions"] if self.protocol >= 3
+                    else ["words"]),
                              engine=("parrot-speech-runtime-1" if self.runtime
                                      else "fluidaudio-fake"))
             self._reply(ready)
+            session = None
             while True:
                 header = self._read_exactly(8)
                 (count,) = struct.unpack("<Q", header)
+                operation = count >> 56 if self.protocol >= 3 else 0
+                count &= (1 << 56) - 1 if self.protocol >= 3 else -1
+                if operation == 1:          # begin
+                    session = []
+                    continue
+                if operation == 2:          # append
+                    part = np.frombuffer(
+                        self._read_exactly(4 * count), dtype="<f4")
+                    if session is not None:
+                        session.append(part.copy())
+                    continue
+                if operation == 4:          # cancel
+                    session = None
+                    continue
+                if operation == 3:          # finish
+                    if session is None or self._failure() == "session":
+                        session = None
+                        self._reply({"ok": False, "error": "no session"})
+                        continue
+                    audio = (np.concatenate(session) if session
+                             else np.zeros(0, np.float32))
+                    session = None
+                    self.desktop.runtime_sessions.append(len(audio))
+                    self._reply(self._answer(audio, samples=len(audio)))
+                    continue
                 payload = self._read_exactly(4 * count)
                 audio = np.frombuffer(payload, dtype="<f4")
                 (self.desktop.runtime_requests if self.runtime
@@ -642,17 +673,7 @@ class HelperProcess:
                     self._reply({"ok": False,
                                  "error": "transcription failed"})
                     continue
-                text = self.desktop.recognize(audio, "parakeet")
-                response = {"ok": True, "text": text, "processing_s": 0.01}
-                if self.protocol >= 2 and text:
-                    confidence = self.desktop.word_confidence
-                    response["avg_confidence"] = confidence
-                    response["words"] = (
-                        self.desktop.helper_words_override
-                        if self.desktop.helper_words_override is not None
-                        else helper_words(
-                            text, len(audio) / SAMPLE_RATE, confidence))
-                self._reply(response)
+                self._reply(self._answer(audio))
         except (EOFError, OSError, ValueError):
             pass
         finally:
@@ -660,6 +681,19 @@ class HelperProcess:
             for stream in (self._input, self._output):
                 with contextlib.suppress(OSError):
                     stream.close()
+
+    def _answer(self, audio, **extra) -> dict:
+        text = self.desktop.recognize(audio, "parakeet")
+        response = {"ok": True, "text": text, "processing_s": 0.01, **extra}
+        if self.protocol >= 2 and text:
+            confidence = self.desktop.word_confidence
+            response["avg_confidence"] = confidence
+            response["words"] = (
+                self.desktop.helper_words_override
+                if self.desktop.helper_words_override is not None
+                else helper_words(
+                    text, len(audio) / SAMPLE_RATE, confidence))
+        return response
 
     def poll(self):
         return self.returncode
@@ -751,9 +785,11 @@ class Desktop:
         self.word_confidence = 0.95
         self.helper_words_override = None
         # Requests Whisper Face's own runtime received (parakeet_requests
-        # holds the FluidAudio helper's), and how each fails: None, "start"
-        # or "request".
+        # holds the FluidAudio helper's), and how each fails: None, "start",
+        # "request" or (the runtime's sessions only) "session".
         self.runtime_requests = []
+        # The sample count of every session the runtime finished.
+        self.runtime_sessions = []
         self.runtime_failure = None
         self.helper_failure = None
         # Set to a threading.Event, the runtime's (or the helper's) start

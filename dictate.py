@@ -930,8 +930,17 @@ PARAKEET_MIN_REQUEST_TIMEOUT = 3.0
 PARAKEET_MAX_REQUEST_TIMEOUT = 10.0
 # The helper protocol this client asks for. A protocol 1 helper ignores the
 # request and answers as it always has; a protocol 2 helper adds each word's
-# time and confidence (native/ParrotASRHelper/PROTOCOL.md).
-PARAKEET_PROTOCOL = 2
+# time and confidence; protocol 3, Whisper Face's own runtime, adds sessions
+# that decode a long take while it is captured (native/ParrotASRHelper/
+# PROTOCOL.md). Batch requests and answers are the same in 2 and 3.
+PARAKEET_PROTOCOL = 3
+# Protocol 3 request headers: the operation in the top byte, a count in the
+# rest. A batch request's header is its sample count, whose top byte is 0.
+SPEECH_SESSION_BEGIN = 1
+SPEECH_SESSION_APPEND = 2
+SPEECH_SESSION_FINISH = 3
+SPEECH_SESSION_CANCEL = 4
+SPEECH_SESSION_OPERATION_SHIFT = 56
 # A ten-minute dictation's words are about 300 KiB of JSON; the text alone
 # never came near the old 64 KiB.
 PARAKEET_MAX_RESPONSE_BYTES = 1024 * 1024
@@ -945,6 +954,23 @@ PARAKEET_MAX_RESPONSE_BYTES = 1024 * 1024
 # PROSODY_FORMATTING on, the words place spans but every span stays flagged.
 PROSODY_FORMATTING = False
 PARAKEET_WORD_CONFIDENCE_ROUTING = False
+# A Parakeet decode whose every word the runtime scored at least
+# parrot_core.CROSSCHECK_SKIP_CONFIDENCE is never escalated to Whisper Turbo
+# before the paste. Tiny still runs beside the decode exactly as before and
+# still sets the route confidence; only the Turbo decode it could trigger
+# (0.6 to 2.6 s, the slow tail of release to paste) is skipped. A decode
+# with any word below the line, or without the runtime's words (the
+# FluidAudio helper speaks protocol 1), takes today's path unchanged. On
+# because the owner's recordings show it loses nothing Turbo would have
+# fixed (experiment E3, CROSSCHECK_SKIP_CONFIDENCE in parrot_core.py).
+PARAKEET_CONFIDENT_SKIPS_ESCALATION = True
+# Long takes on Whisper Face's own runtime are streamed to it while they are
+# captured (SpeechSession), so release decodes only the last window. Off,
+# no session is begun and long takes are decoded as rolling chunks only.
+SPEECH_SESSION_DECODE = True
+# Audio is handed to the session in pieces of about this many samples (half
+# a second), off the audio thread.
+SPEECH_SESSION_APPEND_SAMPLES = 8_000
 VOICE_OUTBOX_MAX_ITEMS = 20
 LLM_CLEANUP_TIMEOUT = (1, 4) # localhost connect + inter-chunk stall deadline.
                              # Capture must fall back faithfully instead of
@@ -5789,9 +5815,14 @@ class Recorder:
         # capture, so the take's last sample is exact the moment stop()
         # returns, without waiting for the stream itself to stop.
         self.capture_lock = threading.Lock()
+        # The take streamed to the speech runtime as it is captured, once it
+        # outgrows the whole-take path (SpeechSession); None otherwise. Set
+        # per take by the hotkey worker (speech_session_for).
+        self.session = None
 
     def start(self, press_at=None):
         self.frames = CapturedAudio()
+        self.session = None
         self.chunks = []
         self.cut_samples = 0
         self.total_samples = 0
@@ -5827,6 +5858,9 @@ class Recorder:
 
     def replace_with_buffered_audio(self, audio: np.ndarray):
         """Turn a quick tap's Recorder into a retrospective captured take."""
+        session, self.session = self.session, None
+        if session is not None:
+            session.cancel()
         self.frames = CapturedAudio(audio)
         self.chunks = []
         self.cut_samples = 0
@@ -5859,6 +5893,8 @@ class Recorder:
             self.speculative_invalid = False
         n = len(indata)
         self.total_samples += n
+        if self.session is not None:
+            self.session.captured(self.total_samples)
         rms = float(np.sqrt(np.mean(indata ** 2)))
         # sqrt curve: whispers visibly register instead of flatlining
         LEVELS.append(min(1.0, (rms * 14.0) ** 0.5))
@@ -6035,6 +6071,139 @@ def release_stream_later(slot, delivered_audio: bool = True):
         except Exception as error:
             print(f"! microphone stop failed: {type(error).__name__}")
     return AUDIO_STOP_POOL.submit(release)
+
+
+# One worker: a take's session messages go out in the order they were made,
+# off the audio thread and off the path from key release to the paste.
+SPEECH_SESSION_POOL = ThreadPoolExecutor(max_workers=1)
+
+
+def speech_session_client():
+    """The client that decodes sessions, or None.
+
+    Whisper Face's own runtime, when it is the program asked first and is
+    loaded and speaking protocol 3. Nothing is started for a session: a
+    take that finds no such program is decoded the usual way.
+    """
+    if not SPEECH_SESSION_DECODE:
+        return None
+    try:
+        client = PARAKEET.preferred
+        if client is None or client.protocol < 3:
+            return None
+        process = client.process
+        if process is None or process.poll() is not None:
+            return None
+        return client
+    except Exception:
+        return None
+
+
+def speech_session_for(rec):
+    """A session for a take on the Parakeet route, or None."""
+    limit = int(getattr(rec, "whole_take_samples", 0) or 0)
+    if limit <= 0:
+        return None
+    client = speech_session_client()
+    if client is None:
+        return None
+    return SpeechSession(client, rec.frames, limit)
+
+
+class SpeechSession:
+    """A long take streamed to the speech runtime while it is captured.
+
+    Nothing is sent while the take fits the whole-take path
+    (``start_after`` samples, WHOLE_TAKE_MAX_SECONDS). Once it outgrows it,
+    the audio callback hands the pool a request to send whatever is new,
+    every SPEECH_SESSION_APPEND_SAMPLES, and the runtime decodes each 15 s
+    window as it completes (protocol 3). At release ``finish`` sends the
+    rest and returns the runtime's transcript of the whole take, which is
+    its offline decode of the recording, or None, and the take is decoded
+    the usual way. What is sent is read from the take's own CapturedAudio,
+    so it is the take sample for sample. Rolling chunks are cut and decoded
+    beside it exactly as without a session.
+    """
+
+    def __init__(self, client, frames, start_after: int, pool=None):
+        self.client = client
+        self.frames = frames
+        self.start_after = int(start_after)
+        self.pool = pool or SPEECH_SESSION_POOL
+        self.token = None
+        # Written on the audio thread until capture stops.
+        self.begun = False
+        self.queued = 0
+        # Written on the pool.
+        self.sent = 0
+        self.failed = False
+
+    def captured(self, total: int) -> None:
+        """From the audio callback, with the capture lock held: hand the
+        pool what is new once there is enough of it. Never blocks."""
+        if total <= self.start_after:
+            return
+        if self.begun and total - self.queued < SPEECH_SESSION_APPEND_SAMPLES:
+            return
+        try:
+            if not self.begun:
+                self.begun = True
+                self.pool.submit(self._begin)
+            self.queued = total
+            self.pool.submit(self._send)
+        except RuntimeError:
+            self.failed = True      # the pool is shutting down with the app
+
+    def _begin(self) -> None:
+        self.token = self.client.begin_session()
+        if self.token is None:
+            self.failed = True
+
+    def _send(self) -> None:
+        if self.failed:
+            return
+        frames = self.frames.frames_from(self.sent)
+        if not frames:
+            return
+        audio = np.concatenate(frames)
+        if self.client.append_session(self.token, audio):
+            self.sent += len(audio)
+        else:
+            self.failed = True
+
+    def _finish(self, frames, expected: int):
+        self._send()
+        if self.failed or frames is not self.frames or self.sent != expected:
+            self._cancel()
+            return None
+        token, self.token = self.token, None
+        return self.client.finish_session(token, expected)
+
+    def _cancel(self) -> None:
+        token, self.token = self.token, None
+        if token is not None:
+            self.client.cancel_session(token)
+
+    def finish(self, frames, expected: int):
+        """At release, once capture has stopped: the runtime's answer for
+        the whole take of ``expected`` samples in ``frames``, or None."""
+        if not self.begun:
+            return None
+        try:
+            return self.pool.submit(self._finish, frames, expected).result(
+                timeout=PARAKEET_MAX_REQUEST_TIMEOUT
+                + PARAKEET_MIN_REQUEST_TIMEOUT)
+        except Exception as error:
+            print(f"! speech session unavailable: {type(error).__name__}")
+            return None
+
+    def cancel(self) -> None:
+        """Drop the session without waiting."""
+        if self.begun:
+            try:
+                self.pool.submit(self._cancel)
+            except RuntimeError:
+                pass
 
 
 def stalled_take_action(rec, now: float) -> str | None:
@@ -8573,27 +8742,9 @@ def bounded_helper_exchange(
             or not 0 < float(timeout) <= bound):
         raise ValueError("helper timeout is outside the runtime bound")
     deadline = time.monotonic() + float(timeout)
-    input_fd = process.stdin.fileno()
     output_fd = process.stdout.fileno()
-    os.set_blocking(input_fd, False)
     os.set_blocking(output_fd, False)
-    pending = [memoryview(chunk).cast("B") for chunk in chunks if len(chunk)]
-    while pending:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("helper request write timed out")
-        _, writable, _ = select.select([], [input_fd], [], remaining)
-        if not writable:
-            raise TimeoutError("helper request write timed out")
-        try:
-            written = os.write(input_fd, pending[0])
-        except BlockingIOError:
-            continue
-        if written <= 0:
-            raise RuntimeError("helper request pipe closed")
-        pending[0] = pending[0][written:]
-        if not pending[0]:
-            pending.pop(0)
+    _write_helper_chunks(process, chunks, deadline)
 
     response = bytearray()
     while True:
@@ -8630,6 +8781,44 @@ def bounded_helper_exchange(
         response.extend(chunk)
 
 
+def _write_helper_chunks(process, chunks, deadline: float) -> None:
+    """Write every chunk to the program's stdin before ``deadline``."""
+    input_fd = process.stdin.fileno()
+    os.set_blocking(input_fd, False)
+    pending = [memoryview(chunk).cast("B") for chunk in chunks if len(chunk)]
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("helper request write timed out")
+        _, writable, _ = select.select([], [input_fd], [], remaining)
+        if not writable:
+            raise TimeoutError("helper request write timed out")
+        try:
+            written = os.write(input_fd, pending[0])
+        except BlockingIOError:
+            continue
+        if written <= 0:
+            raise RuntimeError("helper request pipe closed")
+        pending[0] = pending[0][written:]
+        if not pending[0]:
+            pending.pop(0)
+
+
+def bounded_helper_write(process, chunks, *, timeout: float) -> None:
+    """Write one message that has no answer (a protocol 3 session's begin,
+    append or cancel) before a deadline."""
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not 0 < float(timeout) <= PARAKEET_MAX_REQUEST_TIMEOUT):
+        raise ValueError("helper timeout is outside the runtime bound")
+    _write_helper_chunks(process, chunks, time.monotonic() + float(timeout))
+
+
+def speech_session_header(operation: int, count: int = 0) -> bytes:
+    """A protocol 3 session operation's 8-byte header."""
+    return struct.pack(
+        "<Q", (operation << SPEECH_SESSION_OPERATION_SHIFT) | int(count))
+
+
 class ParakeetClient:
     """Persistent, RAM-only bridge to a native Parakeet helper.
 
@@ -8659,6 +8848,10 @@ class ParakeetClient:
         self.models = Path(models)
         self.process_factory = process_factory or subprocess.Popen
         self.exchange = exchange or bounded_helper_exchange
+        self.write = bounded_helper_write
+        # The process a protocol 3 session was begun on; a session belongs
+        # to that process and ends with it.
+        self.session_process = None
         self.clock = clock or time.monotonic
         self.process = None
         self.protocol = 1
@@ -8752,6 +8945,7 @@ class ParakeetClient:
             self._settle()
         process, self.process = self.process, None
         self.protocol = 1
+        self.session_process = None
         if process is not None:
             self._stop(process)
 
@@ -8959,6 +9153,108 @@ class ParakeetClient:
                           f"{self.request_fallback}: {error}")
                 return None
 
+    # ---- protocol 3 sessions (one long take decoded while it is captured)
+
+    def _session_failed(self, error) -> None:
+        """A session message failed: the process is closed and benched as
+        after a failed request, so the stream cannot be out of step."""
+        self._close()
+        if self.retry_after_failure:
+            wait = self._bench()
+            print(f"! {self.name} session failed; the take is decoded the "
+                  f"usual way, next attempt in {wait:.0f}s: "
+                  f"{type(error).__name__}")
+        else:
+            print(f"! {self.name} session failed; the take is decoded the "
+                  f"usual way: {type(error).__name__}")
+
+    def begin_session(self):
+        """Begin a session on the loaded program; its token, or None when
+        no loaded program speaks protocol 3. Never starts a program."""
+        with self.lock:
+            process = self.process
+            if (process is None or process.poll() is not None
+                    or self.protocol < 3):
+                return None
+            try:
+                self.write(process, (
+                    speech_session_header(SPEECH_SESSION_BEGIN),),
+                    timeout=PARAKEET_MIN_REQUEST_TIMEOUT)
+            except Exception as error:
+                self._session_failed(error)
+                return None
+            self.session_process = process
+            return process
+
+    def append_session(self, token, audio: np.ndarray) -> bool:
+        """Add audio to the session ``token`` began; whether it was sent."""
+        payload = np.ascontiguousarray(audio, dtype="<f4")
+        if not len(payload):
+            return True
+        with self.lock:
+            if token is None or self.session_process is not token \
+                    or self.process is not token:
+                return False
+            try:
+                # The program decodes each window this completes before it
+                # reads on, so a write may wait for one window's decode.
+                self.write(token, (
+                    speech_session_header(
+                        SPEECH_SESSION_APPEND, len(payload)),
+                    payload), timeout=PARAKEET_MAX_REQUEST_TIMEOUT)
+            except Exception as error:
+                self._session_failed(error)
+                return False
+            return True
+
+    def finish_session(self, token, expected_samples: int):
+        """The session's transcript as a ParakeetResult, or None.
+
+        None when the session is gone, the program fails, or its answer is
+        for a different number of samples than ``expected_samples``.
+        """
+        with self.lock:
+            if token is None or self.session_process is not token \
+                    or self.process is not token:
+                return None
+            self.session_process = None
+            try:
+                duration = expected_samples / 16_000
+                # At most the last window and one an append just completed.
+                response = self.exchange(token, (
+                    speech_session_header(SPEECH_SESSION_FINISH),),
+                    timeout=PARAKEET_MIN_REQUEST_TIMEOUT)
+                if not response.get("ok"):
+                    raise RuntimeError("session answer was not ok")
+                samples = response.get("samples")
+                if (isinstance(samples, bool) or not isinstance(samples, int)
+                        or samples != expected_samples):
+                    raise RuntimeError("session answer covers other audio")
+                result = parakeet_result(
+                    str(response.get("text", "")).strip(),
+                    float(response.get("processing_s", 0.0)),
+                    response, protocol=self.protocol, duration=duration)
+            except Exception as error:
+                self._session_failed(error)
+                return None
+            self.failed_starts = 0
+            self.last_answered = self
+            return result
+
+    def cancel_session(self, token) -> None:
+        """Drop the session ``token`` began, if it is still the program's."""
+        with self.lock:
+            if token is None or self.session_process is not token \
+                    or self.process is not token:
+                return
+            self.session_process = None
+            try:
+                self.write(token, (
+                    speech_session_header(SPEECH_SESSION_CANCEL),),
+                    timeout=PARAKEET_MIN_REQUEST_TIMEOUT)
+            except Exception as error:
+                self._session_failed(error)
+
 
 # Whisper Face's own runtime (native/ParrotSpeechRuntime). It is asked first
 # only when PARAKEET_RUNTIME selects it; whatever it cannot answer goes to the
@@ -9159,7 +9455,8 @@ def crosscheck_agreement(left: str, right: str) -> float:
 
 def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
                            verify: bool,
-                           crosscheck_text: str | None = None) \
+                           crosscheck_text: str | None = None,
+                           answer=None) \
         -> Recognition | None:
     """Parakeet primary decode with an agreement-derived route confidence.
 
@@ -9173,9 +9470,14 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     vote when Turbo is installed to break the tie, and survives as an
     inspectable alternative. Returns None when the helper fails so the
     caller falls through to the faithful Whisper path.
+
+    ``answer`` is a Parakeet answer already in hand (a speech session's);
+    no helper request is made for it.
     """
     duration = len(audio) / SAMPLE_RATE
-    helper_future = PARAKEET_IO_POOL.submit(PARAKEET.transcribe, audio)
+    helper_future = (
+        PARAKEET_IO_POOL.submit(PARAKEET.transcribe, audio)
+        if answer is None else None)
     tiny_text = crosscheck_text
     crosscheck_s = None
     wants_crosscheck = (
@@ -9207,7 +9509,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     # request waits on the I/O pool, exactly as before.
     if wants_crosscheck and not PARAKEET_WORD_CONFIDENCE_ROUTING:
         tiny_text = run_crosscheck()
-    parakeet = helper_future.result()
+    parakeet = answer if helper_future is None else helper_future.result()
     if parakeet is None or not parakeet[0]:
         return None
     text = parakeet[0]
@@ -9222,8 +9524,11 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         status = "native" if words else "misaligned"
     elif status == "native":
         status = "absent"
+    # Every word the runtime wrote is one it is sure of
+    # (parrot_core.CROSSCHECK_SKIP_CONFIDENCE).
+    settled = words_settle_route(words, status)
     if wants_crosscheck and PARAKEET_WORD_CONFIDENCE_ROUTING:
-        if words_settle_route(words, status):
+        if settled:
             # Every word the runtime wrote is one it is sure of: the route
             # confidence is the fixed prior PARROT_ASR_CROSSCHECK=off uses,
             # the words carry the per-span evidence, and neither Tiny nor a
@@ -9255,7 +9560,14 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     # with Tiny when Turbo is not installed, and Tiny is the engine that just
     # disagreed: asking it again settles nothing. Without Turbo the stronger
     # recognizer's transcript stands, unverified.
+    #
+    # A decode the runtime is sure of word by word is not escalated: on the
+    # owner's recordings Turbo never fixed one (CROSSCHECK_SKIP_CONFIDENCE),
+    # and the Turbo decode is the slowest thing before the paste. Tiny's
+    # agreement still sets the route confidence and its text stays the
+    # alternative.
     if (agreement is not None and verify
+            and not (PARAKEET_CONFIDENT_SKIPS_ESCALATION and settled)
             and should_escalate_uncertain(agreement, duration)
             and asr_model_is_cached(WHISPER_REPO)):
         # The engines heard different utterances: buy one independent Turbo
@@ -13897,6 +14209,69 @@ def capture_release(rec):
     return full_audio, cut, chunk_futs, None, tail_done_at
 
 
+def session_recognition(rec, full_audio: np.ndarray, cut: int,
+                        chunk_futs) -> Recognition | None:
+    """The take's transcript from its speech session, or None.
+
+    The session's answer is the runtime's offline decode of the whole take,
+    and at release it cost only the last window. It stands for the take
+    only where the cross-check has nothing left to do:
+
+    - the take reached the runtime exactly as it would in one request (no
+      gain or noise gate: prepare_asr_audio leaves it as it is);
+    - with the cross-check on, every rolling chunk already decoded and
+      checked during the hold came back from Parakeet (none was replaced
+      by Turbo), and every word after the last cut, the part no chunk
+      checked, is one the runtime is sure of (words_settle_route), with
+      PARAKEET_CONFIDENT_SKIPS_ESCALATION on.
+
+    Otherwise, or when anything about the session fails, it returns None
+    and the take is decoded exactly as without a session. The session is
+    ended either way.
+    """
+    session = getattr(rec, "session", None)
+    if session is None:
+        return None
+    rec.session = None
+    used = False
+    try:
+        if not session.begun or prepare_asr_audio(full_audio) is not full_audio:
+            return None
+        answer = session.finish(rec.frames, len(full_audio))
+        if answer is None:
+            return None
+        recognition = _parakeet_crosschecked(
+            full_audio, rec.prompt, verify=False, answer=answer)
+        if recognition is None or not recognition.text:
+            return None
+        if PARAKEET_CROSSCHECK:
+            if not PARAKEET_CONFIDENT_SKIPS_ESCALATION:
+                return None
+            if recognition.word_evidence_status != "native":
+                return None
+            confidences = [recognition.confidence]
+            for scheduled in chunk_futs:
+                result = getattr(scheduled, "future", scheduled).result()
+                if (not isinstance(result, Recognition)
+                        or result.engine != "parakeet-unified"):
+                    return None
+                confidences.append(float(result.confidence))
+            cut_seconds = cut / SAMPLE_RATE
+            unchecked = [word for word in recognition.words
+                         if float(word.end) > cut_seconds]
+            if unchecked and not words_settle_route(unchecked, "native"):
+                return None
+            recognition.confidence = min(confidences)
+        used = True
+        return recognition
+    except Exception as error:
+        print(f"! speech session not used: {type(error).__name__}")
+        return None
+    finally:
+        if not used:
+            session.cancel()
+
+
 def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     """Runs at key release: chunks cut during the hold are already decoding;
     the last part decodes while the tail is captured (capture_release), then
@@ -13913,6 +14288,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         capture_done_at = time.perf_counter()
 
         duration, peak = audio_gate_measurements(full_audio)
+        if (duration < MIN_SECONDS or peak < GATE_PEAK_RMS) \
+                and getattr(rec, "session", None) is not None:
+            rec.session, session = None, rec.session
+            session.cancel()
         if duration < MIN_SECONDS:
             report_dictation_problem(
                 rec,
@@ -13934,9 +14313,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
         phase = "recognition"
         asr_started_at = time.perf_counter()
-        recognition = assemble_raw(
-            chunk_futs, pre_future, full_audio[cut:], rec.prompt,
-            rec.language)
+        recognition = session_recognition(rec, full_audio, cut, chunk_futs)
+        if recognition is None:
+            recognition = assemble_raw(
+                chunk_futs, pre_future, full_audio[cut:], rec.prompt,
+                rec.language)
+        elif pre_future is not None:
+            # The session decoded the last part; a remainder decode that
+            # has not started is not needed.
+            pre_future.future.cancel()
         recognized_at = time.perf_counter()
         t_asr = recognized_at - asr_started_at
         # A later take may finish ASR first, but user-visible cleanup, commands,
@@ -15629,6 +16014,7 @@ def main():
                         rec.start(event_at)
                         rec.whole_take_samples = whole_take_limit_samples(
                             rec.language)
+                        rec.session = speech_session_for(rec)
                         rec.bundle_at_press = frontmost_bundle()
                         if IS_MACOS:
                             rec.input_signature_at_press = user_input_signature()

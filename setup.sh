@@ -1097,16 +1097,17 @@ verify_install() {
     # The runtime is optional while it is off by default: an install whose
     # runtime did not build has none, and the app uses the helper. One that
     # is present must load the model from the folder named, decode a second
-    # of silence, and answer protocol 2; a binary built before protocol 2, or
-    # one that cannot run the model, fails here.
+    # of silence, and answer protocol 3 (word evidence and the sessions that
+    # decode a long take while it is captured); a binary built before
+    # protocol 3, or one that cannot run the model, fails here.
     if [ -e "$speech_runtime" ]; then
         [ -x "$speech_runtime" ] \
             || fail "speech runtime is present but cannot run; rerun ./setup.sh"
-        runtime_status="$("$speech_runtime" --verify --protocol 2 \
+        runtime_status="$("$speech_runtime" --verify --protocol 3 \
             --models "$parakeet_model_dir")" \
             || fail "speech runtime verification failed"
         case "$runtime_status" in
-            *'"protocol":2'*) ;;
+            *'"protocol":3'*) ;;
             *) fail "speech runtime is out of date; rerun ./setup.sh" ;;
         esac
         echo "== speech runtime: installed and working"
@@ -1673,7 +1674,7 @@ install_speech_runtime() {
             "$DIR/.models/swift-build-runtime/release/parrot-speech-runtime" \
             "$speech_runtime" \
         && step "verifying the speech runtime against the pinned model" \
-        && "$speech_runtime" --preload --protocol 2 --models "$parakeet_model_dir"; then
+        && "$speech_runtime" --preload --protocol 3 --models "$parakeet_model_dir"; then
         return 0
     fi
     rm -f "$speech_runtime"

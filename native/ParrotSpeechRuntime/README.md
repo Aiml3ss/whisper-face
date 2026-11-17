@@ -6,7 +6,8 @@ the pinned Core ML files from the folder it is given and does everything
 else with Apple's Foundation, Core ML and Accelerate. It speaks the wire
 protocol of the FluidAudio helper beside it (`native/ParrotASRHelper`,
 `PROTOCOL.md` there): protocol 1 byte for byte when launched the old way,
-and protocol 2, each word's time and confidence, when asked.
+protocol 2, each word's time and confidence, when asked, and protocol 3,
+sessions that decode a long take window by window while it is captured.
 
 It exists because the FluidAudio library the helper is built on cannot be
 upgraded cleanly: its newer releases fetch a prebuilt binary to build,
@@ -30,6 +31,10 @@ For each request (16 kHz mono Float32 over stdin, as for the helper):
    duplicates, and turns tokens into text.
 6. In protocol 2, turns the tokens' emission frames into word timings and
    confidences (`PROTOCOL.md`, "Protocol 2").
+7. In protocol 3, keeps a session: it decodes each window as soon as the
+   audio appended so far covers it, merges it onto the windows before it,
+   and at `finish` decodes the rest and answers for the whole recording
+   (`PROTOCOL.md`, "Protocol 3: sessions").
 
 At start it loads the four model files and decodes one second of silence,
 so a model that loads but cannot run fails before the ready line, not in
@@ -38,8 +43,8 @@ the middle of a dictation.
 | File | What | Origin |
 |---|---|---|
 | `main.swift` | Modes, model load, the serve loop, the debug candidate dump | Whisper Face, after `native/ParrotASRHelper`'s `main.swift` |
-| `Wire.swift` | Arguments, framing, JSON lines | Whisper Face |
-| `Recognizer.swift` | Model files, compute units, windows, the merged transcript | Ported from FluidAudio 0.15.5 |
+| `Wire.swift` | Arguments, framing, session operations, JSON lines | Whisper Face |
+| `Recognizer.swift` | Model files, compute units, windows, the merged transcript; protocol 3 sessions (`Session`) | Ported from FluidAudio 0.15.5; `Session` is Whisper Face's |
 | `MelFeatures.swift` | Log-mel features | Ported from FluidAudio 0.15.5 |
 | `TransducerDecoder.swift` | The decode loop and the joint network's candidates | Ported from FluidAudio 0.15.5 |
 | `WindowMerge.swift` | Joining overlapping windows | Ported from FluidAudio 0.15.5 |
@@ -57,11 +62,11 @@ which is why the transcripts are identical.
 
 `setup.sh` builds it with `swift build -c release` into
 `.models/swift-build-runtime`, installs it as `.models/bin/parrot-speech-runtime`,
-and runs `--preload --protocol 2 --models <model folder>`. The build fetches
+and runs `--preload --protocol 3 --models <model folder>`. The build fetches
 nothing. While the runtime is off by default, a failure in any of those three
 steps does not stop the install: setup prints one line saying so, removes the
 binary, and goes on, and the app uses the FluidAudio helper. `--verify` says
-whether the runtime is installed; one that is installed must answer protocol 2
+whether the runtime is installed; one that is installed must answer protocol 3
 for that folder, and one that is absent passes.
 
 `dictate.py` keeps using the FluidAudio helper by default. With the New
@@ -180,12 +185,16 @@ network-denying sandbox. The clips:
   continuous speech, silence, noise, speech 8 times too loud, 100 times too
   quiet, with a DC offset, and a square wave.
 
-What it printed on this Mac, rerun after the vocabulary check was added
-(the `sources:` line is what `SpeechRuntimeSourceTests` holds the
-checkout to), for the first two groups:
+What it printed on this Mac, rerun after the vocabulary check was added,
+for the first two groups. These three records were made on the sources
+before protocol 3 (`sha256:b75b973d...`, the script's `sources:` line,
+shown here as `sources (before protocol 3):`); protocol 3 changed how the
+windows are called, not what they compute, and "Sessions (protocol 3)"
+below records the run on the current sources against the runtime built
+from these, on every kind of clip listed here:
 
 ```
-sources: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
+sources (before protocol 3): sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
 clips: 457 (398 of 15 s or less, 59 longer), 2958 s of audio
 15 s or less: identical 398 of 398
 longer than 15 s: identical 59 of 59
@@ -209,7 +218,7 @@ which is the 641 MiB resident peak; the footprint is unaffected.) For the
 stress clips:
 
 ```
-sources: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
+sources (before protocol 3): sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
 clips: 53 (30 of 15 s or less, 23 longer), 1941 s of audio
 15 s or less: identical 30 of 30
 longer than 15 s: identical 23 of 23
@@ -225,7 +234,7 @@ to 53 s, the full ten minutes, silence, noise, clipping, very quiet speech
 and 1 to 8,000 samples:
 
 ```
-sources: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
+sources (before protocol 3): sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
 clips: 167 (110 of 15 s or less, 57 longer), 3049 s of audio
 15 s or less: identical 110 of 110
 longer than 15 s: identical 57 of 57
@@ -268,6 +277,73 @@ from both. A count of 2^63 or more crashes the helper; the runtime answers
 helper; the runtime exits 1. A payload cut off part way is decoded by the
 helper from whatever arrived; the runtime answers nothing and exits 1.
 Samples that are NaN or infinite give empty text from both.
+
+## Sessions (protocol 3)
+
+A session decodes a recording while it is still being captured. The
+runtime keeps only the audio it has not decoded: each 15 s window is
+decoded the moment the appended audio covers it (14.96 s, then every
+12.96 s) and merged onto the windows before it with the same
+`Recognizer.merge` that a single request uses, in the same order; `finish`
+decodes the last window, which may be short, and finishes the transcript
+with the same `Recognizer.finished`. Each window is decoded alone, from a
+fresh decoder state, so its tokens cannot depend on audio after it: the
+answer is the single request's answer by construction, and the parity
+script's `--session` mode measures it.
+
+Measured on this Mac (macOS 27.3, Apple M4 Pro) on 2026-11-17 with
+`scripts/speech_runtime_parity.py --replay --session`, the reference being
+this runtime built from the sources before protocol 3 (which matched the
+FluidAudio helper on every clip above) and the candidate the current
+sources, against an APFS clone of the pinned model files, network denied.
+The clips: the 76 replay sentences; 75 clips of continuous speech made from
+those and eight more sentences with 13 system voices at four rates, three
+of each length from 15.5 s to 120 s and one each of 3, 5 and 10 minutes;
+29 lengths either side of every window end and every point where a new
+window starts to be needed, up to five windows; 10 stress clips (one
+sample, 100 samples, 20 s of silence, 30 s of noise, speech 8 times too
+loud and 100 times too quiet, a DC offset, a square wave, silence before
+and after speech); and 240 short clips, made-up names and control
+sentences, spoken by three system voices. The session sends each clip in appends of 8,000, 1, 512, 23,999,
+160,000, 4,801 and 239,361 samples in turn, so window ends fall inside
+appends of every size.
+
+```
+sources: sha256:8bd84eabb483afe8a86fab0632bd270638a44dac05486b156804e75758eeef1d
+clips: 430 (325 of 15 s or less, 105 longer), 7363 s of audio
+15 s or less: identical 325 of 325
+longer than 15 s: identical 105 of 105
+candidate protocol 1 answers with exactly ok, processing_s, text: 430 of 430
+candidate protocol 2 text equal to its protocol 1 text: 430 of 430; with words: 425
+differences: 0
+candidate protocol 3 session text and words equal to its protocol 2 answer: 430 of 430 (325 of 325 of 15 s or less, 105 of 105 longer)
+session finish against the whole clip in protocol 2, processing_s, ms:
+  15 s or less  (325 clips) finish p50   38.56 p95   40.92 max   70.62   whole p50   38.78 p95   42.18 max  124.15
+  15 to 30 s    ( 34 clips) finish p50   42.85 p95   70.18 max   71.17   whole p50  131.93 p95  185.55 max  186.94
+  30 to 120 s   ( 68 clips) finish p50   49.73 p95   69.49 max   71.79   whole p50  317.54 p95  640.90 max  679.26
+  over 120 s    (  3 clips) finish p50   62.37 p95   69.98 max   69.98   whole p50 1613.37 p95 3250.89 max 3250.89
+latency, ms (processing_s / round trip):
+  reference    p50   39.32 /   39.42   p95  455.20 /  456.55
+  candidate-1  p50   39.43 /   39.51   p95  459.65 /  460.41
+  candidate-2  p50   39.41 /   39.55   p95  465.78 /  468.19
+  paired candidate-1 minus reference, round trip: p50 +0.06  p95 +3.92
+  paired candidate-2 minus reference, round trip: p50 +0.12  p95 +7.06
+peak memory, MiB (maximum resident set size / peak footprint):
+  reference      135.2 /   118.1
+  candidate-1    127.2 /   113.6
+  candidate-2    131.9 /   111.1
+  candidate-3     67.0 /    70.7
+```
+
+Text and words are identical on every clip, for one request and for a
+session. What is left for key release, `finish`, takes at most one window
+and its merge: 70 ms at p95 whatever the length, where one request for the
+whole take grows with it (0.64 s at p95 for 30 s to 2 minutes, 3.3 s for
+ten minutes on this run). A session holds at most one window of audio, so
+the process that answered only sessions peaked at a 71 MiB footprint
+against 111 to 118 MiB for the ones that took the ten-minute clip in one
+request. (The paired p95 differences are the spread of the 10-minute and
+5-minute decodes on a shared Mac; the medians agree within 0.12 ms.)
 
 ## Latency and memory
 
@@ -372,6 +448,7 @@ On a Mac with the model installed and both programs built by `setup.sh`:
 ```sh
 uv run scripts/speech_runtime_parity.py --replay
 uv run scripts/speech_runtime_parity.py --replay --corpus <folder of .npy clips or recordings>
+uv run scripts/speech_runtime_parity.py --replay --session --corpus <folder>
 ```
 
 `--home DIR` points both programs at a copy of the model files under

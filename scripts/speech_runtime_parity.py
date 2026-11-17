@@ -7,12 +7,22 @@
     uv run scripts/speech_runtime_parity.py --replay
     uv run scripts/speech_runtime_parity.py --corpus DIR [--corpus DIR ...]
     uv run scripts/speech_runtime_parity.py --replay --home SCRATCH_HOME
+    uv run scripts/speech_runtime_parity.py --replay --session [--corpus DIR]
 
 Both programs decode every clip: the FluidAudio helper
 (``.models/bin/parrot-asr-helper``, the reference) in protocol 1, and the
 runtime (``.models/bin/parrot-speech-runtime``, the candidate) in protocol 1
 and again in protocol 2. The three are interleaved clip by clip, in rotating
 order, so that drift on the Mac falls on all of them alike.
+
+With ``--session`` a fourth process, the runtime in protocol 3, decodes
+every clip as dictate.py streams a long take: ``begin``, the audio in
+appends of uneven sizes (``SESSION_APPENDS``, which cut every window
+boundary at a different place), then ``finish``. Its text and words must
+equal the same runtime's protocol 2 answer for the whole clip, for every
+clip of every length; it prints how many do, and the time ``finish`` took
+(the part of a session decode left for key release) beside the protocol 2
+time for the whole clip.
 
 It prints, for clips of 15 seconds or less and for longer ones, how many
 transcripts are identical, then every clip whose text differs with both
@@ -74,6 +84,14 @@ SANDBOX = Path("/usr/bin/sandbox-exec")
 SANDBOX_PROFILE = "(version 1)(allow default)(deny network*)"
 TIME = Path("/usr/bin/time")
 PROTOCOL_1_KEYS = ["ok", "processing_s", "text"]
+# Protocol 3 headers: the operation in the top byte, a count below it
+# (native/ParrotASRHelper/PROTOCOL.md, "Protocol 3").
+SESSION_BEGIN, SESSION_APPEND, SESSION_FINISH = 1, 2, 3
+OPERATION_SHIFT = 56
+# Append sizes, used in turn: the app's own (dictate.SPEECH_SESSION_APPEND
+# _SAMPLES), one sample, an audio callback's block, and odd sizes that
+# land everywhere relative to the 239,360-sample windows.
+SESSION_APPENDS = (8_000, 1, 512, 23_999, 160_000, 4_801, 239_361)
 
 
 class Program:
@@ -117,6 +135,31 @@ class Program:
         self.process.stdin.write(struct.pack("<Q", len(payload)))
         self.process.stdin.write(payload.tobytes())
         self.process.stdin.flush()
+        reply = self._line()
+        return reply, time.perf_counter() - started
+
+    def _operation(self, operation: int, payload: bytes = b"",
+                   count: int = 0) -> None:
+        self.process.stdin.write(struct.pack(
+            "<Q", (operation << OPERATION_SHIFT) | count))
+        if payload:
+            self.process.stdin.write(payload)
+        self.process.stdin.flush()
+
+    def session(self, audio: np.ndarray) -> tuple[dict, float]:
+        """Decode ``audio`` as a protocol 3 session; the answer to finish
+        and the round trip of the finish alone."""
+        payload = np.ascontiguousarray(audio, dtype="<f4")
+        self._operation(SESSION_BEGIN)
+        offset, turn = 0, 0
+        while offset < len(payload):
+            size = SESSION_APPENDS[turn % len(SESSION_APPENDS)]
+            part = payload[offset:offset + size]
+            self._operation(SESSION_APPEND, part.tobytes(), len(part))
+            offset += len(part)
+            turn += 1
+        started = time.perf_counter()
+        self._operation(SESSION_FINISH)
         reply = self._line()
         return reply, time.perf_counter() - started
 
@@ -244,6 +287,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="write one JSON line per clip here")
     parser.add_argument("--no-sandbox", action="store_true",
                         help="run the programs without sandbox-exec")
+    parser.add_argument("--session", action="store_true",
+                        help="also decode every clip as a protocol 3 session")
     args = parser.parse_args(argv)
     if sys.platform != "darwin":
         parser.error("this compares macOS programs; run it on a Mac")
@@ -280,6 +325,9 @@ def main(argv: list[str] | None = None) -> int:
                               ["--server", "--protocol", "2", *model_args],
                               home, sandbox),
     }
+    session = (launch("candidate-3", args.candidate,
+                      ["--server", "--protocol", "3", *model_args],
+                      home, sandbox) if args.session else None)
     # The candidate must be built from this checkout (setup.sh builds it
     # from here): this is the digest the README records beside the result.
     print(f"sources: sha256:{source_digest()}")
@@ -290,6 +338,10 @@ def main(argv: list[str] | None = None) -> int:
     for program in programs.values():
         for _ in range(3):
             program.request(clips[0][1])
+    if session is not None:
+        print(f"candidate-3: {session.ready}")
+        for _ in range(3):
+            session.session(clips[0][1])
 
     records = []
     for index, (clip_id, audio) in enumerate(clips):
@@ -302,8 +354,26 @@ def main(argv: list[str] | None = None) -> int:
                 "round_trip_s": round(seconds, 6),
                 "words": len(reply.get("words") or []),
             }
+            if name == "candidate-2":
+                batch = reply
+        if session is not None:
+            reply, seconds = session.session(audio)
+            record["candidate-3"] = {
+                "ok": reply.get("ok"), "text": reply.get("text"),
+                "processing_s": reply.get("processing_s"),
+                "round_trip_s": round(seconds, 6),
+                "samples": reply.get("samples"),
+                # Text, words and mean confidence, against protocol 2.
+                "same": (reply.get("ok") is True and batch.get("ok") is True
+                         and reply.get("samples") == len(audio)
+                         and all(reply.get(key) == batch.get(key)
+                                 for key in ("text", "words",
+                                             "avg_confidence"))),
+            }
         records.append(record)
     memory = {name: program.close() for name, program in programs.items()}
+    if session is not None:
+        memory["candidate-3"] = session.close()
 
     if args.out:
         with args.out.open("w", encoding="utf-8") as handle:
@@ -338,6 +408,37 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    reference: {record['reference']['text']!r}")
         print(f"    candidate: {record['candidate-1']['text']!r}")
 
+    sessions_same = None
+    if session is not None:
+        sessions_same = sum(r["candidate-3"]["same"] for r in records)
+        print(f"candidate protocol 3 session text and words equal to its "
+              f"protocol 2 answer: {sessions_same} of {len(records)} "
+              f"({sum(r['candidate-3']['same'] for r in short)} of {len(short)} "
+              f"of {LONG_SECONDS:g} s or less, "
+              f"{sum(r['candidate-3']['same'] for r in long)} of {len(long)} "
+              f"longer)")
+        for record in records:
+            if not record["candidate-3"]["same"]:
+                print(f"  session differs: {record['id']} ({record['seconds']} s)")
+        print("session finish against the whole clip in protocol 2, "
+              "processing_s, ms:")
+        for label, lo, hi in (("15 s or less", 0, LONG_SECONDS),
+                              ("15 to 30 s", LONG_SECONDS, 30),
+                              ("30 to 120 s", 30, 120),
+                              ("over 120 s", 120, math.inf)):
+            group = [r for r in records if lo < r["seconds"] <= hi
+                     or (lo == 0 and r["seconds"] == 0)]
+            if not group:
+                continue
+            finish = [1000 * float(r["candidate-3"]["processing_s"] or 0)
+                      for r in group]
+            whole = [1000 * float(r["candidate-2"]["processing_s"] or 0)
+                     for r in group]
+            print(f"  {label:13s} ({len(group):3d} clips) finish p50 "
+                  f"{percentile(finish, .5):7.2f} p95 {percentile(finish, .95):7.2f} "
+                  f"max {max(finish):7.2f}   whole p50 {percentile(whole, .5):7.2f} "
+                  f"p95 {percentile(whole, .95):7.2f} max {max(whole):7.2f}")
+
     print("latency, ms (processing_s / round trip):")
     for name in order:
         processing = [1000 * float(r[name]["processing_s"] or 0) for r in records]
@@ -351,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  paired {name} minus reference, round trip: "
               f"p50 {percentile(paired, .5):+.2f}  p95 {percentile(paired, .95):+.2f}")
     print("peak memory, MiB (maximum resident set size / peak footprint):")
-    for name in order:
+    for name in [*order, *(["candidate-3"] if session is not None else [])]:
         values = memory.get(name) or {}
         rss = values.get("max_rss")
         footprint = values.get("peak_footprint")
@@ -360,7 +461,8 @@ def main(argv: list[str] | None = None) -> int:
               f"{footprint / 2**20 if footprint else math.nan:7.1f}")
 
     failed = (sum(map(same, short)) != len(short)
-              or keys_ok != len(records) or protocols_agree != len(records))
+              or keys_ok != len(records) or protocols_agree != len(records)
+              or (sessions_same is not None and sessions_same != len(records)))
     return 1 if failed else 0
 
 
