@@ -63,6 +63,9 @@ from whisper_face_gui import (
     hotkey_row_detail,
     hotkey_shared_mode_note,
     recent_dictation_row,
+    recent_dictation_receipt_text,
+    recent_dictations_tally,
+    RECENT_RECEIPTS,
     HOTKEY_KEYCODES,
     MODE_GUIDE,
     SOUND_THEMES,
@@ -3197,6 +3200,46 @@ class RecentDictationRowTests(unittest.TestCase):
                 self.assertTrue(recent_dictation_row(entry))
 
 
+class RecentDictationReceiptTests(unittest.TestCase):
+    """Each recent dictation says what became of it, in plain words."""
+
+    def test_the_window_words_every_receipt_the_runtime_can_send(self):
+        tree = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
+        node = next(
+            node for node in tree.body if isinstance(node, ast.Assign)
+            and any(getattr(target, "id", "") == "TRANSCRIPT_RECEIPTS"
+                    for target in node.targets))
+        runtime = {item.value for item in ast.walk(node.value)
+                   if isinstance(item, ast.Constant)
+                   and isinstance(item.value, str)}
+        self.assertEqual(runtime, set(RECENT_RECEIPTS))
+        texts = {recent_dictation_receipt_text({"receipt": receipt})
+                 for receipt in RECENT_RECEIPTS}
+        self.assertEqual(len(texts), len(RECENT_RECEIPTS))
+
+    def test_only_proof_counts_as_in_your_document(self):
+        for receipt in RECENT_RECEIPTS:
+            with self.subTest(receipt=receipt):
+                text = recent_dictation_receipt_text({"receipt": receipt})
+                self.assertEqual(text.startswith("In your document"),
+                                 receipt in {"proven", "position"})
+                self.assertEqual(
+                    "Voice Outbox" in text,
+                    receipt in {"not_pasted", "unconfirmed", "interrupted"})
+        self.assertEqual(
+            recent_dictations_tally([
+                {"receipt": "proven"}, {"receipt": "position"},
+                {"receipt": "unchecked"}, {"receipt": "not_pasted"},
+                {}]),
+            "2 of 5 checked in your document after pasting.")
+
+    def test_an_unknown_or_missing_receipt_claims_nothing(self):
+        for entry in ({}, {"receipt": "delivered!"}, {"receipt": 7}):
+            with self.subTest(entry=entry):
+                self.assertEqual(recent_dictation_receipt_text(entry),
+                                 "No delivery record")
+
+
 class ControlSettingsViewModelTests(unittest.TestCase):
     """A1/A2/A3/D1: the window drives the runtime and reports its verdicts."""
 
@@ -4492,6 +4535,9 @@ class EditorSheetContractTests(unittest.TestCase):
         "editVocabulary_": "_vocabulary_page",
         "reviewCorrections_": "_corrections_page",
         "inspectKeywords_": "_keywords_page",
+        # Not a Personalize editor, but a sheet made the same way: the
+        # Privacy page's recent dictations, each with its receipt.
+        "browseRecentDictations_": "_recent_page",
     }
 
     @staticmethod
@@ -4590,7 +4636,7 @@ class EditorSheetContractTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
             and "NSAlert" in self._names(node))
         self.assertEqual(alerts, [
-            "_capture_hotkey", "_confirm", "browseRecentDictations_",
+            "_capture_hotkey", "_confirm",
             "inspectResultEvidence_", "inspectVoiceObjects_", "viewModes_"])
 
     def test_a_sheet_is_made_of_the_pages_own_parts(self):
@@ -5054,7 +5100,7 @@ class EditorSheetContractTests(unittest.TestCase):
             "snippets-empty", "vocabulary", "vocabulary-refused",
             "vocabulary-empty", "corrections", "corrections-contrast",
             "corrections-empty", "keywords", "keywords-copied",
-            "keywords-empty"})
+            "keywords-empty", "recent", "recent-words", "recent-empty"})
         self.assertIn("f'sheet-{picture}-{suffix}'", render)
         self.assertIn("f'sheet-tones-empty-{suffix}'", render)
         self.assertIn("f'sheet-in-window-{picture}-{suffix}'", render)

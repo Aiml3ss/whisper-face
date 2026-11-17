@@ -14226,8 +14226,11 @@ class RecentDictationTests(unittest.TestCase):
         return load_definitions(
             "recent_dictation_metadata", "recent_dictation_menu_title",
             "describe_dictation_age", "undo_menu_title",
-            assignments={"RECENT_DICTATION_LIMIT"},
+            "transcript_receipt",
+            assignments={"RECENT_DICTATION_LIMIT", "TRANSCRIPT_RECEIPTS"},
             extra={"time": SimpleNamespace(time=lambda: 3700.0),
+                   "ReceiptReason": ReceiptReason,
+                   "ReceiptState": ReceiptState,
                    "math": __import__("math"),
                    "TRANSCRIPTS_LOCK": threading.Lock(),
                    "app_display_name":
@@ -14253,6 +14256,52 @@ class RecentDictationTests(unittest.TestCase):
         # A blank transcript and a corrupt line are simply not offered.
         self.assertEqual(len(ns["recent_dictation_metadata"](
             lines=self.LOG, now=3700.0)), 3)
+
+    def receipt(self, **metrics):
+        return self.namespace()["transcript_receipt"](
+            {"clean": "x", "metrics": metrics})
+
+    def test_each_dictation_says_what_became_of_it(self):
+        opaque = {"insertion_opaque_reason": "value-unsupported"}
+        for expected, metrics in (
+            ("proven", {"insertion_state": "verified",
+                        "insertion_reason": "commit_verified",
+                        "paste_attempted": True}),
+            ("proven", {"insertion_state": "verified",
+                        "insertion_reason": "commit_verified_whitespace_form",
+                        "paste_attempted": True}),
+            ("position", {"insertion_state": "verified",
+                          "insertion_reason": "commit_verified_position",
+                          "paste_attempted": True}),
+            ("unchecked", {"insertion_state": "unverifiable",
+                           "insertion_reason": "readback_unavailable",
+                           "paste_attempted": True, **opaque}),
+            ("unchecked", {"insertion_state": "legacy",
+                           "insertion_reason": "unsupported_field",
+                           "paste_attempted": True}),
+            # A field that could be read and went quiet is not "unchecked".
+            ("unconfirmed", {"insertion_state": "unverifiable",
+                             "insertion_reason": "readback_unavailable",
+                             "paste_attempted": True,
+                             "insertion_opaque_reason": None}),
+            ("unconfirmed", {"insertion_state": "conflict",
+                             "insertion_reason": "readback_conflict",
+                             "paste_attempted": True}),
+            ("not_pasted", {"insertion_state": "conflict",
+                            "insertion_reason": "focus_drift",
+                            "paste_attempted": False}),
+            ("interrupted", {"insertion_state": "unresolved",
+                             "insertion_reason": "interrupted",
+                             "paste_attempted": True}),
+        ):
+            with self.subTest(expected=expected, metrics=metrics):
+                self.assertEqual(self.receipt(**metrics), expected)
+        ns = self.namespace()
+        self.assertEqual(ns["transcript_receipt"]({"clean": "x"}), "unknown")
+        entries = ns["recent_dictation_metadata"](lines=self.LOG, now=3700.0)
+        self.assertEqual({entry["receipt"] for entry in entries}, {"unknown"})
+        for entry in entries:
+            self.assertIn(entry["receipt"], ns["TRANSCRIPT_RECEIPTS"])
 
     def test_older_entries_without_an_id_stay_addressable_by_position(self):
         ns = self.namespace()
@@ -17355,6 +17404,33 @@ class SaidWordsDeliveryTests(unittest.TestCase):
         seen = UncheckedPasteDeliveryTests().deliver("verified")
         [record] = [item for item in seen.undoable if item is not None]
         self.assertEqual(record.said, "")
+
+
+class HistoryReceiptTests(unittest.TestCase):
+    """The receipt the history shows is read from what the real delivery
+    path wrote, so the two cannot drift apart."""
+
+    def test_each_delivery_outcome_reaches_the_history_as_its_receipt(self):
+        classify = load_definitions(
+            "transcript_receipt",
+            extra={"ReceiptReason": ReceiptReason,
+                   "ReceiptState": ReceiptState})["transcript_receipt"]
+        for outcome, expected in (
+                ("verified", "proven"),
+                ("position-exact", "position"),
+                ("unchecked", "unchecked"),
+                ("conflict", "unconfirmed"),
+                ("readback-empty", "unconfirmed"),
+                ("destination-changed", "not_pasted")):
+            with self.subTest(outcome=outcome):
+                seen = UncheckedPasteDeliveryTests().deliver(outcome)
+                [record] = seen.records
+                self.assertEqual(
+                    classify({"metrics": record.metrics}), expected)
+        windows = UncheckedPasteDeliveryTests().deliver(
+            "verified", is_macos=False)
+        self.assertEqual(
+            classify({"metrics": windows.records[0].metrics}), "unchecked")
 
 
 class UncheckedPasteDeliveryTests(unittest.TestCase):

@@ -7725,6 +7725,42 @@ def _ollama_stream_reply(response, deadline: float,
 
 RECENT_DICTATION_LIMIT = 10
 
+# What became of one dictation, as the history can prove it: a closed
+# vocabulary the window words, read from the receipt fields each history line
+# already carries. Never from the text.
+TRANSCRIPT_RECEIPTS = frozenset({
+    "proven",        # read back from the field: it is in the document
+    "position",      # checked by where the cursor went
+    "unchecked",     # pasted where nothing could be read back
+    "not_pasted",    # never pasted; a copy went to the Voice Outbox
+    "unconfirmed",   # pasted, and the check failed; a copy went there too
+    "interrupted",   # Whisper Face stopped first; recovered at the next start
+    "unknown",       # written before receipts were recorded
+})
+
+
+def transcript_receipt(entry: dict) -> str:
+    """Classify one history line's delivery into ``TRANSCRIPT_RECEIPTS``."""
+    metrics = entry.get("metrics") if isinstance(entry, dict) else None
+    if not isinstance(metrics, dict) or "insertion_state" not in metrics:
+        return "unknown"
+    if metrics.get("insertion_reason") == ReceiptReason.INTERRUPTED.value:
+        return "interrupted"
+    state = metrics.get("insertion_state")
+    if state == ReceiptState.VERIFIED.value:
+        return ("position" if metrics.get("insertion_reason")
+                == "commit_verified_position" else "proven")
+    if state == "legacy":
+        # No lease: pasted the way the app did before receipts (Windows).
+        return "unchecked"
+    if metrics.get("paste_attempted") is False:
+        return "not_pasted"
+    if (state == ReceiptState.UNVERIFIABLE.value
+            and metrics.get("insertion_opaque_reason") is not None):
+        # The field hid its text from the start: nothing to compare.
+        return "unchecked"
+    return "unconfirmed"
+
 
 def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
                               lines: "list[str] | None" = None,
@@ -7775,6 +7811,7 @@ def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
                 0.0, (time.time() if now is None else float(now)) - at),
             "words": len(text.split()),
             "app": namer(bundle) if bundle else "",
+            "receipt": transcript_receipt(entry),
         })
     return out
 

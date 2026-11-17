@@ -879,7 +879,12 @@ record is updated with the text observed in that range after ten seconds;
 unsafe observations are skipped. This enables a clearly labeled zero-edit
 proxy and observed correction-burden measurement. There is no switch that
 turns the history off; the Privacy pane's **Recent dictations** setting only
-controls whether recent entries are listed. Usage counts for "Today" and "Last
+controls whether recent entries are listed. When it is on, **Browse…** lists
+each recent dictation with what became of it, read from the receipt its line
+already holds: in your document (checked word for word, or by the cursor),
+pasted where the app could not be checked, not pasted or possibly not landed
+with a copy sent to the Voice Outbox, or not delivered because Whisper Face
+stopped. The words appear only after **Show Words**. Usage counts for "Today" and "Last
 7 days" are computed from this bounded log, so very heavy use can be
 undercounted.
 
