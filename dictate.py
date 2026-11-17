@@ -5731,6 +5731,7 @@ class Recorder:
         self.insertion_lease = None
         self.insertion_receipt = None
         self.insertion_opaque_evidence = None
+        self.insertion_ax_wake = None
         self.process_ticket = None
         self.input_signature_at_press = None
         self.context_terms = []
@@ -5776,6 +5777,7 @@ class Recorder:
         self.insertion_lease = None
         self.insertion_receipt = None
         self.insertion_opaque_evidence = None
+        self.insertion_ax_wake = None
         self.process_ticket = None
         self.input_signature_at_press = None
         self.recording = True
@@ -10165,8 +10167,12 @@ def wake_electron_accessibility(pid) -> bool:
     """Enable an Electron app's own a11y tree via AXManualAccessibility.
 
     Idempotent and side-effect free beyond exposing the app's existing tree —
-    it grants no new data. Returns False on any failure so callers fall back to
-    their normal empty-read handling.
+    it grants no new data. Chromium keeps its accessibility tree up to date
+    while this is on, which costs the app some work, so callers set it once
+    per process and only after a focus read came back empty. Never
+    ``AXEnhancedUserInterface``: that one also changes how AppKit animates
+    and lays out some apps' windows. Returns False on any failure so callers
+    fall back to their normal empty-read handling.
     """
     if not IS_MACOS:
         return False
@@ -10189,21 +10195,81 @@ def _focus_read_is_empty(err, focused, text_reader) -> bool:
     return bool(err) or focused is None or text_reader(focused) is None
 
 
+# Chromium builds the tree in the renderer and sends it to the app's browser
+# process asynchronously once accessibility is switched on, so a read made
+# straight after the wake still finds no focused element. Waiting is paid
+# once per app process, on the hotkey worker after capture has started.
+ELECTRON_WAKE_TIMEOUT = 0.4
+ELECTRON_WAKE_POLL = 0.025
+# Process ids already woken (or refused): the attribute is set at most once
+# per app process, and a later empty read there is answered at once.
+_ELECTRON_WOKEN_PIDS = set()
+_ELECTRON_WAKE_LOCK = threading.Lock()
+# What the most recent wake decision on this thread was, in one closed word,
+# so the hotkey worker can record it for the take it is starting.
+ELECTRON_WAKE_OUTCOMES = frozenset({
+    "woke-read",            # set now; the focused field became readable
+    "woke-empty",           # set now; still unreadable when the wait ended
+    "wake-refused",         # the app reported an error and stayed empty
+    "woken-earlier-empty",  # set earlier in this process; empty again now
+})
+_ELECTRON_WAKE_NOTE = threading.local()
+
+
+def take_electron_wake_note() -> str | None:
+    """Return and clear this thread's last wake outcome."""
+    outcome = getattr(_ELECTRON_WAKE_NOTE, "outcome", None)
+    _ELECTRON_WAKE_NOTE.outcome = None
+    return outcome
+
+
 def electron_wake_retry(reader, app, *, detector=is_electron_app,
                         waker=wake_electron_accessibility,
-                        text_reader=_ax_text):
+                        text_reader=_ax_text, clock=None, sleeper=None,
+                        timeout=None, own_pid=None):
     """Read focus once; on an empty read from an Electron app, wake its
-    accessibility tree and read exactly once more.
+    accessibility tree once per process and wait briefly for it.
 
     Returns the (err, focused) pair. The wake fires only on empty + Electron,
-    so native apps read on the first try and never pay the retry.
+    so native apps read on the first try and never pay the retry. It sets
+    only ``AXManualAccessibility``, only on the application element, never
+    on this process, and never twice for one app process: after the first
+    wait, an empty read in that process is returned at once.
     """
     err, focused = reader()
-    if _focus_read_is_empty(err, focused, text_reader) \
-            and app is not None and detector(app):
-        waker(app.processIdentifier())
+    if not _focus_read_is_empty(err, focused, text_reader) \
+            or app is None or not detector(app):
+        return err, focused
+    try:
+        pid = int(app.processIdentifier())
+    except Exception:
+        return err, focused
+    if pid == (os.getpid() if own_pid is None else own_pid):
+        return err, focused
+    with _ELECTRON_WAKE_LOCK:
+        first = pid not in _ELECTRON_WOKEN_PIDS
+        _ELECTRON_WOKEN_PIDS.add(pid)
+    if not first:
+        _ELECTRON_WAKE_NOTE.outcome = "woken-earlier-empty"
+        return err, focused
+    # The set's own answer is not trusted to skip the wait: an app can
+    # report an error for an attribute it nonetheless acted on.
+    refused = not waker(pid)
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    deadline = clock() + max(0.0, ELECTRON_WAKE_TIMEOUT
+                             if timeout is None else timeout)
+    while True:
         err, focused = reader()
-    return err, focused
+        if not _focus_read_is_empty(err, focused, text_reader):
+            _ELECTRON_WAKE_NOTE.outcome = "woke-read"
+            return err, focused
+        remaining = deadline - clock()
+        if remaining <= 0:
+            _ELECTRON_WAKE_NOTE.outcome = (
+                "wake-refused" if refused else "woke-empty")
+            return err, focused
+        sleeper(min(ELECTRON_WAKE_POLL, remaining))
 
 
 def _coerce_range(value) -> tuple[int, int] | None:
@@ -10341,7 +10407,8 @@ def focused_snapshot() -> FocusSnapshot | None:
         systemwide = AXUIElementCreateSystemWide()
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
         # An empty focus read from an Electron app means its accessibility tree
-        # is still withheld; wake it and read once more before failing closed.
+        # is still withheld; wake it once and wait briefly before failing
+        # closed.
         err, focused = electron_wake_retry(
             lambda: AXUIElementCopyAttributeValue(
                 systemwide, kAXFocusedUIElementAttribute, None),
@@ -14392,6 +14459,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_focus_subrole": opaque_evidence.get("subrole"),
             "insertion_value_kind": opaque_evidence.get("value"),
             "insertion_selection_kind": opaque_evidence.get("selection"),
+            # Absent (None) unless key-down had to wake an Electron app's
+            # accessibility tree; then one of ELECTRON_WAKE_OUTCOMES.
+            "insertion_ax_wake": getattr(rec, "insertion_ax_wake", None),
             "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
         }, event_id=event_id, language=rec.language)
     except Exception as error:
@@ -15341,9 +15411,13 @@ def main():
                         set_status("rec")
                         AppHelper.callAfter(hud.showMode_, "recording")
                         play("Tink")              # the cue now means capture-ready
+                        take_electron_wake_note()
                         (rec.focus_at_press, rec.context_terms,
                          rec.context_pack) = capture_recognition_context(
                              rec.bundle_at_press)
+                        # Content-free: whether this take woke an Electron
+                        # app's accessibility tree, and what that gave.
+                        rec.insertion_ax_wake = take_electron_wake_note()
                         rec.insertion_lease = (
                             capture_insertion_lease(
                                 rec.focus_at_press,

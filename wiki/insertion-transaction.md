@@ -127,6 +127,18 @@ Outbox instead of the wrong field.
   names recorded at key-down, never a title, a value or a label, so
   that one dictation into an app says what the app exposes. What the
   focus snapshot already read is not read a second time.
+- **Waking an Electron app** (November 2026): Chromium builds its
+  accessibility tree only once an assistive client asks, and
+  asynchronously. When the focus read at key-down comes back empty from
+  an Electron app, the runtime sets `AXManualAccessibility` (never
+  `AXEnhancedUserInterface`) on that app's application element once per
+  app process, never on its own, and reads again for up to 0.4 s before
+  the lease is decided. Earlier it read once more at once, which came
+  too soon, so a dictation that found the tree off was "Pasted · this
+  app could not be checked" and only the next one verified. `insertion_ax_wake`
+  records what that take's wake did: `woke-read`, `woke-empty`,
+  `wake-refused`, `woken-earlier-empty`, or nothing when no wake was
+  needed.
 - Receipt states: verified, unverifiable, conflict, unresolved — with
   fixed reasons; the same vocabulary is reused by the in-process
   protocol ([[inert-foundations]]) and the compatibility fingerprint.

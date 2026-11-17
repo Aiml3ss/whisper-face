@@ -10062,10 +10062,17 @@ class ElectronAccessibilityTests(unittest.TestCase):
     def _wake_retry(self):
         # electron_wake_retry binds its detector/waker/text_reader defaults at
         # def-execution time, so those module globals must exist in the
-        # namespace even though every test overrides them per call.
+        # namespace even though every test overrides them per call. Each
+        # namespace has its own record of woken processes.
         return load_definitions(
             "electron_wake_retry", "_focus_read_is_empty",
+            "take_electron_wake_note",
+            assignments={
+                "ELECTRON_WAKE_TIMEOUT", "ELECTRON_WAKE_POLL",
+                "_ELECTRON_WOKEN_PIDS", "_ELECTRON_WAKE_LOCK",
+                "ELECTRON_WAKE_OUTCOMES", "_ELECTRON_WAKE_NOTE"},
             extra={
+                "os": os, "time": time,
                 "is_electron_app": lambda app: False,
                 "wake_electron_accessibility": lambda pid: True,
                 "_ax_text": lambda element: None,
@@ -10081,6 +10088,44 @@ class ElectronAccessibilityTests(unittest.TestCase):
             return reads[min(len(calls) - 1, len(reads) - 1)]
 
         return reader, calls
+
+    @staticmethod
+    def _clock():
+        """A clock that moves only when the code under test sleeps.
+
+        A wait that ignored its deadline would spin here forever, so the
+        fake refuses a step that does not move the clock and gives up
+        after a long run of steps: a broken wait fails, it never hangs.
+        """
+        now = [100.0]
+        sleeps = []
+
+        def sleeper(seconds):
+            if seconds <= 0 or len(sleeps) >= 1000:
+                raise AssertionError("the wait ran past its deadline")
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        return (lambda: now[0]), sleeper, sleeps
+
+    def _retry(self, ns, reader, pid=4242, *, electron=True, waker=None,
+               readable=("field",), own_pid=1, timeout=None):
+        clock, sleeper, sleeps = self._clock()
+        woken = []
+
+        def default_waker(target):
+            woken.append(target)
+            return True
+
+        result = ns["electron_wake_retry"](
+            reader, SimpleNamespace(processIdentifier=lambda: pid),
+            detector=lambda _app: electron,
+            waker=waker or default_waker,
+            text_reader=lambda element: (
+                "text" if element in readable else None),
+            clock=clock, sleeper=sleeper, own_pid=own_pid,
+            timeout=timeout)
+        return result, woken, sleeps, ns["take_electron_wake_note"]()
 
     def test_allowlisted_bundle_is_electron_without_touching_the_filesystem(
             self):
@@ -10149,58 +10194,189 @@ class ElectronAccessibilityTests(unittest.TestCase):
         )
         self.assertTrue(ns["is_electron_app"](cached_app))
 
-    def test_empty_electron_read_wakes_once_and_reads_again(self):
+    EMPTY = (-25212, None)   # kAXErrorNoValue: no focused element
+
+    def test_the_first_empty_read_wakes_and_waits_for_the_field(self):
         ns = self._wake_retry()
-        reader, calls = self._reader((0, "first-el"), (0, "second-el"))
-        waker_pids = []
+        reader, calls = self._reader(
+            self.EMPTY, self.EMPTY, self.EMPTY, (0, "field"))
+
+        result, woken, sleeps, note = self._retry(ns, reader)
+
+        # The tree arrives asynchronously, so the read straight after the
+        # wake is not the last word: it keeps reading until the field is
+        # there, in short steps.
+        self.assertEqual(result, (0, "field"))
+        self.assertEqual(woken, [4242])
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(sleeps), 2)
+        self.assertTrue(all(
+            0 < step <= ns["ELECTRON_WAKE_POLL"] for step in sleeps))
+        self.assertEqual(note, "woke-read")
+        self.assertIn(note, ns["ELECTRON_WAKE_OUTCOMES"])
+
+    def test_the_wait_after_a_wake_is_bounded(self):
+        ns = self._wake_retry()
+        reader, calls = self._reader(self.EMPTY)
+
+        result, woken, sleeps, note = self._retry(ns, reader)
+
+        self.assertEqual(result, self.EMPTY)
+        self.assertEqual(woken, [4242])
+        self.assertAlmostEqual(sum(sleeps), ns["ELECTRON_WAKE_TIMEOUT"])
+        self.assertLessEqual(
+            len(calls),
+            2 + ns["ELECTRON_WAKE_TIMEOUT"] / ns["ELECTRON_WAKE_POLL"])
+        self.assertEqual(note, "woke-empty")
+        self.assertIn(note, ns["ELECTRON_WAKE_OUTCOMES"])
+        # It stays short: this runs on the hotkey worker at key-down.
+        self.assertLessEqual(ns["ELECTRON_WAKE_TIMEOUT"], 0.5)
+
+    def test_an_app_process_is_woken_once(self):
+        ns = self._wake_retry()
+        self._retry(ns, self._reader(self.EMPTY)[0])
+
+        reader, calls = self._reader(self.EMPTY)
+        result, woken, sleeps, note = self._retry(ns, reader)
+
+        # The same process empty again: no second set, no second wait.
+        self.assertEqual(result, self.EMPTY)
+        self.assertEqual(woken, [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(note, "woken-earlier-empty")
+        self.assertIn(note, ns["ELECTRON_WAKE_OUTCOMES"])
+
+        # The app relaunched is a new process, and is woken again.
+        reader, _calls = self._reader(self.EMPTY, (0, "field"))
+        result, woken, _sleeps, note = self._retry(ns, reader, pid=4343)
+        self.assertEqual(woken, [4343])
+        self.assertEqual(note, "woke-read")
+
+    def test_a_wake_the_app_reports_as_an_error_still_waits_once(self):
+        ns = self._wake_retry()
+        refused = []
 
         def waker(pid):
-            waker_pids.append(pid)
-            return True
+            refused.append(pid)
+            return False
 
-        app = SimpleNamespace(processIdentifier=lambda: 4242)
-        err, focused = ns["electron_wake_retry"](
-            reader, app,
-            detector=lambda a: True,
-            waker=waker,
-            text_reader=lambda element: None,
-        )
+        result, _woken, sleeps, note = self._retry(
+            ns, self._reader(self.EMPTY, (0, "field"))[0], waker=waker)
+        self.assertEqual(result, (0, "field"))
+        self.assertEqual(note, "woke-read")
 
-        self.assertEqual(waker_pids, [4242])
-        self.assertEqual(len(calls), 2)
-        self.assertEqual((err, focused), (0, "second-el"))
+        result, _woken, sleeps, note = self._retry(
+            ns, self._reader(self.EMPTY)[0], pid=4343, waker=waker)
+        self.assertEqual(result, self.EMPTY)
+        self.assertEqual(note, "wake-refused")
+        self.assertIn(note, ns["ELECTRON_WAKE_OUTCOMES"])
+        self.assertEqual(refused, [4242, 4343])
+        # Refused is still once per process.
+        _result, _woken, sleeps, note = self._retry(
+            ns, self._reader(self.EMPTY)[0], pid=4343, waker=waker)
+        self.assertEqual(refused, [4242, 4343])
+        self.assertEqual((sleeps, note), ([], "woken-earlier-empty"))
+
+    def test_this_process_is_never_woken(self):
+        ns = self._wake_retry()
+        reader, calls = self._reader(self.EMPTY)
+
+        result, woken, sleeps, note = self._retry(
+            ns, reader, pid=4242, own_pid=4242)
+
+        self.assertEqual(result, self.EMPTY)
+        self.assertEqual((woken, sleeps, len(calls)), ([], [], 1))
+        self.assertIsNone(note)
 
     def test_empty_non_electron_read_does_not_wake(self):
         ns = self._wake_retry()
         reader, calls = self._reader((0, "only-el"))
-        waker_pids = []
-        app = SimpleNamespace(processIdentifier=lambda: 9)
-        err, focused = ns["electron_wake_retry"](
-            reader, app,
-            detector=lambda a: False,
-            waker=lambda pid: waker_pids.append(pid),
-            text_reader=lambda element: None,
-        )
 
-        self.assertEqual(waker_pids, [])
-        self.assertEqual(len(calls), 1)
-        self.assertEqual((err, focused), (0, "only-el"))
+        result, woken, sleeps, note = self._retry(
+            ns, reader, electron=False, readable=())
+
+        self.assertEqual(result, (0, "only-el"))
+        self.assertEqual((woken, sleeps, len(calls)), ([], [], 1))
+        self.assertIsNone(note)
 
     def test_non_empty_read_returns_without_waking(self):
         ns = self._wake_retry()
         reader, calls = self._reader((0, "editor"))
-        waker_pids = []
-        app = SimpleNamespace(processIdentifier=lambda: 9)
-        err, focused = ns["electron_wake_retry"](
-            reader, app,
-            detector=lambda a: True,
-            waker=lambda pid: waker_pids.append(pid),
-            text_reader=lambda element: "typed text",
-        )
 
-        self.assertEqual(waker_pids, [])
-        self.assertEqual(len(calls), 1)
-        self.assertEqual((err, focused), (0, "editor"))
+        result, woken, sleeps, note = self._retry(
+            ns, reader, readable=("editor",))
+
+        self.assertEqual(result, (0, "editor"))
+        self.assertEqual((woken, sleeps, len(calls)), ([], [], 1))
+        self.assertIsNone(note)
+
+    def test_the_note_is_taken_once(self):
+        ns = self._wake_retry()
+        self._retry(ns, self._reader(self.EMPTY, (0, "field"))[0])
+        # _retry took it; a second take finds nothing left behind.
+        self.assertIsNone(ns["take_electron_wake_note"]())
+
+    def test_only_manual_accessibility_is_set_on_the_application(self):
+        ns = load_definitions(
+            "wake_electron_accessibility", extra={"IS_MACOS": True})
+        calls = []
+        services = types.ModuleType("ApplicationServices")
+        services.AXUIElementCreateApplication = lambda pid: ("app", pid)
+        services.AXUIElementSetAttributeValue = (
+            lambda element, attribute, value:
+            calls.append((element, attribute, value)) or 0)
+        foundation = types.ModuleType("CoreFoundation")
+        foundation.kCFBooleanTrue = True
+        with mock.patch.dict(sys.modules, {
+                "ApplicationServices": services,
+                "CoreFoundation": foundation}):
+            self.assertTrue(ns["wake_electron_accessibility"](4242))
+        self.assertEqual(
+            calls, [(("app", 4242), "AXManualAccessibility", True)])
+
+    def test_enhanced_user_interface_is_never_set(self):
+        # AXEnhancedUserInterface also changes AppKit window animation and
+        # some apps' layout, so it may be named in prose but never used.
+        used = [
+            node for node in ast.walk(TREE)
+            if isinstance(node, ast.Constant)
+            and node.value == "AXEnhancedUserInterface"]
+        self.assertEqual(used, [])
+        # The one Accessibility write to an application element is the wake.
+        setters = [
+            node for node in ast.walk(TREE)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None)
+            == "AXUIElementSetAttributeValue"]
+        app_writes = [
+            node for node in setters
+            if isinstance(node.args[0], ast.Call)
+            and getattr(node.args[0].func, "id", None)
+            == "AXUIElementCreateApplication"]
+        self.assertEqual(len(app_writes), 1)
+        self.assertEqual(app_writes[0].args[1].value, "AXManualAccessibility")
+
+    def test_the_runtime_records_the_wake_at_key_down(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "                        take_electron_wake_note()\n"
+            "                        (rec.focus_at_press, rec.context_terms,\n"
+            "                         rec.context_pack) = "
+            "capture_recognition_context(\n"
+            "                             rec.bundle_at_press)\n", source)
+        self.assertIn(
+            "                        rec.insertion_ax_wake = "
+            "take_electron_wake_note()\n", source)
+        recorder = next(
+            node for node in TREE.body
+            if isinstance(node, ast.ClassDef) and node.name == "Recorder")
+        for method in ("__init__", "start"):
+            body = ast.unparse(next(
+                node for node in recorder.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == method))
+            self.assertIn("self.insertion_ax_wake = None", body)
 
     def test_focus_read_emptiness_covers_error_missing_and_unreadable(self):
         ns = self._wake_retry()
@@ -16951,7 +17127,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
     def deliver(self, outcome, *, snippet=None, is_macos=True,
                 paused=False, route="standard", spoken=None,
                 coordinator=None, utterance="take-1", recording=None,
-                spoken_edits=False, force_position=False):
+                spoken_edits=False, force_position=False, ax_wake=None):
         """One dictation with a named delivery outcome; what it did.
 
         ``force_position`` makes the commit report a check by position
@@ -17214,6 +17390,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                     focused=lambda: (0, element))
                 if is_macos else None),
             focus_at_press=at_press if is_macos else None,
+            insertion_ax_wake=ax_wake,
             input_signature_at_press=None,
             stop=lambda: np.ones(16_000, dtype=np.float32),
             cut_samples=8_000, chunks=[],
@@ -17540,6 +17717,14 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         written = json.dumps(metrics)
         self.assertNotIn("Chat", written)
         self.assertNotIn(self.SPOKEN, written)
+        # No Electron app was woken for this take.
+        self.assertIsNone(metrics["insertion_ax_wake"])
+
+    def test_the_record_says_whether_key_down_woke_an_electron_app(self):
+        seen = self.deliver("verified", ax_wake="woke-read")
+
+        self.assertEqual(
+            seen.records[0].metrics["insertion_ax_wake"], "woke-read")
 
     def test_five_in_a_row_are_five_calm_copies(self):
         coordinator = InsertionCoordinator()
