@@ -1299,6 +1299,13 @@ def _verify_launcher_core(app: Path) -> None:
     try: recorded_source = (app / "Contents/Resources/launcher-source-sha256").read_text(encoding="utf-8").strip()
     except ValueError as exc: raise LauncherError("launcher source contract is unreadable") from exc
     if recorded_source != _source_digest(): raise LauncherError("launcher source contract mismatch")
+    # The icon is part of the launcher like its source: an app carrying an
+    # earlier icon is stale, so the installer builds it again and the
+    # receipt binds the new bundle. The drag-install app is checked the same
+    # way, so its download carries this checkout's icon.
+    try: shipped_icon = (app / ICON_FILE).read_bytes()
+    except OSError as exc: raise LauncherError("launcher icon is unreadable") from exc
+    if shipped_icon != _icon_bytes(): raise LauncherError("launcher icon differs from this checkout's")
     executable = app / "Contents/MacOS" / EXECUTABLE
     if not executable.stat().st_mode & stat.S_IXUSR or executable.read_bytes()[:4] != b"\xcf\xfa\xed\xfe": raise LauncherError("launcher executable is not an arm64 Mach-O")
 

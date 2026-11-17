@@ -352,6 +352,44 @@ class MacDistributionContractTests(unittest.TestCase):
             )
             self.assertEqual(verification.returncode, 0, verification.stderr)
 
+            # An install made before the icon changed is stale, like one built
+            # from older launcher source: verify refuses it, and the installer
+            # builds the current app and binds its receipt to that one.
+            module = load_launcher_tool()
+            earlier = root / "earlier" / "Whisper Face.app"
+            earlier_receipt = root / "earlier-state" / "launcher-install.json"
+            subprocess.run(["ditto", str(app), str(earlier)], check=True)
+            (earlier / "Contents/Resources/WhisperFace.icns").write_bytes(
+                b"icns" + (8).to_bytes(4, "big"))
+            subprocess.run(
+                ["codesign", "--force", "--sign", "-", "--identifier",
+                 "com.berg.whisper-face.launcher", str(earlier)],
+                check=True, capture_output=True)
+            module._write_receipt(earlier_receipt, ROOT, earlier)
+            stale = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "verify",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(stale.returncode, 2, stale.stderr)
+            self.assertIn("icon differs", stale.stderr)
+            reinstall = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "install",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(reinstall.returncode, 0, reinstall.stderr)
+            self.assertEqual(first, {
+                path.relative_to(earlier).as_posix(): path.read_bytes()
+                for path in earlier.rglob("*") if path.is_file()
+            })
+            renewed = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "verify",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(renewed.returncode, 0, renewed.stderr)
+
             # A substituted binary that is re-signed ad-hoc carries a valid
             # signature. Without a recorded digest it is not trusted, and the
             # install builds its own launcher instead of stopping.
@@ -576,6 +614,24 @@ class MacDistributionContractTests(unittest.TestCase):
         self.assertIn("Contents/Resources/WhisperFace.icns", module.BASE_FILES)
         self.assertEqual(module._expected_plist()["CFBundleIconFile"], "WhisperFace")
         self.assertEqual(module._icon_bytes(), data)
+        # scripts/make_app_icon.py packs every size from 16 to 512 points at
+        # 1x and 2x; a missing one makes macOS scale another, blurred.
+        entries, offset = {}, 8
+        while offset < len(data):
+            length = int.from_bytes(data[offset + 4:offset + 8], "big")
+            self.assertGreater(length, 8)
+            entries[data[offset:offset + 4]] = data[offset + 8:offset + length]
+            offset += length
+        self.assertEqual(offset, len(data))
+        self.assertLessEqual({b"ic04", b"ic05"}, set(entries))   # 16, 32 px
+        for kind, pixels in ((b"ic11", 32), (b"ic12", 64), (b"ic07", 128),
+                             (b"ic13", 256), (b"ic08", 256), (b"ic14", 512),
+                             (b"ic09", 512), (b"ic10", 1024)):
+            with self.subTest(kind=kind):
+                png = entries[kind]
+                self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(int.from_bytes(png[16:20], "big"), pixels)
+                self.assertEqual(int.from_bytes(png[20:24], "big"), pixels)
         # Every consumer of the bundle contract has to agree, or a release
         # artifact would be rejected as containing unexpected files.
         self.assertIn("Contents/Resources/WhisperFace.icns", module.DRAG_FILES)
@@ -976,6 +1032,18 @@ class DragInstallAppTests(unittest.TestCase):
         # The packaged app is still an owned launcher, so a later install
         # can recognise it.
         module.verify_owned_app(app)
+        # The download carries this checkout's icon, and one that carries an
+        # earlier icon is refused like one built from earlier launcher source.
+        self.assertEqual(
+            (app / "Contents/Resources/WhisperFace.icns").read_bytes(),
+            (ROOT / "icons/WhisperFace.icns").read_bytes())
+        earlier = self.root / "earlier-icon" / "Whisper Face.app"
+        subprocess.run(["ditto", str(app), str(earlier)], check=True)
+        (earlier / "Contents/Resources/WhisperFace.icns").write_bytes(
+            b"icns" + (8).to_bytes(4, "big"))
+        stale = self.tool("verify-drag", "--app", str(earlier))
+        self.assertEqual(stale.returncode, 2)
+        self.assertIn("icon differs", stale.stderr)
 
     def test_an_unsigned_stable_build_or_a_swapped_archive_is_refused(self):
         _app, result = self.package("stable", channel="stable")

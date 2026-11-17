@@ -5008,6 +5008,23 @@ class EditorSheetContractTests(unittest.TestCase):
         self.assertNotIn("f'{item.name} — {item.bundle}'", page)
         self.assertIn("_silence_image(icon)", page)
 
+    def test_the_render_probe_pictures_the_alerts(self):
+        # ``--alerts`` shows the app icon where the menu bar shows it, and
+        # the chosen face where the window's own confirmations show it.
+        source = (ROOT / "scripts" / "window_render_probe.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        self.assertIn('ALERTS = "--alerts" in ARGS', source)
+        self.assertIn("``--alerts``", ast.get_docstring(tree))
+        functions = {node.name: node for node in tree.body
+                     if isinstance(node, ast.FunctionDef)}
+        render = ast.unparse(functions["render_alerts"])
+        self.assertIn("'WhisperFace.icns'", render)
+        self.assertIn("setIcon_", render)
+        self.assertIn("_show_the_face", render)
+        dictate = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn('str(HERE / "icons" / "WhisperFace.icns"))', dictate)
+
     def test_the_render_probe_pictures_every_editor(self):
         source = (ROOT / "scripts" / "window_render_probe.py").read_text(
             encoding="utf-8")

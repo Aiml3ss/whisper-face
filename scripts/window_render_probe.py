@@ -85,6 +85,16 @@ Reduce Motion stills, and all sixteen faces at their loudest). The frames
 land in ``frames/`` and the probe lays them over a light and a dark desktop
 in a handful of contact sheets, ``overlay-*.png``. A frame is written before
 it is checked, so a failing check still leaves its picture behind.
+
+Pass ``--alerts`` to review the two kinds of alert instead of the pages:
+
+    uv run scripts/window_render_probe.py --alerts [output-dir]
+
+``alert-update-{light,dark}.png`` is the menu bar's update alert, which
+shows the app icon (``icons/WhisperFace.icns``) the way ``dictate.py``'s
+``_brand_update_alert`` sets it; ``alert-window-{light,dark}.png`` is one of
+the window's own confirmations, which shows the chosen face on its chip. Each
+is laid out and drawn without being run, so nothing appears on screen.
 """
 
 from __future__ import annotations
@@ -116,6 +126,9 @@ if INSTALLER:
 PERMISSIONS = "--permissions" in ARGS
 if PERMISSIONS:
     ARGS.remove("--permissions")
+ALERTS = "--alerts" in ARGS
+if ALERTS:
+    ARGS.remove("--alerts")
 OUT = Path(ARGS[0]) if ARGS else REPO / ".probe-renders"
 sys.path.insert(0, str(REPO))
 
@@ -389,7 +402,9 @@ from AppKit import (  # noqa: E402
     NSAppearance,
     NSAppearanceNameAqua,
     NSAppearanceNameDarkAqua,
+    NSAlert,
     NSBitmapImageFileTypePNG,
+    NSImage,
 )
 
 NSApplication.sharedApplication()
@@ -960,6 +975,69 @@ def render_sheets(suffix: str) -> None:
     model.actions = GUIActions()
 
 
+def render_alerts(suffix: str) -> None:
+    """Lay out each kind of alert and draw its panel, never running it."""
+    from AppKit import (
+        NSBezierPath, NSBitmapImageRep, NSColor, NSColorSpace,
+        NSCompositingOperationSourceOver, NSGraphicsContext, NSMakeRect,
+    )
+
+    def picture(alert, name: str) -> None:
+        alert.layout()
+        panel = alert.window()
+        appearance = window.appearance()
+        panel.setAppearance_(appearance)
+        content = panel.contentView()
+        content.layoutSubtreeIfNeeded()
+        bounds = content.bounds()
+        drawn = content.bitmapImageRepForCachingDisplayInRect_(bounds)
+        content.cacheDisplayInRect_toBitmapImageRep_(bounds, drawn)
+        # The panel's material is the system's and is not in the picture;
+        # the window background colour stands in for it.
+        canvas = NSBitmapImageRep.alloc() \
+            .initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+                None, drawn.pixelsWide(), drawn.pixelsHigh(), 8, 4, True,
+                False, "NSDeviceRGBColorSpace", 0, 0)
+        canvas.setSize_(bounds.size)
+
+        def draw():
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.setCurrentContext_(
+                NSGraphicsContext.graphicsContextWithBitmapImageRep_(canvas))
+            whole = NSMakeRect(0, 0, bounds.size.width, bounds.size.height)
+            NSColor.windowBackgroundColor().colorUsingColorSpace_(
+                NSColorSpace.sRGBColorSpace()).setFill()
+            NSBezierPath.fillRect_(whole)
+            drawn.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
+                whole, whole, NSCompositingOperationSourceOver, 1.0, False,
+                None)
+            NSGraphicsContext.restoreGraphicsState()
+
+        appearance.performAsCurrentDrawingAppearance_(draw)
+        write_picture(canvas, name)
+
+    update = NSAlert.alloc().init()
+    icon = NSImage.alloc().initWithContentsOfFile_(
+        str(REPO / "icons" / "WhisperFace.icns"))
+    if icon is None:
+        raise SystemExit("icons/WhisperFace.icns did not load")
+    update.setIcon_(icon)
+    update.setMessageText_("An update is available.")
+    update.setInformativeText_(
+        "Build b7f028f \u2192 c0ffee1\n3 new commits available. Update now?")
+    update.addButtonWithTitle_("Update")
+    update.addButtonWithTitle_("Later")
+    picture(update, f"alert-update-{suffix}")
+
+    confirm = NSAlert.alloc().init()
+    controller._show_the_face(confirm)
+    confirm.setMessageText_("Clear recent dictations?")
+    confirm.setInformativeText_("This removes them from this Mac.")
+    confirm.addButtonWithTitle_("Clear")
+    confirm.addButtonWithTitle_("Cancel")
+    picture(confirm, f"alert-window-{suffix}")
+
+
 for appearance_name, suffix in (
         (NSAppearanceNameAqua, "light"),
         (NSAppearanceNameDarkAqua, "dark")):
@@ -969,6 +1047,10 @@ for appearance_name, suffix in (
 
     if SHEETS:
         render_sheets(suffix)
+        continue
+
+    if ALERTS:
+        render_alerts(suffix)
         continue
 
     model.state = replace(STATE, section="Home")
