@@ -30,6 +30,11 @@ For each request (16 kHz mono Float32 over stdin, as for the helper):
    duplicates, and turns tokens into text.
 6. In protocol 2, turns the tokens' emission frames into word timings and
    confidences (`PROTOCOL.md`, "Protocol 2").
+7. In protocol 2, when the app has sent the user's terms in a control
+   frame, runs the term pass after each window's decode and reports where a
+   term could have been emitted instead of the words heard. The text and
+   words are the decode's, unchanged (`PROTOCOL.md`, "Control frames and
+   the term pass").
 
 At start it loads the four model files and decodes one second of silence,
 so a model that loads but cannot run fails before the ready line, not in
@@ -45,6 +50,7 @@ the middle of a dictation.
 | `WindowMerge.swift` | Joining overlapping windows | Ported from FluidAudio 0.15.5 |
 | `Vocabulary.swift` | Token ids to text | Ported from FluidAudio 0.15.5 |
 | `WordEvidence.swift` | Protocol 2 words | Token timing rule ported from FluidAudio 0.18.3; word grouping is Whisper Face's |
+| `TermBias.swift` | The term pass: where the user's terms could have been heard (`PROTOCOL.md`, "Control frames and the term pass") | Whisper Face |
 
 Each ported file names the FluidAudio files, tag and commit it came from
 and what was changed. FluidAudio is Apache-2.0; its licence text is
@@ -159,7 +165,61 @@ Measured on this Mac (macOS 27.3, Apple M4 Pro, Swift 6.4.2) on
   compiled means rerunning `scripts/speech_runtime_parity.py` and recording
   what it prints.
 
+## Parity after the term pass
+
+The term pass (`TermBias.swift`, the control frame in `main.swift`, the
+trace in `TransducerDecoder.swift`) changed what is compiled, so parity was
+rerun on 2026-11-17. The reference was the runtime built from `main` at
+`b7f028f`, whose parity with the FluidAudio helper is recorded below; the
+candidate was this checkout, against an APFS clone of the pinned model, each
+under a network-denying sandbox. The clips: the 76 replay sentences
+(`--replay`), 240 clips of system voices from the names probe (60 ordinary
+sentences and 180 that contain synthetic names, 3.1 to 6.4 s), and 12 made
+by joining those to 15.5 to 120 s, either side of the window boundaries.
+`--vocabulary` sent the fourth process the probe's 30 synthetic terms with a
+budget of 5 (the term pass ran on every clip):
+
+```
+sources: sha256:bb61e59e31215326979e1fdd3f69da35fc0ad08570c0a2de645d8bfb269474cd
+clips: 328 (316 of 15 s or less, 12 longer), 1556 s of audio
+15 s or less: identical 316 of 316
+longer than 15 s: identical 12 of 12
+candidate protocol 1 answers with exactly ok, processing_s, text: 328 of 328
+candidate protocol 2 text equal to its protocol 1 text: 328 of 328; with words: 328
+differences: 0
+latency, ms (processing_s / round trip):
+  reference    p50   39.43 /   39.54   p95   42.42 /   42.53
+  candidate-1  p50   39.48 /   39.57   p95   42.02 /   42.15
+  candidate-2  p50   39.43 /   39.56   p95   42.32 /   42.47
+  candidate-2v p50   41.55 /   41.68   p95   47.31 /   47.47
+  paired candidate-1 minus reference, round trip: p50 -0.01  p95 +0.46
+  paired candidate-2 minus reference, round trip: p50 +0.02  p95 +0.58
+peak memory, MiB (maximum resident set size / peak footprint):
+  reference       85.1 /    80.1
+  candidate-1     85.4 /    78.6
+  candidate-2     86.1 /    79.7
+  candidate-2v    92.4 /    90.9
+candidate protocol 2 with terms, every key but processing_s and bias identical to without: 328 of 328
+term-pass reports: 328 of 328 (expected 328); detours: 55; added ms p50 1.82 p95 6.29
+```
+
+With the same terms and a budget of 0, on the replay sentences and the 12
+long clips, the fourth process answered with no `bias` key and every other
+key identical (88 of 88). Separately, every protocol 2 answer of this
+checkout's runtime, with no terms and with a budget of 0, was byte for byte
+the answer of `main`'s runtime, `processing_s` aside, on all 328 clips.
+
+The term pass's cost is its own (`added_ms`): p50 1.8 ms, p95 6.3 ms on
+these clips (the bar is 15 ms). What its reports would fix, and what they
+would write that was not said, is measured by `benchmark_asr.py
+--vocabulary`, which decodes each recording with and without the term list
+and writes a receipt. With terms set the peak footprint rose
+from 80 to 91 MiB.
+
 ## Parity with the FluidAudio helper
+
+The sections below were measured before the term pass, against the sources
+whose digest each `sources then:` line names.
 
 The comparison is `scripts/speech_runtime_parity.py`. The reference was
 today's helper: `native/ParrotASRHelper`'s `main.swift` built against an
@@ -185,7 +245,7 @@ What it printed on this Mac, rerun after the vocabulary check was added
 checkout to), for the first two groups:
 
 ```
-sources: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
+sources then: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
 clips: 457 (398 of 15 s or less, 59 longer), 2958 s of audio
 15 s or less: identical 398 of 398
 longer than 15 s: identical 59 of 59
@@ -209,7 +269,7 @@ which is the 641 MiB resident peak; the footprint is unaffected.) For the
 stress clips:
 
 ```
-sources: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
+sources then: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
 clips: 53 (30 of 15 s or less, 23 longer), 1941 s of audio
 15 s or less: identical 30 of 30
 longer than 15 s: identical 23 of 23
@@ -225,7 +285,7 @@ to 53 s, the full ten minutes, silence, noise, clipping, very quiet speech
 and 1 to 8,000 samples:
 
 ```
-sources: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
+sources then: sha256:b75b973d02aeb0aed84e53db56870c8cdce3132a9434c3a59a240d74064d7a1c
 clips: 167 (110 of 15 s or less, 57 longer), 3049 s of audio
 15 s or less: identical 110 of 110
 longer than 15 s: identical 57 of 57

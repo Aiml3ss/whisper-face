@@ -78,10 +78,14 @@ struct WindowLayout {
     }
 }
 
-/// A decoded recording: its text and the merged token stream behind it.
+/// A decoded recording: its text and the merged token stream behind it,
+/// and, when the user's terms were set, what the term pass found.
 struct Transcript {
     let text: String
     let tokens: [TokenWindow]
+    var termList: TermList? = nil
+    var detours: [Detour] = []
+    var termPass = TermPassStats()
 }
 
 final class Recognizer {
@@ -92,6 +96,9 @@ final class Recognizer {
     private let mel: MelFeatures
     private let spliceSafeTokenIds: Set<Int>?
     private let caseVariantIds: [Int: Int]?
+    /// The user's terms, set by a vocabulary control frame. Nil, the
+    /// default, runs no term pass and records nothing extra.
+    var termList: TermList?
 
     /// Load the four model files from `directory`. Nothing is downloaded,
     /// created, moved or deleted: a file that is missing or will not load
@@ -143,10 +150,15 @@ final class Recognizer {
     func transcribe(_ samples: [Float]) throws -> Transcript {
         var merged: [TokenWindow] = []
         let merger = WindowMerger()
+        let list = termList
+        var detours: [Detour] = []
+        var termPass = TermPassStats()
         for chunkStart in layout.chunkStarts(totalSamples: samples.count) {
             let chunkEnd = min(chunkStart + layout.chunkSamples, samples.count)
             let windowTokens = try autoreleasepool {
-                try transcribeWindow(samples: samples, chunkStart: chunkStart, chunkEnd: chunkEnd)
+                try transcribeWindow(
+                    samples: samples, chunkStart: chunkStart, chunkEnd: chunkEnd,
+                    termList: list, detours: &detours, termPass: &termPass)
             }
             merged =
                 merged.isEmpty
@@ -160,11 +172,18 @@ final class Recognizer {
         }
         merged.sort { $0.timestamp < $1.timestamp }
         merged = merger.collapseSeamWordDuplicates(merged, vocabulary: vocabulary.pieces)
-        return Transcript(text: vocabulary.decode(ids: merged.map(\.token)), tokens: merged)
+        var transcript = Transcript(text: vocabulary.decode(ids: merged.map(\.token)), tokens: merged)
+        if let list {
+            transcript.termList = list
+            transcript.detours = TermBias.kept(detours, merged: merged)
+            transcript.termPass = termPass
+        }
+        return transcript
     }
 
     private func transcribeWindow(
-        samples: [Float], chunkStart: Int, chunkEnd: Int
+        samples: [Float], chunkStart: Int, chunkEnd: Int,
+        termList: TermList?, detours: inout [Detour], termPass: inout TermPassStats
     ) throws -> [TokenWindow] {
         let validCount = chunkEnd - chunkStart
 
@@ -197,11 +216,25 @@ final class Recognizer {
             reportedLength = encodedLength[0].intValue
         }
         let encoderLength = max(0, min(reportedLength, encoded.shape[2].intValue))
+        let trace = termList == nil ? nil : GreedyTrace()
         let emissions = try decoder.decode(
             encoded: encoded,
             frameRange: 0..<encoderLength,
-            globalFrameOffset: chunkStart / layout.frameSamples
+            globalFrameOffset: chunkStart / layout.frameSamples,
+            trace: trace
         )
+        if let termList, let trace {
+            // The second pass reads the same encoder output and reports;
+            // the window's tokens above are already final.
+            let started = ContinuousClock.now
+            detours += try TermBias.search(
+                termList, decoder: decoder, encoded: encoded,
+                frameRange: 0..<encoderLength,
+                globalFrameOffset: chunkStart / layout.frameSamples,
+                emissions: emissions, trace: trace,
+                vocabulary: vocabulary.pieces, stats: &termPass)
+            termPass.seconds += Wire.seconds(started.duration(to: .now))
+        }
         return emissions.map { (token: $0.token, timestamp: $0.frame, confidence: $0.prob, duration: 0) }
     }
 }

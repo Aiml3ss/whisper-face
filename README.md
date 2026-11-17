@@ -26,7 +26,7 @@ product is a future workstream, not a current setup promise.
 | Product promise | What Whisper Face does |
 |---|---|
 | **Setup is part of the product** | On a Mac, drag the app to Applications and open it: it provisions locked dependencies, models, the native helper, the login service, and health checks in one repeatable flow. From source, `Install.command` (`Install.cmd` on Windows) runs the same installer. |
-| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias recognition but never replace a recognized word. Other on-screen text can only repair a word the recognizer was unsure of and itself wrote as a name or identifier (a visible "Qwen" repairs "Gwen"); it never replaces or introduces an ordinary word, and each repair is a recorded decision. The optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, and a typed self-correction only if you turn it on), described under [Daily use](#daily-use). |
+| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias Whisper's recognition but never replace a recognized word; the clean-up writes a dictionary term in its own form only where the words heard equal it but for spaces, hyphens and case. Other on-screen text can only repair a word the recognizer was unsure of and itself wrote as a name or identifier (a visible "Qwen" repairs "Gwen"); it never replaces or introduces an ordinary word, and each repair is a recorded decision. The optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, and a typed self-correction only if you turn it on), described under [Daily use](#daily-use). |
 | **Fast by architecture** | Models stay warm, long speech is recognized while you talk, installed model paths resolve offline, and routine cleanup stays deterministic unless the words truly require semantic work. |
 | **Insertion is a transaction** | The target is leased and revalidated before one paste attempt; destination drift goes to a recoverable Voice Outbox instead of the wrong field. |
 | **Personal without surveillance** | Corrections become scoped, inspectable local rules and regression cases—not a cloud transcript dossier. |
@@ -131,8 +131,11 @@ are never Supporter-only features.
   clipboard sample (at key-down, Mac) temporarily bias recognition toward the
   words already in front of you. Nothing is read from a secure text field,
   and a clipboard its owner marked concealed or transient is skipped. App
-  names, window titles, and dictionary terms only bias the recognizer and
-  protect words; they never replace a word the recognizer produced. The
+  names, window titles, and dictionary terms only bias Whisper's prompt and
+  protect words; they never replace a word the recognizer produced. Parakeet
+  takes no prompt: when Whisper Face's own speech runtime answers, it looks
+  for your dictionary terms in a second pass and reports where one could
+  have been heard, and for now that report is only counted, never written. The
   context itself is not written to the transcript history, but in Reply and
   Edit modes the field text or selection is what the cleanup model rewrites,
   so the result (or, in Edit without the model, the unchanged selection) is

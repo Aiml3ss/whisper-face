@@ -382,6 +382,9 @@ from parrot_core import (  # noqa: E402
     hypothesis_agreement,
     parakeet_confidence_from_agreement,
     parakeet_result,
+    helper_takes_vocabulary,
+    shift_vocabulary_evidence,
+    vocabulary_control_frame,
     should_escalate_uncertain,
     words_settle_route,
     infer_revised_insertion,
@@ -402,11 +405,16 @@ from voice_compiler import (  # noqa: E402
     VoiceCompiler,
     VoiceIR,
     WordEvidence,
+    VOCABULARY_REPORT_DEBT,
     analyze_prosody,
+    apply_dictionary_spelling,
+    apply_vocabulary_evidence,
     build_consequence_plan,
     context_firewall_receipt,
     execute_consequence_plan,
     project_word_evidence,
+    vocabulary_alternative,
+    vocabulary_terms,
 )
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
@@ -1439,6 +1447,9 @@ GLOSS = {
     # Dictionary terms as protected cleanup anchors and a casefold->canonical
     # casing map, rebuilt alongside the prompt by refresh_glossary().
     "anchor_pack": ContextPack(), "vocabulary": {},
+    # The terms the speech runtime's term pass looks for
+    # (voice_compiler.vocabulary_terms) and the version that names them.
+    "vocabulary_terms": (), "vocabulary_version": 0,
     "lock": threading.Lock(),
 }
 
@@ -1480,6 +1491,11 @@ PIPELINE_STATE = {
     "last_confidence": 1.0,
     "last_alternatives": [],
     "last_cleanup_edits": [],
+    # The term pass in shadow: reports seen and terms the policy would
+    # have written, over this run, and the last dictation's "Alt:" text.
+    "vocab_candidates": 0,
+    "vocab_shadow_accepts": 0,
+    "last_vocabulary_alternative": None,
     "last_mode": "capture",
     "last_compiler_decisions": 0,
     "last_compiler_details": [],
@@ -6690,6 +6706,9 @@ def runtime_status_snapshot() -> dict:
         "last_alternatives_considered": len(
             PIPELINE_STATE["last_alternatives"]),
         "last_cleanup_edits": list(PIPELINE_STATE["last_cleanup_edits"]),
+        "vocab_candidates": PIPELINE_STATE.get("vocab_candidates", 0),
+        "vocab_shadow_accepts": PIPELINE_STATE.get(
+            "vocab_shadow_accepts", 0),
         "last_proof_edits_accepted": PIPELINE_STATE[
             "last_proof_edits_accepted"],
         "last_proof_edits_rejected": PIPELINE_STATE[
@@ -7431,6 +7450,12 @@ def refresh_glossary():
             if terms else None
         GLOSS["confusions"] = dict(state.get("confusions", {}))
         GLOSS["regression"] = personal_regression_lab(state)
+        bias_terms = vocabulary_terms(
+            vocabulary.values(),
+            [(mapping.heard, mapping.preferred)
+             for mapping in GLOSS["regression"].active()])
+        GLOSS["vocabulary_terms"] = bias_terms
+        GLOSS["vocabulary_version"] = vocabulary_version(bias_terms)
 
     write_auto_section(promoted)
     return terms
@@ -8630,6 +8655,20 @@ def bounded_helper_exchange(
         response.extend(chunk)
 
 
+def vocabulary_version(terms) -> int:
+    """A stable number naming one term list, for the runtime to echo."""
+    digest = hashlib.sha256(json.dumps(
+        [[term.text, term.source] for term in terms],
+        ensure_ascii=False).encode("utf-8")).hexdigest()
+    return int(digest[:12], 16)
+
+
+def vocabulary_bias_state():
+    """The term list for the speech runtime's term pass and its version."""
+    with GLOSS["lock"]:
+        return GLOSS["vocabulary_terms"], GLOSS["vocabulary_version"]
+
+
 class ParakeetClient:
     """Persistent, RAM-only bridge to a native Parakeet helper.
 
@@ -8651,7 +8690,8 @@ class ParakeetClient:
                  name="Parakeet helper", fallback="Whisper",
                  request_fallback="Whisper Turbo", ready_note="",
                  missing_note="", retry_after_failure=False, preferred=None,
-                 background_start=False, start_thread=None):
+                 background_start=False, start_thread=None,
+                 vocabulary=None):
         self.helper = Path(helper)
         # The pinned snapshot Python downloaded and verified. Named
         # explicitly so a helper that honours --models loads exactly that
@@ -8662,6 +8702,13 @@ class ParakeetClient:
         self.clock = clock or time.monotonic
         self.process = None
         self.protocol = 1
+        # Whether the loaded program offers the term pass, and the version
+        # of the term list it holds (None: it holds none).
+        self.takes_vocabulary = False
+        self.vocabulary_sent = None
+        # Where the term list comes from (vocabulary_bias_state unless a
+        # test gives its own).
+        self.vocabulary = vocabulary
         self.lock = threading.Lock()
         self.failed_starts = 0
         self.next_start = 0.0
@@ -8752,6 +8799,8 @@ class ParakeetClient:
             self._settle()
         process, self.process = self.process, None
         self.protocol = 1
+        self.takes_vocabulary = False
+        self.vocabulary_sent = None
         if process is not None:
             self._stop(process)
 
@@ -8809,6 +8858,8 @@ class ParakeetClient:
         """Take a process whose ready line arrived as the one that answers."""
         self.process = process
         self.protocol = helper_protocol(status)
+        self.takes_vocabulary = helper_takes_vocabulary(status)
+        self.vocabulary_sent = None
         if not self.retry_after_failure:
             self.failed_starts = 0
         mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
@@ -8899,6 +8950,28 @@ class ParakeetClient:
             self._stop(process)
             self._start_failed(reason)
 
+    def _sync_vocabulary(self, process, timeout: float):
+        """Send the term list when it changed since the program last got
+        one; the version it now holds, or None when it holds none. Only a
+        program whose ready line offers ``vocabulary`` is ever sent one. A
+        refusal stops the sending, not the dictation."""
+        if not self.takes_vocabulary:
+            return None
+        terms, version = (self.vocabulary or vocabulary_bias_state)()
+        if version != self.vocabulary_sent and (
+                terms or self.vocabulary_sent is not None):
+            reply = self.exchange(process, (vocabulary_control_frame(
+                [(term.text, term.source) for term in terms], version,
+                VOCABULARY_REPORT_DEBT),), timeout=timeout)
+            if not (reply.get("ok") and reply.get("version") == version):
+                self.takes_vocabulary = False
+                self.vocabulary_sent = None
+                print(f"! {self.name} refused the term list; the term pass "
+                      f"stays off")
+                return None
+            self.vocabulary_sent = version
+        return self.vocabulary_sent if terms else None
+
     def transcribe(self, audio: np.ndarray):
         """``(text, processing_s)`` as a ParakeetResult, or None.
 
@@ -8931,6 +9004,8 @@ class ParakeetClient:
                 duration = len(payload) / 16_000
                 timeout = min(PARAKEET_MAX_REQUEST_TIMEOUT, max(
                     PARAKEET_MIN_REQUEST_TIMEOUT, duration * 0.25 + 3.0))
+                vocabulary_version = self._sync_vocabulary(
+                    process, PARAKEET_MIN_REQUEST_TIMEOUT)
                 response = self.exchange(process, (
                     struct.pack("<Q", len(payload)), payload),
                     timeout=timeout)
@@ -8939,7 +9014,8 @@ class ParakeetClient:
                 result = parakeet_result(
                     str(response.get("text", "")).strip(),
                     float(response.get("processing_s", 0.0)),
-                    response, protocol=self.protocol, duration=duration)
+                    response, protocol=self.protocol, duration=duration,
+                    vocabulary_version=vocabulary_version)
                 # A program on trial earns its way off the bench by
                 # answering, not by starting: one that starts and then fails
                 # every request waits longer each time, as one that never
@@ -9250,6 +9326,11 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         acoustic_confidence=getattr(parakeet, "avg_confidence", None),
         word_evidence_status=status,
         crosscheck_s=crosscheck_s,
+        # The term pass's report is placed by word times: without words it
+        # cannot be placed, so it is kept only beside them.
+        vocabulary_evidence=(
+            tuple(getattr(parakeet, "vocabulary_evidence", ()) or ())
+            if words else ()),
     )
     # Escalation needs a third engine. asr_decode_target would quietly decode
     # with Tiny when Turbo is not installed, and Tiny is the engine that just
@@ -9421,38 +9502,26 @@ def apply_learned_fixes(text: str, bundle: str = "") -> str:
     return regression.apply(text, app=bundle or None)
 
 
-# Whole-word matcher for vocabulary casing: an alphanumeric run, optionally
-# continued across single identifier joiners so "voice_compiler.py" stays one
-# token. Casing only ever fires on a full-token casefold match, so treating a
-# joined form as one token can skip a rewrite but never invent one.
-VOCAB_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:[._+#-][0-9A-Za-z]+)*")
-
-
-def apply_vocabulary_casing(text: str) -> str:
-    """Normalize whole-word matches of user-listed vocabulary to the casing the
-    user wrote in the dictionary (e.g. "github" -> "GitHub"). Case-insensitive
-    on the match, whole-word only so "github" inside "githubbed" is left alone,
-    and a token already in canonical form is untouched. Additive: only a token
-    whose casefold equals a listed term is ever changed, and only by raising
-    letters, so a capital the recognizer produced (a sentence start) stays."""
+def apply_vocabulary_casing(text: str, edits: list | None = None) -> str:
+    """Write each term the user typed into the dictionary in its own form
+    where the words heard equal it, ignoring only spaces, hyphens and case
+    ("github" and "git hub" -> "GitHub"). Whole words only, so "github"
+    inside "githubbed" is left alone. The guards are
+    ``voice_compiler.apply_dictionary_spelling``'s: a change of case alone
+    never touches an ordinary word ("Mark" listed leaves "mark") and only
+    raises letters, so a capital the recognizer placed stays; a join needs
+    two heard words. Each change is recorded in ``edits``, when given, as a
+    ``dictionary_spelling`` clean-up edit."""
     if not text:
         return text
     with GLOSS["lock"]:
         vocabulary = dict(GLOSS.get("vocabulary") or {})
     if not vocabulary:
         return text
-
-    def _canonical(match: "re.Match[str]") -> str:
-        word = match.group(0)
-        canonical = vocabulary.get(word.casefold())
-        if canonical is None or canonical == word:
-            return word
-        if any(have.isupper() and not want.isupper()
-               for have, want in zip(word, canonical)):
-            return word
-        return canonical
-
-    return VOCAB_WORD_RE.sub(_canonical, text)
+    spelled, changed = apply_dictionary_spelling(text, vocabulary.values())
+    if changed and edits is not None:
+        edits.append(CleanupEdit("dictionary_spelling", text, spelled))
+    return spelled
 
 
 def learned_alternatives(text: str, bundle: str) -> list[str]:
@@ -9485,6 +9554,25 @@ def compiler_personal_priors(bundle: str) -> tuple[PersonalPrior, ...]:
             mapping.heard, mapping.preferred,
             apps=((mapping.app, 1),) if mapping.app else ())
         for mapping in regression.active(app=bundle or None))
+
+
+def record_vocabulary_shadow(recognition: Recognition, mode: str) -> tuple:
+    """Run the term-pass policy in shadow: count what it would write, keep
+    the text it would give as the last alternative, and change nothing."""
+    evidence = tuple(getattr(recognition, "vocabulary_evidence", ()) or ())
+    PIPELINE_STATE["last_vocabulary_alternative"] = None
+    if not evidence:
+        return ()
+    terms, _version = vocabulary_bias_state()
+    decisions = apply_vocabulary_evidence(
+        recognition.text, recognition.words, evidence, terms, mode=mode)
+    accepted = sum(decision.accepted for decision in decisions)
+    PIPELINE_STATE["vocab_candidates"] += len(evidence)
+    PIPELINE_STATE["vocab_shadow_accepts"] += accepted
+    if accepted:
+        PIPELINE_STATE["last_vocabulary_alternative"] = \
+            vocabulary_alternative(recognition.text, decisions)
+    return decisions
 
 
 def compile_voice_evidence(recognition: Recognition,
@@ -13662,6 +13750,13 @@ def assemble_raw(chunk_futs: list, pre_future,
                 word_has_bounds.append(has_bounds)
             evidence_statuses.append(
                 getattr(result, "word_evidence_status", "absent"))
+            # Term-pass evidence moves with its words onto the joined
+            # clock, and is dropped where their times are not reliable.
+            if words_valid:
+                vocabulary_evidence.extend(
+                    shift_vocabulary_evidence(candidate, offset)
+                    for candidate in getattr(
+                        result, "vocabulary_evidence", ()) or ())
             acoustic = getattr(result, "acoustic_confidence", None)
             if acoustic is not None:
                 acoustic_confidences.append(acoustic)
@@ -13681,6 +13776,7 @@ def assemble_raw(chunk_futs: list, pre_future,
 
     parts, confidences, alternatives, engines, verifications = [], [], [], [], []
     evidence_statuses, acoustic_confidences = [], []
+    vocabulary_evidence = []
     # Current rolling/speculative futures carry capture bounds, preserving
     # silence gaps in native timing. Bare futures remain supported for older
     # callers, but multi-part legacy timing fails closed to segment evidence.
@@ -13728,6 +13824,8 @@ def assemble_raw(chunk_futs: list, pre_future,
         word_evidence_status=combine_word_evidence_status(evidence_statuses),
         crosscheck_s=sum(crosscheck_times) if crosscheck_times else None,
         escalation_s=sum(escalation_times) if escalation_times else None,
+        vocabulary_evidence=(
+            tuple(vocabulary_evidence) if timing_reliable else ()),
     )
 
 
@@ -13993,6 +14091,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
         bundle = rec.bundle_at_press or frontmost_bundle()
         recognized_raw = raw
+        record_vocabulary_shadow(recognition, rec.mode)
         # A new usable result supersedes the previous result's replay audio.
         # This is content-free and does not inspect the current utterance.
         clear_retained_consequence_spans()
@@ -14308,7 +14407,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         if tone_key == "casual" and not verbatim:
             # belt for both paths
             text = strip_casual_period(text, rec.language)
-        text = apply_vocabulary_casing(text)   # user's canonical term casing
+        # The user's dictionary terms in their own form.
+        vocabulary_edits: list[CleanupEdit] = []
+        text = apply_vocabulary_casing(text, vocabulary_edits)
+        PIPELINE_STATE["last_cleanup_edits"].extend(
+            edit.kind for edit in vocabulary_edits)
         if PIPELINE_STATE["last_alternatives"]:
             cleaned_alternatives = []
             for alternative in PIPELINE_STATE["last_alternatives"]:
