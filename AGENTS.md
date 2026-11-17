@@ -15,7 +15,11 @@ arguments:
    documentation for corresponding changes.
 2. Update every affected Mac and Windows surface in the same change. Do not
    embed or copy runtime source into an installer; both installers must execute
-   the current checkout as their single source of truth.
+   the current checkout as their single source of truth. An app built for drag
+   install carries the exact published source archive of its own release,
+   verified against its checksum before use, and installs from it; installers
+   still execute the checkout as the single source of truth and never embed
+   runtime source.
 3. If the runtime change requires no installer edit, state why in the handoff.
    Valid examples include an internal implementation change when both
    installers already launch the current `dictate.py`, or a model-loading
@@ -94,6 +98,7 @@ arguments:
    uv run tests/test_windows_distribution.py
    uv run tests/test_safe_update_advisor.py
    uv run tests/test_side_by_side_update.py
+   uv run tests/test_app_update.py
    uv run tests/test_self_update.py
    ```
 

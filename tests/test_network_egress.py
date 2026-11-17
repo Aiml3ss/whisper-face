@@ -33,6 +33,7 @@ The proxy test alone opens sockets, and only between servers it starts on
 import ast
 import contextlib
 import http.client
+import importlib.util
 import json
 import os
 import re
@@ -324,6 +325,103 @@ class DictationPathImportSurfaceTests(unittest.TestCase):
                     offenders, {},
                     f"{entry} can now reach the network through {offenders}; "
                     "it handles private evidence and must not.")
+
+
+class ReleaseUpdateEgressTests(unittest.TestCase):
+    """The drag install's release update is the one other network client.
+
+    ``scripts/app_update.py`` reads the latest release's update manifest when
+    the person chooses Check for Updates…, and downloads that release's disk
+    image and source archive only when they accept it. It carries no speech,
+    transcript or setting, it never runs on the dictation path, and it can
+    reach only the project's published releases, over HTTPS.
+    """
+
+    PATH = ROOT / "scripts" / "app_update.py"
+
+    def test_it_is_never_imported_on_the_dictation_path(self):
+        self.assertNotIn("app_update", _first_party_closure("dictate"))
+
+    def test_it_holds_urllib_and_nothing_it_imports_holds_a_client(self):
+        closure = _first_party_closure("app_update")
+        self.assertGreater(len(closure), 3)
+        self.assertEqual(
+            {name: sorted(found) for name, found in closure.items() if found},
+            {"app_update": ["urllib.error", "urllib.request"]})
+
+    def test_its_only_requests_are_made_in_one_audited_function(self):
+        self.assertEqual(_call_sites(self.PATH), {
+            # The HTTPS-only redirect rule raises; it opens nothing.
+            "redirect_request": {"urllib.error.URLError"},
+            # The one download, through an opener with that rule.
+            "https_get": {"urllib.request.build_opener",
+                          "urllib.request.Request"},
+        })
+        tree = ast.parse(self.PATH.read_text(encoding="utf-8"))
+        openers = []
+        for function in ast.walk(tree):
+            if isinstance(function, ast.FunctionDef):
+                for node in ast.walk(function):
+                    if (isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "open"
+                            and isinstance(node.func.value, ast.Name)
+                            and node.func.value.id == "opener"):
+                        openers.append(function.name)
+        self.assertEqual(openers, ["https_get"])
+
+    def test_it_reaches_only_the_published_releases_over_https(self):
+        spec = importlib.util.spec_from_file_location("app_update", self.PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        releases = "https://github.com/Aiml3ss/whisper-face/releases"
+        self.assertEqual(module.RELEASES, releases)
+        self.assertTrue(module.MANIFEST_URL.startswith(releases + "/"))
+        self.assertTrue(module.DOWNLOAD_PREFIX.startswith(releases + "/"))
+        source = self.PATH.read_text(encoding="utf-8")
+        for literal in re.findall(r"[a-z]+://[^\s\"']*", source):
+            with self.subTest(literal=literal):
+                self.assertTrue(literal.startswith("https://"), literal)
+        with EgressTripwire() as tripwire, self.assertRaises(
+                module.UpdateError):
+            module.https_get("https://transcripts.example.com/upload",
+                             Path(tempfile.gettempdir()) / "never-written", 1)
+        self.assertEqual(tripwire.attempts, [])
+
+    def test_the_runtime_starts_it_only_from_the_update_menu(self):
+        tree = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
+
+        def methods_holding(test):
+            found = set()
+            for owner in ast.walk(tree):
+                if not isinstance(owner, ast.ClassDef):
+                    continue
+                for method in owner.body:
+                    if isinstance(method, ast.FunctionDef) and any(
+                            test(node) for node in ast.walk(method)):
+                        found.add(f"{owner.name}.{method.name}")
+            return found
+
+        def module_functions_holding(test):
+            return {node.name for node in tree.body
+                    if isinstance(node, ast.FunctionDef)
+                    and any(test(child) for child in ast.walk(node))}
+
+        def names_the_script(node):
+            return isinstance(node, ast.Constant) and node.value == "app_update.py"
+
+        def runs_the_script(node):
+            return (isinstance(node, ast.Attribute)
+                    and node.attr == "_release_update_command")
+
+        self.assertEqual(methods_holding(names_the_script),
+                         {"StatusBar._release_update_command"})
+        self.assertEqual(module_functions_holding(names_the_script), set())
+        # Check for Updates…, and the person's own Download and Install.
+        self.assertEqual(methods_holding(runs_the_script),
+                         {"StatusBar.checkForUpdates_",
+                          "StatusBar._begin_release_update"})
+        self.assertEqual(module_functions_holding(runs_the_script), set())
 
 
 class RuntimeOutboundCallSiteTests(unittest.TestCase):

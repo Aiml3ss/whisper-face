@@ -229,6 +229,30 @@ class RepositoryGovernanceTests(unittest.TestCase):
                     [entry for entry in listing if entry.startswith(prefix)],
                     [])
 
+    # The Project Owner approved one exception to "never embed runtime
+    # source" on 2026-11-16: the Mac app built for drag install. Both places
+    # that state the rule have to state the exception in these words, so it
+    # cannot quietly widen into "installers may embed the runtime".
+    DRAG_INSTALL_RULE = (
+        "An app built for drag install carries the exact published source "
+        "archive of its own release, verified against its checksum before "
+        "use, and installs from it; installers still execute the checkout as "
+        "the single source of truth and never embed runtime source."
+    )
+
+    def test_the_drag_install_exception_is_stated_exactly_where_the_rule_is(self):
+        for relative in ("AGENTS.md", "docs/installer-release-process.md"):
+            with self.subTest(document=relative):
+                text = " ".join(self.read(relative).split())
+                self.assertIn(self.DRAG_INSTALL_RULE, text)
+                # The old blanket wording is gone, so the two cannot be read
+                # as contradicting each other.
+                self.assertNotIn("must never embed a frozen copy", text)
+        process = " ".join(
+            self.read("docs/installer-release-process.md").split())
+        self.assertIn("never runs anything from the archive itself", process)
+        self.assertIn("runs that checkout's own `setup.sh`", process)
+
     def test_readme_explains_license_and_historical_boundary(self):
         readme = self.read("README.md")
         self.assertIn("AGPL-3.0-only", readme)
