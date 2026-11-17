@@ -5,9 +5,24 @@ A checksum answers "are these the bytes someone published?". It cannot answer
 proves today, what the release workflow is designed to add, and what still is
 not covered.
 
+## The drag-install disk image (from v0.6.0)
+
+The disk image now holds only `Whisper Face.app` and a link to Applications.
+The app carries the release's published source ZIP byte for byte; its SHA-256
+is sealed into the app's `Info.plist` (`WFSourceArchiveSHA256`, beside
+`WFSourceRevision` and the real version), and the app checks it before it
+unpacks anything. `verify_macos_package.py verify-artifacts` proves the ZIP is
+the exact source tree and that the app on the disk image carries that same ZIP.
+The launcher digest that `RELEASE-METADATA.json` used to record is gone from
+this path: the app contains the source, so the source can no longer record the
+app. An unsigned app is accepted only from a preview build. A signed build
+signs `uv` and then the app with the hardened runtime, a secure timestamp and
+the microphone entitlement, then notarizes and staples the app before the disk
+image is made; none of that has run yet, for want of the Developer ID.
+
 ## What published releases carry today
 
-Every release published so far (through v0.5.0) was built and uploaded by
+Every release published so far (through v0.6.0) was built and uploaded by
 hand. The release workflow has not completed on any tag, so **no published
 release has a Developer ID signature, notarization, a stapled ticket, or a
 build-provenance attestation**. The launcher app inside the disk image is

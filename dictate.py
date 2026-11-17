@@ -2477,6 +2477,47 @@ def voice_inbox_menu_title(status) -> str:
     return "Voice Inbox" if count == 0 else f"Voice Inbox — {count} queued"
 
 
+def release_update_alert(release) -> tuple[str, str, bool]:
+    """What Check for Updates… says to a drag install, from the release
+    updater's answer: (message, detail, whether to offer the download).
+
+    Only an ``upgrade`` is offered, and only with its version and revision,
+    so a click can install exactly what was shown.
+    """
+    release = release if isinstance(release, dict) else {}
+    decision = release.get("decision")
+    version = str(release.get("version") or "")
+    revision = str(release.get("revision") or "")
+    if decision == "upgrade" and version and revision:
+        size = release.get("size")
+        megabytes = (f"about {max(1, round(size / 1_000_000))} MB"
+                     if isinstance(size, int) and not isinstance(size, bool)
+                     and size > 0 else "the new version")
+        current = str(release.get("current_version") or "")
+        detail = (f"You have {current}. " if current else "") + (
+            f"Download {megabytes} and install it? Whisper Face finishes the "
+            "update in its own window and keeps your settings, dictionary, "
+            "history and models. If anything goes wrong, this version keeps "
+            "working.")
+        return f"Whisper Face {version} is available.", detail, True
+    if decision == "up-to-date":
+        return "Whisper Face is up to date.", "", False
+    reason = str(release.get("reason") or "").strip()
+    return ("Couldn't check for updates.",
+            reason or "The release updater did not answer.", False)
+
+
+def release_update_failure(outcome) -> str | None:
+    """The detail to show when an accepted update did not install, or None
+    when the new app took over."""
+    outcome = outcome if isinstance(outcome, dict) else {}
+    if outcome.get("status") == "installed":
+        return None
+    reason = str(outcome.get("reason") or "").strip()
+    return ((reason + "\n\n") if reason else "") + (
+        "Nothing was changed; this version keeps working.")
+
+
 def voice_outbox_menu_title(count, needs_home=None) -> str:
     """Render only the bounded recoverable count for the outbox shortcut.
 
@@ -4359,14 +4400,79 @@ class StatusBar(NSObject):
             try:
                 report = self_update.check_for_update(
                     HERE, runner=subprocess.run)
+                if report.get("app_managed"):
+                    # A drag install follows published releases. The
+                    # release updater reads the latest one's manifest; git
+                    # is never run.
+                    report = {"app_managed": True,
+                              "release": self._release_update_result(
+                                  self._release_update_command("check"),
+                                  timeout=90)}
             except Exception as e:  # never let the menu-bar app crash
                 report = {"available": False, "error": type(e).__name__}
             AppHelper.callAfter(self._present_update_check, report)
         threading.Thread(target=worker, daemon=True).start()
 
+    def _release_update_command(self, *arguments):
+        """scripts/app_update.py, in its own process beside this one: the
+        only part of Whisper Face that downloads a release. It is never
+        imported here, and it carries nothing but its own request."""
+        return [sys.executable, str(HERE / "scripts" / "app_update.py"),
+                *arguments]
+
+    @staticmethod
+    def _release_update_result(command, *, timeout):
+        """The release updater's one-line JSON answer, or {} for none."""
+        try:
+            completed = subprocess.run(
+                command, stdin=subprocess.DEVNULL, capture_output=True,
+                text=True, timeout=timeout, check=False)
+            lines = (completed.stdout or "").strip().splitlines()
+            answer = json.loads(lines[-1]) if lines else {}
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return {}
+        return answer if isinstance(answer, dict) else {}
+
+    def _begin_release_update(self, version, revision):
+        """The person accepted: download, verify and hand over to the new
+        app, off the main thread. Only a failure comes back here; on success
+        the new app's own window carries on."""
+        def worker():
+            outcome = self._release_update_result(
+                self._release_update_command(
+                    "install", "--version", version, "--revision", revision),
+                timeout=1800)
+            detail = release_update_failure(outcome)
+            if detail is not None:
+                AppHelper.callAfter(
+                    self._update_alert, "Couldn't install the update.", detail)
+        threading.Thread(target=worker, daemon=True).start()
+        self._update_alert(
+            f"Downloading Whisper Face {version}…",
+            "Its update window opens when the download is ready and "
+            "checked. You can keep working until then.")
+
     def _present_update_check(self, report):
         try:
             error = report.get("error")
+            if report.get("app_managed"):
+                # Set up by the drag-install app: updates are published
+                # releases, offered here and installed only on a click.
+                release = report.get("release") or {}
+                message, detail, offer = release_update_alert(release)
+                if not offer:
+                    self._update_alert(message, detail)
+                    return
+                alert = NSAlert.alloc().init()
+                self._brand_update_alert(alert)
+                alert.setMessageText_(message)
+                alert.setInformativeText_(detail)
+                alert.addButtonWithTitle_("Download and Install")
+                alert.addButtonWithTitle_("Later")
+                if alert.runModal() == NSAlertFirstButtonReturn:
+                    self._begin_release_update(
+                        str(release["version"]), str(release["revision"]))
+                return
             if error:
                 self._update_alert(
                     "Couldn't check for updates.", str(error))
@@ -8299,6 +8405,91 @@ def _wait_for_permission_grant_and_reexec(
             pass
         execv(sys.executable, [sys.executable] + sys.argv)
         return
+
+
+def missing_event_permissions(*, runner=None) -> tuple[str, ...]:
+    """Which of Accessibility and Input Monitoring a fresh process lacks.
+
+    Read from a short-lived process, as the re-check reads it, because a
+    running process keeps the verdict it started with. An answer that cannot
+    be read counts as both missing: the window then stays until the
+    re-check's own restart replaces it.
+    """
+    run = runner or subprocess.run
+    probe = (
+        "from Quartz import CGPreflightListenEventAccess,"
+        "CGPreflightPostEventAccess;"
+        "print(int(bool(CGPreflightPostEventAccess())),"
+        "int(bool(CGPreflightListenEventAccess())))"
+    )
+    both = ("accessibility", "input_monitoring")
+    try:
+        result = run([sys.executable, "-c", probe], stdin=subprocess.DEVNULL,
+                     capture_output=True, text=True, timeout=5, check=False)
+        post, listen = (int(value) for value in str(result.stdout).split())
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return both
+    if result.returncode != 0:
+        return both
+    return tuple(name for name, granted in zip(both, (post, listen))
+                 if not granted)
+
+
+def run_permission_reset_command(command, *, runner=None) -> int:
+    """Run one of the two resets the permission window may run, nothing else.
+
+    Only Whisper Face's own Accessibility and Input Monitoring entries, as
+    whisper_face_gui.permission_reset_commands names them; any other command
+    is refused without running.
+    """
+    from whisper_face_gui import permission_reset_commands
+    if list(command) not in permission_reset_commands():
+        return 1
+    run = runner or subprocess.run
+    try:
+        return run(list(command), stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=10, check=False).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 1
+
+
+def restart_for_fresh_permissions(*, execv=os.execv) -> None:
+    """Replace this process as the permission re-check does, with its
+    counter at zero so the new process asks macOS afresh."""
+    try:
+        os.environ[PERMISSION_ATTEMPT_ENV] = "0"
+    except (OSError, ValueError):
+        pass
+    execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def show_permission_help(*, show=None):
+    """Show the permission window while macOS withholds a permission.
+
+    The re-check thread and its re-exec are unchanged; the window only adds
+    a way through that needs no Terminal. Never fatal.
+    """
+    if not IS_MACOS:
+        return None
+    try:
+        from whisper_face_gui import (
+            PermissionHelpFlow, show_permission_help_window)
+        flow = PermissionHelpFlow(
+            missing=missing_event_permissions(),
+            opener=lambda url: subprocess.run(
+                ["open", url], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5, check=False),
+            runner=run_permission_reset_command,
+            restart=restart_for_fresh_permissions,
+            record=lambda line: print(line, flush=True),
+            probe=missing_event_permissions,
+        )
+        return (show or show_permission_help_window)(flow)
+    except Exception as e:  # the window is help, never a reason to stop
+        print(f"! permission help unavailable: {type(e).__name__}")
+        return None
 
 
 def ensure_event_permissions() -> bool:
@@ -15317,6 +15508,9 @@ def main():
         start_gui_activation_server(STATUS["bar"].gui)
 
     if not ensure_event_permissions():
+        # Name what is missing and open its settings page; held here so the
+        # window lives as long as this process waits.
+        STATUS["permission_help"] = show_permission_help()
         # Keep AppKit alive while TCC recovery waits. The signed launcher can
         # now request this existing GUI even when its menu-bar item is hidden by
         # a notch or a full menu bar. The background recheck replaces this

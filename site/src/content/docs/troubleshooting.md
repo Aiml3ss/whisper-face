@@ -15,7 +15,7 @@ Open the menu-bar face and choose **Voice Outbox**, then use **Copy & Dismiss** 
 
 ## The hotkey does nothing
 
-On a Mac, check that **Whisper Face** is turned on under both **Input Monitoring** and **Accessibility** (see [Permissions](/docs/permissions)); without Input Monitoring the key is never seen. After an update, turn it off and on again in all three lists. If the log says `hotkey listener keeps exiting`, the key listener cannot start, which almost always means a permission is missing. If the permissions are fine, run `./setup.sh --verify`, then re-run `Install.command` to repair.
+On a Mac, check that **Whisper Face** is turned on under both **Input Monitoring** and **Accessibility** (see [Permissions](/docs/permissions)); without Input Monitoring the key is never seen. After an update, turn it off and on again in all three lists. If the log says `hotkey listener keeps exiting`, the key listener cannot start, which almost always means a permission is missing. If the permissions are fine, run `setup.sh --verify`, then run `setup.sh` again to repair (see below for where it is).
 
 On Windows the hotkey is **Right Alt**, not Right Option. On keyboard layouts with AltGr, AltGr starts dictation too.
 
@@ -54,6 +54,11 @@ The first dictation after launch warms the models. After that they stay warm and
 Open **Advanced** and save a support bundle. It is private, transcript-free, and stored where you choose. Share it only if you decide to, when you ask for help.
 
 ```bash
-# re-run the installer to repair a broken setup
+# a copy the app set up: check it, then run setup again to repair it
+"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh" --verify
+"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh"
+
+# an install from source: the same, in its folder
+./setup.sh --verify
 ./Install.command
 ```

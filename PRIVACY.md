@@ -149,7 +149,14 @@ their delivery infrastructure as documented in `THIRD_PARTY_NOTICES.md` and
 the installer. On Windows, the runtime loads its Whisper models from local
 files only; only the installer's preload downloads them. **Check for
 Updates…** on a Mac runs one `git fetch` from the checkout's own remote when
-you choose it, and never in the background.
+you choose it, and never in the background. For a copy the Whisper Face app
+set up from the disk image, it instead reads the latest release's
+`update-manifest.json` from the project's GitHub releases, and downloads that
+release's disk image and source archive only after you click **Download and
+Install**. These requests carry nothing of yours beyond what any download
+does (your address, and a fixed `WhisperFace-updater` user agent), run in a
+process of their own that the dictation path never loads, and can reach only
+the project's releases over HTTPS.
 
 That is a testable claim, so it is tested. `tests/test_network_egress.py` runs
 on every pull request. It fails if any module on the dictation path gains the

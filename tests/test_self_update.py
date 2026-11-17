@@ -624,5 +624,91 @@ class ApplyUpdateTests(unittest.TestCase):
         self.assertEqual(runner.installer_runs, 0)
 
 
+class AppManagedTests(unittest.TestCase):
+    """A copy the drag-install app set up follows releases, never git."""
+
+    def receipt(self, directory, **payload):
+        path = Path(directory) / "launcher-install.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_the_apps_checkout_is_refused_before_any_git_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory).resolve()
+            managed = state / "checkout"
+            managed.mkdir()
+            # The app's own place, even with no receipt at all.
+            receipt = state / "launcher-install.json"
+            runner = FakeRunner(head=CURRENT, upstream=LATEST)
+            report = self_update.check_for_update(
+                managed, runner=runner, install_receipt=receipt)
+            self.assertFalse(report["available"])
+            self.assertTrue(report["app_managed"])
+            self.assertIn("new download of the app", report["error"])
+            self.assertEqual(runner.calls, [])
+            outcome = self_update.apply_update(
+                managed, LATEST, runner=runner, install_receipt=receipt)
+            self.assertEqual(outcome["status"], "failed")
+            self.assertTrue(outcome["app_managed"])
+            self.assertEqual(runner.calls, [])
+            self.assertEqual(runner.installer_runs, 0)
+
+    def test_a_checkout_a_schema_2_receipt_binds_is_refused_too(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            checkout = root / "somewhere"
+            checkout.mkdir()
+            receipt = self.receipt(
+                root, schema_version=2, checkout=str(checkout),
+                app="/Applications/Whisper Face.app",
+                source_revision=CURRENT)
+            runner = FakeRunner(head=CURRENT, upstream=LATEST)
+            report = self_update.check_for_update(
+                checkout, runner=runner, install_receipt=receipt)
+            self.assertTrue(report.get("app_managed"))
+            self.assertEqual(runner.calls, [])
+
+    def test_folder_and_clone_installs_update_exactly_as_before(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            for receipt in (
+                    self.receipt(root, schema_version=1, checkout=str(CHECKOUT),
+                                 source_revision=CURRENT),
+                    # An app-managed receipt for another checkout says
+                    # nothing about this one.
+                    self.receipt(root, schema_version=2,
+                                 checkout=str(root / "checkout-elsewhere"),
+                                 app="/Applications/Whisper Face.app",
+                                 source_revision=CURRENT),
+                    NO_RECEIPT):
+                with self.subTest(receipt=str(receipt)):
+                    self.assertFalse(self_update.app_managed(CHECKOUT, receipt))
+                    runner = FakeRunner(head=CURRENT, upstream=LATEST, count=2,
+                                        resolvable={CURRENT})
+                    report = self_update.check_for_update(
+                        CHECKOUT, runner=runner, install_receipt=receipt)
+                    self.assertNotIn("app_managed", report)
+                    self.assertTrue(report["available"], report)
+                    self.assertTrue(runner.calls)
+
+    def test_the_menu_asks_the_release_updater_for_an_app_managed_copy(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        present = source[source.index("    def _present_update_check(self, report):"):]
+        present = present[:present.index("\n    def ", 10)]
+        # The answer for a drag install comes first, from published
+        # releases, and is offered only behind a click.
+        self.assertLess(present.index('report.get("app_managed")'),
+                        present.index("Couldn't check for updates."))
+        self.assertIn("release_update_alert(release)", present)
+        self.assertIn('"Download and Install"', present)
+        self.assertLess(present.index("alert.runModal()"),
+                        present.index("self._begin_release_update("))
+        check = source[source.index("    def checkForUpdates_(self, sender):"):]
+        check = check[:check.index("\n    def ", 10)]
+        # This module answers first, so git is never run for that copy.
+        self.assertLess(check.index("self_update.check_for_update("),
+                        check.index('self._release_update_command("check")'))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -113,6 +113,35 @@ def _verified_manifest(path: Path, artifact_dir: Path, channel: str) -> dict:
     return payload
 
 
+def update_decision(current_version: str, current_revision: str,
+                    candidate_version: str, candidate_revision: str
+                    ) -> tuple[str, str]:
+    """The update rule between two releases, as (decision, reason).
+
+    ``upgrade`` only to a strictly newer version on another revision;
+    ``up-to-date`` only for the exact same version and revision; anything
+    else, a downgrade included, is ``refuse``. Raises AdviceError for a
+    version or revision that is not well formed. The drag-install app's
+    update (scripts/app_update.py) applies this same rule.
+    """
+    current_key = _version(current_version, "current-version")
+    current_revision = _revision(current_revision, "current-revision")
+    candidate_key = _version(candidate_version, "manifest-version")
+    candidate_revision = _revision(candidate_revision, "manifest-revision")
+    comparison = _compare(candidate_key, current_key)
+    if comparison == 0:
+        if candidate_version != current_version:
+            return "refuse", "equal-precedence-version-conflict"
+        if candidate_revision != current_revision:
+            return "refuse", "same-version-revision-conflict"
+        return "up-to-date", "exact-version-and-revision-match"
+    if comparison > 0:
+        if candidate_revision == current_revision:
+            return "refuse", "new-version-reuses-current-revision"
+        return "upgrade", "verified-newer-release"
+    return "refuse", "downgrade-requires-linked-rollback"
+
+
 def _base_receipt(current_version: str, current_revision: str, channel: str) -> dict:
     return {
         "channel": channel,
@@ -152,25 +181,9 @@ def advise(args: argparse.Namespace) -> dict:
     }
 
     if args.intent == "update":
-        comparison = _compare(
-            _version(candidate_version, "manifest-version"), current_version_key
-        )
-        if comparison == 0:
-            if candidate_version != args.current_version:
-                receipt["reason"] = "equal-precedence-version-conflict"
-            elif candidate_revision != current_revision:
-                receipt["reason"] = "same-version-revision-conflict"
-            else:
-                receipt["decision"] = "up-to-date"
-                receipt["reason"] = "exact-version-and-revision-match"
-        elif comparison > 0:
-            if candidate_revision == current_revision:
-                receipt["reason"] = "new-version-reuses-current-revision"
-            else:
-                receipt["decision"] = "upgrade"
-                receipt["reason"] = "verified-newer-release"
-        else:
-            receipt["reason"] = "downgrade-requires-linked-rollback"
+        receipt["decision"], receipt["reason"] = update_decision(
+            args.current_version, current_revision,
+            candidate_version, candidate_revision)
         return receipt
 
     if candidate_version != args.current_version or candidate_revision != current_revision:

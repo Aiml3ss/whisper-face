@@ -3848,6 +3848,8 @@ class NewLookFoundationContractTests(unittest.TestCase):
             "# --- new look: pages",
             "# --- new look: home and setup",
             "# --- new look: editors",
+            "# --- mac download: setup window",
+            "# --- mac download: permission help",
         )
         lines = GUI_SOURCE.splitlines()
         positions = []
@@ -3879,7 +3881,7 @@ class NewLookFoundationContractTests(unittest.TestCase):
             line.strip().startswith(('"home.', '"onboarding.'))
             for line in lines[positions[2]:positions[3]]))
         # The editors' strings are all under theirs, and nowhere else.
-        editors = [line.strip() for line in lines[positions[3]:closing]
+        editors = [line.strip() for line in lines[positions[3]:positions[4]]
                    if line.strip().startswith('"')]
         self.assertTrue(editors)
         self.assertTrue(all(
@@ -3887,6 +3889,58 @@ class NewLookFoundationContractTests(unittest.TestCase):
         self.assertEqual(
             len(editors),
             sum(key.startswith("sheets.") for key in STRING_CATALOGS["en"]))
+        # So are the Mac download's setup window's, which the Swift app
+        # compiles in (scripts/macos_launcher_app.py).
+        installer = [line.strip() for line in lines[positions[4]:positions[5]]
+                     if line.strip().startswith('"')]
+        self.assertTrue(installer)
+        self.assertTrue(all(
+            line.startswith('"installer.') for line in installer))
+        self.assertEqual(
+            len(installer),
+            sum(key.startswith("installer.") for key in STRING_CATALOGS["en"]))
+        helping = [line.strip() for line in lines[positions[5]:closing]
+                   if line.strip().startswith('"')]
+        self.assertTrue(helping)
+        self.assertTrue(all(
+            line.startswith('"permission_help.') for line in helping))
+        self.assertEqual(
+            len(helping),
+            sum(key.startswith("permission_help.")
+                for key in STRING_CATALOGS["en"]))
+
+    def test_the_setup_window_speaks_plainly(self):
+        # The Mac download's setup window is the first thing a new person
+        # sees. Nothing on it names an installer's machinery.
+        from whisper_face_gui import internal_words_in
+        catalog = {key: value for key, value in STRING_CATALOGS["en"].items()
+                   if key.startswith("installer.")}
+        self.assertGreaterEqual(len(catalog), 50)
+        machinery = ("checkout", "setup.sh", "homebrew", "brew", " uv",
+                     "python", "swift", "launchd", "launchagent", "git",
+                     "terminal", "xcode", "sha", "checksum", "!!", "@@",
+                     "receipt", "plist", "/library/")
+        for key, value in catalog.items():
+            with self.subTest(key=key):
+                self.assertEqual(internal_words_in(value), [])
+                self.assertEqual(value, value.strip())
+                folded = value.casefold()
+                for word in machinery:
+                    self.assertNotIn(word, folded)
+        # Every phase setup.sh --app announces has a row, and every reason
+        # the window can show is in the catalog.
+        import importlib.util
+        specification = importlib.util.spec_from_file_location(
+            "whisper_face_launcher_tool_for_gui",
+            ROOT / "scripts" / "macos_launcher_app.py")
+        tool = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(tool)
+        for phase in tool.SETUP_PHASES:
+            self.assertIn(f"installer.phase.{phase}", catalog)
+        for _needle, key in tool.FAILURE_REASONS:
+            self.assertIn(key, catalog)
+        self.assertIn("installer.reason.generic", catalog)
+        self.assertEqual(tool.setup_copy(), catalog)
 
     RENDER_ORDER = [
         "_render_shell", "_render_home", "_render_onboarding",
@@ -4953,6 +5007,23 @@ class EditorSheetContractTests(unittest.TestCase):
         self.assertIn("title.setToolTip_(item.bundle)", page)
         self.assertNotIn("f'{item.name} — {item.bundle}'", page)
         self.assertIn("_silence_image(icon)", page)
+
+    def test_the_render_probe_pictures_the_alerts(self):
+        # ``--alerts`` shows the app icon where the menu bar shows it, and
+        # the chosen face where the window's own confirmations show it.
+        source = (ROOT / "scripts" / "window_render_probe.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        self.assertIn('ALERTS = "--alerts" in ARGS', source)
+        self.assertIn("``--alerts``", ast.get_docstring(tree))
+        functions = {node.name: node for node in tree.body
+                     if isinstance(node, ast.FunctionDef)}
+        render = ast.unparse(functions["render_alerts"])
+        self.assertIn("'WhisperFace.icns'", render)
+        self.assertIn("setIcon_", render)
+        self.assertIn("_show_the_face", render)
+        dictate = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn('str(HERE / "icons" / "WhisperFace.icns"))', dictate)
 
     def test_the_render_probe_pictures_every_editor(self):
         source = (ROOT / "scripts" / "window_render_probe.py").read_text(
@@ -8305,6 +8376,175 @@ if APPKIT_AVAILABLE:
     class _ClickTarget(_NSObject):
         def clicked_(self, _sender):
             self.fired.append("clicked")
+
+
+
+class FakePermissionSeams:
+    """Stands in for System Settings, tccutil, the restart and the log."""
+
+    def __init__(self, statuses=(0, 0)):
+        self.opened, self.ran, self.lines = [], [], []
+        self.restarts = 0
+        self.statuses = list(statuses)
+
+    def flow(self, missing=("accessibility", "input_monitoring"), probe=()):
+        import whisper_face_gui as gui
+        return gui.PermissionHelpFlow(
+            missing=missing, opener=self.opened.append, runner=self.run,
+            restart=self.restart, record=self.lines.append,
+            probe=lambda: probe)
+
+    def run(self, command):
+        self.ran.append(list(command))
+        return self.statuses.pop(0) if self.statuses else 0
+
+    def restart(self):
+        self.restarts += 1
+
+
+class PermissionHelpTests(unittest.TestCase):
+    """The permission window's behaviour, AppKit-free, with fakes only."""
+
+    def test_each_button_opens_its_own_settings_page(self):
+        import whisper_face_gui as gui
+        seams = FakePermissionSeams()
+        flow = seams.flow()
+        flow.open_settings("accessibility")
+        flow.open_settings("input_monitoring")
+        self.assertEqual(seams.opened, [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+        ])
+        with self.assertRaises(ValueError):
+            gui.permission_settings_url("microphone_and_everything")
+        self.assertEqual(seams.ran, [])
+
+    def test_a_reset_needs_the_persons_click_and_touches_only_this_app(self):
+        import whisper_face_gui as gui
+        seams = FakePermissionSeams()
+        flow = seams.flow()
+        # Not offered until "Still Not Working", and never without a click.
+        self.assertFalse(flow.reset(confirmed=True))
+        flow.still_not_working()
+        self.assertEqual(flow.stage, "confirm")
+        self.assertFalse(flow.reset(confirmed=False))
+        self.assertEqual(seams.ran, [])
+        self.assertTrue(flow.reset(confirmed=True))
+        self.assertEqual(seams.ran, [
+            ["/usr/bin/tccutil", "reset", "Accessibility",
+             "com.berg.whisper-face.launcher"],
+            ["/usr/bin/tccutil", "reset", "ListenEvent",
+             "com.berg.whisper-face.launcher"]])
+        self.assertEqual(seams.restarts, 1)
+        for wider in ("", "All", "com.example.other"):
+            with self.assertRaises(ValueError):
+                gui.permission_reset_commands(wider)
+
+    def test_a_reset_macos_refuses_is_said_plainly_and_nothing_restarts(self):
+        seams = FakePermissionSeams(statuses=(0, 1))
+        flow = seams.flow()
+        flow.still_not_working()
+        self.assertFalse(flow.reset(confirmed=True))
+        self.assertEqual(flow.stage, "failed")
+        self.assertEqual(seams.restarts, 0)
+        cancelled = FakePermissionSeams()
+        flow = cancelled.flow()
+        flow.still_not_working()
+        flow.cancel_reset()
+        self.assertEqual(flow.stage, "missing")
+        self.assertEqual(cancelled.ran, [])
+
+    def test_the_path_taken_is_recorded_without_content(self):
+        import whisper_face_gui as gui
+        seams = FakePermissionSeams()
+        flow = seams.flow(missing=("input_monitoring",))
+        flow.shown()
+        flow.open_settings("input_monitoring")
+        flow.still_not_working()
+        flow.reset(confirmed=True)
+        self.assertFalse(flow.update(("input_monitoring",)))
+        self.assertTrue(flow.update(()))
+        self.assertEqual(seams.lines, [
+            "[permissions] help shown permissions=input_monitoring",
+            "[permissions] help opened_settings permissions=input_monitoring",
+            "[permissions] help still_not_working permissions=input_monitoring",
+            "[permissions] help reset_confirmed",
+            "[permissions] help reset_done",
+            "[permissions] help granted",
+        ])
+        with self.assertRaises(ValueError):
+            gui.permission_help_record("typed", ("accessibility",))
+        with self.assertRaises(ValueError):
+            gui.permission_help_record("shown", ("/Users/someone",))
+
+    def test_the_window_says_switch_it_off_and_on_in_plain_words(self):
+        from whisper_face_gui import internal_words_in
+        catalog = {key: value for key, value in STRING_CATALOGS["en"].items()
+                   if key.startswith("permission_help.")}
+        self.assertIn("If Whisper Face is already listed and switched on, "
+                      "switch it off and on again.",
+                      catalog["permission_help.toggle"])
+        for key, value in catalog.items():
+            with self.subTest(key=key):
+                self.assertEqual(internal_words_in(value), [])
+                for word in ("tccutil", "terminal", "tcc", "bundle"):
+                    self.assertNotIn(word, value.casefold())
+
+
+@unittest.skipUnless(
+    APPKIT_AVAILABLE,
+    "needs AppKit: run with "
+    "uv run --with pyobjc-framework-Cocoa --with pyobjc-framework-Quartz "
+    "tests/test_whisper_face_gui.py PermissionHelpAppKitTests")
+class PermissionHelpAppKitTests(unittest.TestCase):
+    """The window built off screen. Never shown, never opens Settings."""
+
+    @classmethod
+    def setUpClass(cls):
+        import AppKit
+        AppKit.NSApplication.sharedApplication()
+
+    def controller(self, flow):
+        import whisper_face_gui as gui
+        return gui.PermissionHelpWindowController.alloc().initWithFlow_(flow)
+
+    def test_one_button_per_missing_permission_and_the_reset_behind_a_click(self):
+        seams = FakePermissionSeams()
+        for missing in (("accessibility",), ("input_monitoring",),
+                        ("accessibility", "input_monitoring")):
+            with self.subTest(missing=missing):
+                window = self.controller(seams.flow(missing=missing))
+                self.assertEqual(
+                    sorted(key for key in window.buttons
+                           if key in ("accessibility", "input_monitoring")),
+                    sorted(missing))
+                self.assertFalse(window.window.isVisible())
+        window = self.controller(seams.flow())
+        window.buttons["input_monitoring"].performClick_(None)
+        self.assertEqual(seams.opened[-1].rsplit("?", 1)[1],
+                         "Privacy_ListenEvent")
+        self.assertEqual(
+            window.buttons["accessibility"].accessibilityLabel(),
+            "Open Accessibility settings")
+        window.buttons["still"].performClick_(None)
+        self.assertIn("confirm", window.buttons)
+        self.assertEqual(seams.ran, [])
+        window.buttons["cancel"].performClick_(None)
+        self.assertEqual(seams.ran, [])
+        window.buttons["still"].performClick_(None)
+        window.buttons["confirm"].performClick_(None)
+        self.assertEqual(len(seams.ran), 2)
+        self.assertEqual(seams.restarts, 1)
+
+    def test_it_closes_by_itself_once_both_are_granted(self):
+        seams = FakePermissionSeams()
+        window = self.controller(seams.flow())
+        window.applyReading_(["accessibility"])
+        self.assertFalse(window.closed)
+        self.assertNotIn("input_monitoring", window.buttons)
+        window.applyReading_([])
+        self.assertTrue(window.closed)
+        self.assertEqual(seams.lines[-1], "[permissions] help granted")
 
 
 if __name__ == "__main__":
