@@ -402,6 +402,7 @@ from voice_compiler import (  # noqa: E402
     VoiceIR,
     WordEvidence,
     analyze_prosody,
+    apply_dictionary_spelling,
     build_consequence_plan,
     context_firewall_receipt,
     execute_consequence_plan,
@@ -9091,38 +9092,26 @@ def apply_learned_fixes(text: str, bundle: str = "") -> str:
     return regression.apply(text, app=bundle or None)
 
 
-# Whole-word matcher for vocabulary casing: an alphanumeric run, optionally
-# continued across single identifier joiners so "voice_compiler.py" stays one
-# token. Casing only ever fires on a full-token casefold match, so treating a
-# joined form as one token can skip a rewrite but never invent one.
-VOCAB_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:[._+#-][0-9A-Za-z]+)*")
-
-
-def apply_vocabulary_casing(text: str) -> str:
-    """Normalize whole-word matches of user-listed vocabulary to the casing the
-    user wrote in the dictionary (e.g. "github" -> "GitHub"). Case-insensitive
-    on the match, whole-word only so "github" inside "githubbed" is left alone,
-    and a token already in canonical form is untouched. Additive: only a token
-    whose casefold equals a listed term is ever changed, and only by raising
-    letters, so a capital the recognizer produced (a sentence start) stays."""
+def apply_vocabulary_casing(text: str, edits: list | None = None) -> str:
+    """Write each term the user typed into the dictionary in its own form
+    where the words heard equal it, ignoring only spaces, hyphens and case
+    ("github" and "git hub" -> "GitHub"). Whole words only, so "github"
+    inside "githubbed" is left alone. The guards are
+    ``voice_compiler.apply_dictionary_spelling``'s: a change of case alone
+    never touches an ordinary word ("Mark" listed leaves "mark") and only
+    raises letters, so a capital the recognizer placed stays; a join needs
+    two heard words. Each change is recorded in ``edits``, when given, as a
+    ``dictionary_spelling`` clean-up edit."""
     if not text:
         return text
     with GLOSS["lock"]:
         vocabulary = dict(GLOSS.get("vocabulary") or {})
     if not vocabulary:
         return text
-
-    def _canonical(match: "re.Match[str]") -> str:
-        word = match.group(0)
-        canonical = vocabulary.get(word.casefold())
-        if canonical is None or canonical == word:
-            return word
-        if any(have.isupper() and not want.isupper()
-               for have, want in zip(word, canonical)):
-            return word
-        return canonical
-
-    return VOCAB_WORD_RE.sub(_canonical, text)
+    spelled, changed = apply_dictionary_spelling(text, vocabulary.values())
+    if changed and edits is not None:
+        edits.append(CleanupEdit("dictionary_spelling", text, spelled))
+    return spelled
 
 
 def learned_alternatives(text: str, bundle: str) -> list[str]:
@@ -13835,7 +13824,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         if tone_key == "casual" and not verbatim:
             # belt for both paths
             text = strip_casual_period(text, rec.language)
-        text = apply_vocabulary_casing(text)   # user's canonical term casing
+        # The user's dictionary terms in their own form.
+        vocabulary_edits: list[CleanupEdit] = []
+        text = apply_vocabulary_casing(text, vocabulary_edits)
+        PIPELINE_STATE["last_cleanup_edits"].extend(
+            edit.kind for edit in vocabulary_edits)
         if PIPELINE_STATE["last_alternatives"]:
             cleaned_alternatives = []
             for alternative in PIPELINE_STATE["last_alternatives"]:

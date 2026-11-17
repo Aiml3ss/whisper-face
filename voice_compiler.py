@@ -21,7 +21,7 @@ from parrot_core import (
     RecognitionWord,
     find_self_correction,
 )
-from personal_regression import is_common_word
+from personal_regression import is_common_word, is_negation
 from phonetic_keys import double_metaphone
 from process_verifier import RefusalReason, VerificationReceipt
 
@@ -1975,3 +1975,156 @@ def analyze_prosody(samples: Sequence[float], sample_rate: int = 16_000,
                 "end", start * frame / sample_rate,
                 duration, min(1.0, duration / 0.6)))
     return tuple(events)
+
+
+# --- dictionary spelling: the clean-up's deterministic rule -----------------
+#
+# When the words heard equal a term the user typed into the dictionary,
+# ignoring only spaces, hyphens and letter case, the term is written in its
+# own form: "git hub" and "Git-Hub" become "GitHub", "whisperface" becomes
+# "Whisper Face", "iphone" becomes "iPhone". Nothing else is compared, so no
+# sound-alike, no other letter and no punctuation between the words can
+# make a match.
+
+# Ordinary words that are also names, which a dictionary holds as names.
+# They join personal_regression's common words for this rule only, so that
+# "Mark" in the dictionary never capitalises "mark" and "Grace" never
+# capitalises "grace".
+NAME_LIKE_ORDINARY_WORDS = frozenset("""
+mark bill frank grace rose will may june april august art bob jack pat sue
+joy hope faith dawn rich rob gene earl guy max ray rod don dean drew lane
+chase hunter mason grant page reed wade wells summer autumn winter amber
+ruby pearl iris violet lily daisy holly ivy heather olive penny sandy
+crystal brook river sky storm robin jay wren finch bishop baker cook
+miller smith carter porter cooper fisher hunt price rice young king
+""".split())
+# The longest run of written words one term may be heard across.
+DICTIONARY_SPELLING_MAX_WORDS = 4
+_SPELLING_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:[._+#-][0-9A-Za-z]+)*")
+_SPELLING_SPACE_RE = re.compile(r"[ \t]+")
+# A word touching one of these is part of an address, a path or a handle.
+_SPELLING_IDENTIFIER_NEIGHBOURS = frozenset("@/\\:_~=")
+
+
+def is_ordinary_word(word: str) -> bool:
+    """A common English word, or an ordinary word that is also a name."""
+    return is_common_word(word) or word.casefold() in NAME_LIKE_ORDINARY_WORDS
+
+
+def _spelling_key(value: str) -> str:
+    return re.sub(r"[\s-]+", "", value).casefold()
+
+
+def _ordinary_term(term: str) -> bool:
+    """Whether a term is an ordinary word: no digit, no capital after a
+    word's first letter, and every word of it ordinary."""
+    if any(char.isdigit() for char in term):
+        return False
+    words = [word for word in re.split(r"[\s-]+", term) if word]
+    if any(any(char.isupper() for char in word[1:]) for word in words):
+        return False
+    return all(is_ordinary_word(word) for word in words)
+
+
+def apply_dictionary_spelling(
+        text: str, terms: Iterable[str]) -> tuple[str, list[str]]:
+    """Write each dictionary term in its own form where it was heard.
+
+    Returns the text and, for each change, the heard words it replaced.
+    The guards, all of them deliberate:
+
+    - A change of letter case alone is made only for a term that is not an
+      ordinary word, and never to a heard word that is one: "Mark" listed
+      leaves "mark" alone and "US" listed leaves "us" alone. It only raises
+      letters, as the casing rule before it did, so "GITHUB" and a capital
+      the recognizer placed stay.
+    - Joining words needs at least two heard words ("git hub", "co-pilot");
+      no join or split writes an ordinary word, or starts from one heard
+      word that is ordinary, and none takes away a negation ("not able").
+    - Only spaces may separate the heard words: a comma, a full stop or a
+      line break between them means they were not said as one term.
+    - A word touching ``@``, ``/``, ``:`` or ``_`` belongs to an address,
+      a path or a handle and is never part of a match.
+    - At the start of a sentence a lower-case term keeps the capital
+      ("Kube ctl" there is written "Kubectl").
+    """
+    by_key: dict[str, str] = {}
+    for term in terms:
+        if not isinstance(term, str):
+            continue
+        term = term.strip()
+        key = _spelling_key(term)
+        if key and key not in by_key and _SPELLING_WORD_RE.fullmatch(
+                re.sub(r"[\s-]+", "", term) or "-"):
+            by_key[key] = term
+    if not text or not by_key:
+        return text, []
+    words = list(_SPELLING_WORD_RE.finditer(text))
+    replacements: list[tuple[int, int, str]] = []
+    changed: list[str] = []
+    index = 0
+    while index < len(words):
+        matched = 0
+        for count in range(min(DICTIONARY_SPELLING_MAX_WORDS,
+                               len(words) - index), 0, -1):
+            span = words[index:index + count]
+            if any(text[left.end():right.start()] != ""
+                   and not _SPELLING_SPACE_RE.fullmatch(
+                       text[left.end():right.start()])
+                   for left, right in zip(span, span[1:])):
+                continue
+            start, end = span[0].start(), span[-1].end()
+            before = text[start - 1] if start else " "
+            after = text[end] if end < len(text) else " "
+            if (before in _SPELLING_IDENTIFIER_NEIGHBOURS
+                    or after in _SPELLING_IDENTIFIER_NEIGHBOURS):
+                continue
+            heard = text[start:end]
+            term = by_key.get(_spelling_key(heard))
+            if term is None:
+                continue
+            written = _spelling_for(text, start, heard, term)
+            if written is not None and written != heard:
+                replacements.append((start, end, written))
+                changed.append(heard)
+            matched = count
+            break
+        index += matched or 1
+    return _replace_spans(text, replacements), changed
+
+
+def _spelling_for(text: str, start: int, heard: str, term: str) -> str | None:
+    """The form to write for ``heard``, or None when a guard refuses."""
+    heard_words = [word for word in re.split(r"[\s-]+", heard) if word]
+    term_words = [word for word in re.split(r"[\s-]+", term) if word]
+    if [word.casefold() for word in heard_words] \
+            == [word.casefold() for word in term_words]:
+        # The same words: only letter case, or a hyphen for a space,
+        # differs. Never for an ordinary term or ordinary heard words.
+        if _ordinary_term(term) or all(
+                is_ordinary_word(word) for word in heard_words):
+            return None
+        if heard.casefold() != term.casefold():
+            return _sentence_case(text, start, heard, term)
+        if any(have.isupper() and not want.isupper()
+               for have, want in zip(heard, term)):
+            return None
+        return term
+    # A join or a split.
+    if _ordinary_term(term):
+        return None
+    if len(heard_words) == 1 and is_ordinary_word(heard_words[0]):
+        return None
+    if any(is_negation(word) for word in heard_words):
+        return None
+    return _sentence_case(text, start, heard, term)
+
+
+def _sentence_case(text: str, start: int, heard: str, term: str) -> str:
+    """Keep a sentence-start capital on a term typed in lower case."""
+    preceding = text[:start].rstrip()
+    sentence_start = not preceding or preceding[-1] in ".!?\n"
+    if (sentence_start and heard[:1].isupper() and term[:1].islower()
+            and not any(char.isupper() for char in term)):
+        return term[:1].upper() + term[1:]
+    return term

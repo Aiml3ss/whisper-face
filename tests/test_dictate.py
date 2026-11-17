@@ -48,6 +48,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
+    CleanupEdit,
     HELPER_WORD_SOURCE,
     NUMBER_WORDS,
     ParakeetResult,
@@ -64,6 +65,7 @@ from parrot_core import (  # noqa: E402
 )
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
+    apply_dictionary_spelling,
     ContextPack,
     EditProposal,
     RecognitionHypothesis,
@@ -242,6 +244,9 @@ def load_definitions(*names, assignments=(), extra=None):
         # Pure helpers the assembly and the compiler call on every decode.
         "HELPER_WORD_SOURCE": HELPER_WORD_SOURCE,
         "combine_word_evidence_status": combine_word_evidence_status,
+        # The clean-up's dictionary spelling rule, and the edit it records.
+        "apply_dictionary_spelling": apply_dictionary_spelling,
+        "CleanupEdit": CleanupEdit,
         # The pure readback comparisons dictate.py imports from
         # insertion_integrity, so a selected readback runs the real ones.
         **{name: getattr(insertion_integrity, name) for name in (
@@ -678,7 +683,7 @@ class PhoneEndpointRequestTests(unittest.TestCase):
                 "extract_tone_override": lambda raw: (raw, None),
                 "needs_llm_cleanup": lambda *args, **kwargs: False,
                 "quick_clean": lambda raw, verbatim=False, language="en": raw,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing": lambda text, edits=None: text,
                 "TONE": {"default": ""},
             },
         )["phone_clean"]
@@ -730,7 +735,7 @@ class PhoneEndpointRequestTests(unittest.TestCase):
                 "needs_llm_cleanup": lambda *args, **kwargs: False,
                 "quick_clean": lambda raw, verbatim=False, language="en": raw,
                 "llm_clean": lambda raw, tone: raw,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing": lambda text, edits=None: text,
                 "TONE": {"default": ""},
                 "append_transcript": lambda *args, **kwargs:
                     logged.append(args),
@@ -3015,7 +3020,7 @@ class FacePreferenceTests(unittest.TestCase):
                     "is_hallucination": lambda *_args: False,
                     "looks_like_prompt_echo": lambda _raw: False,
                     "apply_learned_fixes": lambda raw: raw,
-                    "apply_vocabulary_casing": lambda text: text,
+                    "apply_vocabulary_casing": lambda text, edits=None: text,
                 },
             )
             spoken = "I thought it was Tuesday, actually Wednesday."
@@ -3084,7 +3089,7 @@ class FacePreferenceTests(unittest.TestCase):
                     "is_hallucination": lambda *_args: False,
                     "looks_like_prompt_echo": lambda _raw: False,
                     "apply_learned_fixes": lambda raw: raw,
-                    "apply_vocabulary_casing": lambda text: text,
+                    "apply_vocabulary_casing": lambda text, edits=None: text,
                 },
             )
             spoken = "Of course I can. I have nothing I have nothing going on"
@@ -6078,7 +6083,7 @@ class CleanupGuardTests(unittest.TestCase):
                 "NUMBER_WORDS": NUMBER_WORDS,
                 "is_hallucination": lambda *_args: False,
                 "apply_learned_fixes": lambda raw: raw,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing": lambda text, edits=None: text,
             },
         )
         clean = ns["phone_clean"]
@@ -7964,7 +7969,7 @@ class LearningTests(unittest.TestCase):
                 "PERSONAL_GLOBAL_MIN_COUNT", "ANCHOR_MAX_TERMS",
                 "CORRECTION_DELAY", "CORRECTION_POLL_INTERVAL",
                 "CORRECTION_MAX_LEARN", "CORRECTION_STABLE_POLLS",
-                "VOCAB_WORD_RE", "MIN_SECONDS", "GATE_PEAK_RMS", "CONT_END",
+                "MIN_SECONDS", "GATE_PEAK_RMS", "CONT_END",
             },
             extra={
                 "Path": Path,
@@ -11435,7 +11440,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "is_verbatim_app": lambda _bundle: False,
                 "cursor_context": lambda: field,
                 "tone_for": lambda _bundle: "default",
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing": lambda text, edits=None: text,
                 "focused_snapshot": lambda: SimpleNamespace(),
                 "make_paste_receipt": lambda *_args: SimpleNamespace(),
                 "commit_insertion": commit,
@@ -12294,7 +12299,6 @@ class CustomVocabularyTests(unittest.TestCase):
                  "vocabulary": {"github": "GitHub"}}
         ns = load_definitions(
             "apply_vocabulary_casing",
-            assignments={"VOCAB_WORD_RE"},
             extra={"GLOSS": gloss},
         )
         casing = ns["apply_vocabulary_casing"]
@@ -12313,6 +12317,31 @@ class CustomVocabularyTests(unittest.TestCase):
         self.assertEqual(
             casing("Kubectl is installed. Github and GITHUB. Iphone, iphone."),
             "Kubectl is installed. GitHub and GITHUB. Iphone, iPhone.")
+
+    def test_dictionary_spelling_is_recorded_as_its_own_clean_up_edit(self):
+        gloss = {"lock": threading.Lock(),
+                 "vocabulary": {"github": "GitHub", "mark": "Mark"}}
+        ns = load_definitions("apply_vocabulary_casing",
+                              extra={"GLOSS": gloss})
+        edits = []
+        self.assertEqual(
+            ns["apply_vocabulary_casing"]("push to git hub, mark", edits),
+            "push to GitHub, mark")
+        self.assertEqual(edits, [CleanupEdit(
+            "dictionary_spelling", "push to git hub, mark",
+            "push to GitHub, mark")])
+        # Nothing changed, nothing recorded.
+        edits.clear()
+        self.assertEqual(ns["apply_vocabulary_casing"]("mark it", edits),
+                         "mark it")
+        self.assertEqual(edits, [])
+        # The shipped clean-up records it with the other clean-up edits.
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "text = apply_vocabulary_casing(text, vocabulary_edits)", source)
+        self.assertIn('PIPELINE_STATE["last_cleanup_edits"].extend(\n'
+                      '            edit.kind for edit in vocabulary_edits)',
+                      source)
 
 
 class DelayedCleanupRuntimeTests(unittest.TestCase):
@@ -12596,7 +12625,7 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
                 ),
                 "quick_clean": lambda text, **_kwargs: text,
                 "strip_casual_period": lambda text: text,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing": lambda text, edits=None: text,
                 "_restore_snippet_sentinels": lambda text, _restore: text,
             },
         )
@@ -12633,7 +12662,7 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
                 "compile_cleanup": compile_cleanup,
                 "LANGUAGE_DEFAULT": "en",
                 "strip_casual_period": lambda text: text,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing": lambda text, edits=None: text,
                 "_restore_snippet_sentinels": lambda text, _restore: text,
             },
         )
@@ -12672,7 +12701,7 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
                     "tomorrow works for me", ()),
                 "quick_clean": lambda text, **_kwargs: text,
                 "strip_casual_period": lambda text: text,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing": lambda text, edits=None: text,
                 "_restore_snippet_sentinels": lambda text, _restore: text,
             },
         )
@@ -17078,7 +17107,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 "is_verbatim_app": lambda _bundle: False,
                 "cursor_context": lambda: None,
                 "tone_for": lambda _bundle: "default",
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing": lambda text, edits=None: text,
                 "delayed_cleanup_scheduling_enabled": lambda: True,
                 "schedule_delayed_cleanup": lambda *args, **_kwargs: (
                     seen.delayed.append(args[0]) or True),

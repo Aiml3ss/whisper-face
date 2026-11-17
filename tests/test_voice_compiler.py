@@ -26,6 +26,7 @@ from voice_compiler import (
     VoiceIR,
     WordEvidence,
     analyze_prosody,
+    apply_dictionary_spelling,
     build_consequence_plan,
     context_firewall_receipt,
     project_word_evidence,
@@ -1177,6 +1178,81 @@ class PausePunctuationSwitchTests(unittest.TestCase):
             pause_punctuation=False)
         self.assertEqual(VoiceCompiler().compile(voice).text,
                          "Can we ship this?")
+
+
+class DictionarySpellingTests(unittest.TestCase):
+    """The clean-up writes a dictionary term in its own form where the words
+    heard equal it, ignoring only spaces, hyphens and case."""
+
+    TERMS = ("GitHub", "iPhone", "kubectl", "Whisper Face", "Copilot",
+             "Wi-Fi", "Priyanka", "Qwen", "Mark", "Grace", "US", "Notable",
+             "voice_compiler.py")
+
+    def spell(self, text):
+        return apply_dictionary_spelling(text, self.TERMS)[0]
+
+    def test_must_fix(self):
+        for heard, written in (
+                ("push it to git hub", "push it to GitHub"),
+                ("push it to Git-Hub", "push it to GitHub"),
+                ("push it to github", "push it to GitHub"),
+                ("my iphone died", "my iPhone died"),
+                ("my i phone died", "my iPhone died"),
+                ("run kube ctl now", "run kubectl now"),
+                ("Kube ctl is installed.", "Kubectl is installed."),
+                ("open whisperface", "open Whisper Face"),
+                ("open whisper face", "open Whisper Face"),
+                ("open whisper-face", "open Whisper Face"),
+                ("ask co-pilot", "ask Copilot"),
+                ("ask co pilot", "ask Copilot"),
+                ("the wifi is down", "the Wi-Fi is down"),
+                ("the wi fi is down", "the Wi-Fi is down"),
+                ("call priya nka", "call Priyanka"),
+                ("try qwen.", "try Qwen."),
+                ("(git hub)", "(GitHub)"),
+        ):
+            with self.subTest(heard=heard):
+                self.assertEqual(self.spell(heard), written)
+
+    def test_must_keep(self):
+        for heard in (
+                # A case change alone never touches an ordinary word.
+                "mark the date", "say grace", "tell us now",
+                # Only raises letters: capitals the recognizer wrote stay.
+                "GITHUB is down", "Iphone sales",
+                # Punctuation or a line break between words is not a join.
+                "git, hub", "git. Hub", "git\nhub",
+                # No join takes away a negation.
+                "not able to come",
+                # A larger word that merely contains a term.
+                "githubbed", "qwens",
+                # Addresses, paths and handles.
+                "mail git@hub.com", "see git/hub", "ping @github",
+                "edit Voice_compiler.py",
+                # Already the term's own form.
+                "GitHub and iPhone and Mark",
+        ):
+            with self.subTest(heard=heard):
+                self.assertEqual(self.spell(heard), heard)
+
+    def test_a_join_or_split_never_writes_or_splits_an_ordinary_word(self):
+        self.assertEqual(apply_dictionary_spelling(
+            "every one came", ("Everyone",))[0], "every one came")
+        self.assertEqual(apply_dictionary_spelling(
+            "it was today", ("To Day",))[0], "it was today")
+        # Ordinary heard words may still join into a term that is not one.
+        self.assertEqual(apply_dictionary_spelling(
+            "log in to sales force", ("Salesforce",))[0],
+            "log in to Salesforce")
+
+    def test_reports_what_it_replaced(self):
+        self.assertEqual(
+            apply_dictionary_spelling("git hub and iphone", self.TERMS),
+            ("GitHub and iPhone", ["git hub", "iphone"]))
+        self.assertEqual(apply_dictionary_spelling("mark", self.TERMS),
+                         ("mark", []))
+        self.assertEqual(apply_dictionary_spelling("github", ()),
+                         ("github", []))
 
 
 if __name__ == "__main__":
