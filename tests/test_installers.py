@@ -1168,7 +1168,7 @@ class InstallerContractTests(unittest.TestCase):
                 helper.chmod(0o755)
                 runtime = root / "parrot-speech-runtime"
                 runtime.write_text(
-                    "#!/bin/bash\necho '{\"ok\":true,\"protocol\":2}'\n",
+                    "#!/bin/bash\necho '{\"ok\":true,\"protocol\":3}'\n",
                     encoding="utf-8")
                 runtime.chmod(0o755)
                 logs = (root / "dictate.log", root / "ollama.log")
@@ -1203,13 +1203,13 @@ class InstallerContractTests(unittest.TestCase):
     def test_verify_checks_a_speech_runtime_only_when_one_is_installed(self):
         # The runtime is off by default and optional: --verify passes its
         # check when none is installed and says so. One that is present is
-        # asked for protocol 2 against the model folder Python verified; a
-        # present runtime that cannot run, fails, or predates protocol 2 each
+        # asked for protocol 3 against the model folder Python verified; a
+        # present runtime that cannot run, fails, or predates protocol 3 each
         # names itself.
         cases = {
             "absent": (None, None,
                        "== speech runtime: not installed (optional"),
-            "not executable": ("echo '{\"ok\":true,\"protocol\":2}'",
+            "not executable": ("echo '{\"ok\":true,\"protocol\":3}'",
                                "!! speech runtime is present but cannot run",
                                None),
             "fails": ("echo '{\"error\":\"model load failed\",\"ok\":false}'"
@@ -1217,8 +1217,11 @@ class InstallerContractTests(unittest.TestCase):
                       None),
             "protocol 1": ("echo '{\"ok\":true}'",
                            "!! speech runtime is out of date", None),
+            # Built before sessions: a protocol 2 runtime is out of date.
+            "protocol 2": ("echo '{\"ok\":true,\"protocol\":2}'",
+                           "!! speech runtime is out of date", None),
             "healthy": ('printf "%s\\n" "$*" > "$(dirname "$0")/args"\n'
-                        "echo '{\"ok\":true,\"protocol\":2}'", None,
+                        "echo '{\"ok\":true,\"protocol\":3}'", None,
                         "== speech runtime: installed and working"),
         }
         for name, (body, reason, said) in cases.items():
@@ -1261,7 +1264,7 @@ class InstallerContractTests(unittest.TestCase):
                 if name == "healthy":
                     self.assertEqual(
                         (root / "args").read_text(encoding="utf-8").strip(),
-                        f"--verify --protocol 2 --models {root}/Parakeet Models")
+                        f"--verify --protocol 3 --models {root}/Parakeet Models")
 
     @needs_bash
     def test_a_speech_runtime_that_will_not_build_or_load_does_not_stop_setup(
@@ -1364,7 +1367,7 @@ class InstallerContractTests(unittest.TestCase):
             '--package-path "$DIR/native/ParrotSpeechRuntime"',
             '--scratch-path "$DIR/.models/swift-build-runtime"',
             '"$DIR/.models/swift-build-runtime/release/parrot-speech-runtime"',
-            '"$speech_runtime" --preload --protocol 2 --models '
+            '"$speech_runtime" --preload --protocol 3 --models '
             '"$parakeet_model_dir"',
             'remove_installed_path 1 "$speech_runtime"',
             'remove_installed_path 1 "$DIR/.models/swift-build-runtime"',

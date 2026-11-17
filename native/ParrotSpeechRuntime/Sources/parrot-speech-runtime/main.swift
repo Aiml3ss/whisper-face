@@ -3,11 +3,13 @@
 // It speaks the same wire protocol as native/ParrotASRHelper (see
 // native/ParrotASRHelper/PROTOCOL.md): launched the old way it answers in
 // protocol 1, exactly as that helper does; asked with `--protocol 2` it adds
-// each word's time and confidence. It loads the pinned Core ML files from
-// the folder it is given and from nowhere else. It has no way to download:
-// it uses no networking API, and a missing or broken model file makes it
-// print {"error":"model load failed","ok":false} and exit 1, so the app
-// falls back. It never deletes, moves or writes a file.
+// each word's time and confidence; asked with `--protocol 3` it also keeps
+// sessions, which decode a recording window by window while it is still
+// being captured (`Session` in Recognizer.swift). It loads the pinned
+// Core ML files from the folder it is given and from nowhere else. It has
+// no way to download: it uses no networking API, and a missing or broken
+// model file makes it print {"error":"model load failed","ok":false} and
+// exit 1, so the app falls back. It never deletes, moves or writes a file.
 
 import Foundation
 
@@ -49,6 +51,9 @@ if wire >= 2 {
     status["capabilities"] = ["words", "vocabulary"]
     status["engine"] = Wire.engine
 }
+if wire >= 3 {
+    status["capabilities"] = ["words", "vocabulary", "sessions"]
+}
 
 switch mode {
 case "--server":
@@ -68,37 +73,79 @@ default:
 /// Answer framed requests until the input ends. 0 at a clean end; 1 when a
 /// request is cut off part way.
 func serve(_ recognizer: Recognizer, wire: Int) -> Int32 {
+    // At most one protocol 3 session at a time, across requests.
+    var session: Session? = nil
     while true {
         // Everything one request allocates, Core ML's results included, is
         // released before the next request is read.
-        if let exitCode = autoreleasepool(invoking: { serveOne(recognizer, wire: wire) }) {
+        if let exitCode = autoreleasepool(invoking: {
+            serveOne(recognizer, wire: wire, session: &session)
+        }) {
             return exitCode
         }
     }
 }
 
+/// Read `count` samples into a new array: nil when the input ended or
+/// failed part way.
+func readSamples(_ count: Int) -> [Float]? {
+    var samples = [Float](repeating: 0, count: count)
+    let payloadRead = samples.withUnsafeMutableBytes {
+        Wire.readFully(fileDescriptor: 0, into: $0)
+    }
+    return payloadRead == count * 4 ? samples : nil
+}
+
 /// Read and answer one request: nil to go on, or the exit code.
-func serveOne(_ recognizer: Recognizer, wire: Int) -> Int32? {
+func serveOne(_ recognizer: Recognizer, wire: Int, session: inout Session?) -> Int32? {
     var rawCount: UInt64 = 0
     let headerRead = withUnsafeMutableBytes(of: &rawCount) {
         Wire.readFully(fileDescriptor: 0, into: $0)
     }
     if headerRead == 0 { return 0 }
     guard headerRead == 8 else { return 1 }
-    let requested = UInt64(littleEndian: rawCount)
-    if wire >= 2, requested & Wire.controlFlag != 0 {
-        return serveControl(recognizer, length: requested & ~Wire.controlFlag)
+    let header = UInt64(littleEndian: rawCount)
+    // A control frame (protocol 2 and up) has the top bit set, above every
+    // session operation and every sample count.
+    if wire >= 2, header & Wire.controlFlag != 0 {
+        return serveControl(recognizer, length: header & ~Wire.controlFlag)
+    }
+    // Below protocol 3 every header is a sample count, as it always was.
+    let operation: Wire.Operation? = wire >= 3
+        ? Wire.Operation(rawValue: header >> Wire.operationShift) : .batch
+    let requested = wire >= 3 ? header & Wire.countMask : header
+    switch operation {
+    case .batch?:
+        break
+    case .begin? where requested == 0:
+        session = Session(recognizer: recognizer)
+        return nil
+    case .append? where requested > 0 && requested <= UInt64(Wire.maximumSamples):
+        guard let samples = readSamples(Int(requested)) else { return 1 }
+        if let session {
+            session.append(samples)
+        }
+        // Audio for no session is read and dropped; the finish that follows
+        // finds no session and says so.
+        return nil
+    case .finish? where requested == 0:
+        let current = session
+        session = nil
+        answerFinish(current, recognizer: recognizer)
+        return nil
+    case .cancel? where requested == 0:
+        session = nil
+        return nil
+    default:
+        Wire.emit(["ok": false, "error": "invalid request"])
+        return nil
     }
     guard requested > 0, requested <= UInt64(Wire.maximumSamples) else {
         Wire.emit(["ok": false, "error": "invalid sample count"])
         return nil
     }
     let count = Int(requested)
-    var samples = [Float](repeating: 0, count: count)
-    let payloadRead = samples.withUnsafeMutableBytes {
-        Wire.readFully(fileDescriptor: 0, into: $0)
-    }
-    guard payloadRead == count * 4 else { return 1 }
+    guard let samples = readSamples(count) else { return 1 }
     let requestStarted = ContinuousClock.now
     do {
         let transcript = try recognizer.transcribe(samples)
@@ -155,6 +202,40 @@ func serveControl(_ recognizer: Recognizer, length: UInt64) -> Int32? {
         "dropped": list?.dropped ?? entries.count,
     ])
     return nil
+}
+
+/// Answer a session's `finish`: what a protocol 2 batch request answers for
+/// the session's recording (its term pass report included), plus
+/// `samples`, the count it was given, and, with a term list,
+/// `bias_at_finish_ms`.
+func answerFinish(_ session: Session?, recognizer: Recognizer) {
+    let requestStarted = ContinuousClock.now
+    guard let session else {
+        Wire.emit(["ok": false, "error": "no session"])
+        return
+    }
+    do {
+        let transcript = try session.finish()
+        var answer: [String: Any] = [
+            "ok": true,
+            "text": transcript.text,
+            "processing_s": Wire.seconds(requestStarted.duration(to: .now)),
+            "samples": session.total,
+        ]
+        WordEvidence.add(
+            transcript, sampleCount: session.total,
+            vocabulary: recognizer.vocabulary.pieces, to: &answer)
+        TermBias.add(transcript, recognizer: recognizer, to: &answer)
+        if session.hasTerms {
+            // The part of the term pass left for key release; the rest ran
+            // on each window as it was decoded during the hold.
+            answer["bias_at_finish_ms"] = WordEvidence.rounded(
+                session.termPassSecondsAtFinish * 1000)
+        }
+        Wire.emit(answer)
+    } catch {
+        Wire.emit(["ok": false, "error": "session failed: \(error)"])
+    }
 }
 
 #if DEBUG

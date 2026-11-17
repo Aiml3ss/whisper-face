@@ -38,6 +38,7 @@ from parrot_core import (  # noqa: E402
     should_escalate_uncertain,
     words_settle_route,
     CONFIDENT_WORD,
+    CROSSCHECK_SKIP_CONFIDENCE,
     normalize_spacing,
     confidence_from_segments,
     recognition_words_from_segments,
@@ -1276,8 +1277,9 @@ class AgreementConfidenceTests(unittest.TestCase):
         self.assertFalse(should_escalate_uncertain(0.2, 0.0))
     def test_only_native_words_all_at_the_floor_settle_the_route(self):
         sure = (RecognitionWord("ship", 0, 0.2, 0.99),
-                RecognitionWord("it", 0.2, 0.4, CONFIDENT_WORD))
-        unsure = sure + (RecognitionWord("now", 0.4, 0.6, 0.77),)
+                RecognitionWord("it", 0.2, 0.4, CROSSCHECK_SKIP_CONFIDENCE))
+        unsure = sure + (RecognitionWord(
+            "now", 0.4, 0.6, CROSSCHECK_SKIP_CONFIDENCE - 0.001),)
         self.assertTrue(words_settle_route(sure, "native"))
         self.assertFalse(words_settle_route(unsure, "native"))
         self.assertFalse(words_settle_route((), "native"))
@@ -1285,6 +1287,20 @@ class AgreementConfidenceTests(unittest.TestCase):
             self.assertFalse(words_settle_route(sure, status))
         self.assertFalse(words_settle_route(
             (RecognitionWord("x", 0, 0.1, None),), "native"))
+        # The review flag's line is lower; a word between the two is
+        # confident enough to need no flag and not enough to skip the check.
+        between = (RecognitionWord("ship", 0, 0.2, CONFIDENT_WORD),)
+        self.assertFalse(words_settle_route(between, "native"))
+        self.assertTrue(words_settle_route(between, "native",
+                                           floor=CONFIDENT_WORD))
+
+    def test_the_cross_check_line_is_the_calibrated_one(self):
+        # E3 on the owner's recordings (2026-11-17): every sentence Turbo
+        # would have improved had a lowest word confidence of at most
+        # 0.867. A line at or below it lets one of them skip the check.
+        self.assertEqual(CROSSCHECK_SKIP_CONFIDENCE, 0.90)
+        self.assertGreater(CROSSCHECK_SKIP_CONFIDENCE, 0.867)
+        self.assertGreater(CROSSCHECK_SKIP_CONFIDENCE, CONFIDENT_WORD)
 
     def test_the_floor_is_the_compilers_word_confidence_line(self):
         source = (ROOT / "voice_compiler.py").read_text(encoding="utf-8")
@@ -1463,6 +1479,26 @@ class HelperProtocolTests(unittest.TestCase):
                 None, "ready", []):
             with self.subTest(status=status):
                 self.assertEqual(helper_protocol(status), 1)
+
+    def test_protocol_3_needs_words_and_sessions(self):
+        self.assertEqual(helper_protocol(
+            {"ready": True, "protocol": 3,
+             "capabilities": ["words", "sessions"]}), 3)
+        for status in (
+                {"ready": True, "protocol": 3, "capabilities": ["sessions"]},
+                {"ready": True, "protocol": 3, "capabilities": ["words"]},
+                {"ready": True, "protocol": 3.0,
+                 "capabilities": ["words", "sessions"]},
+                {"ready": True, "protocol": "3",
+                 "capabilities": ["words", "sessions"]},
+                {"ready": True, "protocol": 4,
+                 "capabilities": ["words", "sessions"]}):
+            with self.subTest(status=status):
+                self.assertEqual(helper_protocol(status), 1)
+        # A protocol 2 line that also lists sessions is still protocol 2.
+        self.assertEqual(helper_protocol(
+            {"ready": True, "protocol": 2,
+             "capabilities": ["words", "sessions"]}), 2)
 
     def test_a_result_is_the_protocol_1_pair_with_evidence_attached(self):
         result = parakeet_result(
