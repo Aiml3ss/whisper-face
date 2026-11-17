@@ -2220,6 +2220,45 @@ class RecognitionMenuTitleTests(unittest.TestCase):
         })
 
 
+class ReleaseUpdateMenuTests(unittest.TestCase):
+    """What Check for Updates… says to a copy the drag-install app set up."""
+
+    def test_only_a_newer_release_is_offered_and_with_what_it_will_do(self):
+        alert = load_definitions("release_update_alert")["release_update_alert"]
+        message, detail, offer = alert({
+            "decision": "upgrade", "version": "0.6.1", "revision": "b" * 40,
+            "size": 24_600_000, "current_version": "0.6.0"})
+        self.assertTrue(offer)
+        self.assertEqual(message, "Whisper Face 0.6.1 is available.")
+        self.assertIn("You have 0.6.0.", detail)
+        self.assertIn("about 25 MB", detail)
+        self.assertIn("keeps your settings, dictionary, history and models",
+                      detail)
+        self.assertIn("this version keeps working", detail)
+        # An upgrade without the revision to hold the click to is not one.
+        self.assertFalse(alert({"decision": "upgrade", "version": "0.6.1"})[2])
+        self.assertEqual(alert({"decision": "up-to-date"}),
+                         ("Whisper Face is up to date.", "", False))
+        message, detail, offer = alert({
+            "decision": "refuse",
+            "reason": "couldn't reach the published releases"})
+        self.assertFalse(offer)
+        self.assertEqual(message, "Couldn't check for updates.")
+        self.assertIn("couldn't reach", detail)
+        self.assertFalse(alert(None)[2])
+        self.assertIn("did not answer", alert({})[1])
+
+    def test_a_failed_install_says_nothing_changed(self):
+        failure = load_definitions(
+            "release_update_failure")["release_update_failure"]
+        self.assertIsNone(failure({"status": "installed", "version": "0.6.1"}))
+        detail = failure({"status": "failed",
+                          "reason": "the download did not verify"})
+        self.assertTrue(detail.startswith("the download did not verify"))
+        self.assertIn("Nothing was changed", detail)
+        self.assertIn("Nothing was changed", failure({}))
+
+
 class VoiceInboxMenuTests(unittest.TestCase):
     def test_menu_title_is_count_only_and_bounded_by_inbox_capacity(self):
         title = load_definitions(

@@ -943,6 +943,7 @@ required=(
     whisper_face_render.py
     support_bundle.py self_update.py
     scripts/macos_launcher_app.py scripts/side_by_side_update.py
+    scripts/app_update.py scripts/verify_macos_package.py
     scripts/safe_update_advisor.py scripts/release_manifest.py
     config/macos-signing-policy.json
     native/ParrotASRHelper/Package.swift

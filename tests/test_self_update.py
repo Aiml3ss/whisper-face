@@ -691,13 +691,23 @@ class AppManagedTests(unittest.TestCase):
                     self.assertTrue(report["available"], report)
                     self.assertTrue(runner.calls)
 
-    def test_the_menu_answers_an_app_managed_copy_instead_of_failing(self):
+    def test_the_menu_asks_the_release_updater_for_an_app_managed_copy(self):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
         present = source[source.index("    def _present_update_check(self, report):"):]
         present = present[:present.index("\n    def ", 10)]
+        # The answer for a drag install comes first, from published
+        # releases, and is offered only behind a click.
         self.assertLess(present.index('report.get("app_managed")'),
                         present.index("Couldn't check for updates."))
-        self.assertIn("Updates come as a new download.", present)
+        self.assertIn("release_update_alert(release)", present)
+        self.assertIn('"Download and Install"', present)
+        self.assertLess(present.index("alert.runModal()"),
+                        present.index("self._begin_release_update("))
+        check = source[source.index("    def checkForUpdates_(self, sender):"):]
+        check = check[:check.index("\n    def ", 10)]
+        # This module answers first, so git is never run for that copy.
+        self.assertLess(check.index("self_update.check_for_update("),
+                        check.index('self._release_update_command("check")'))
 
 
 if __name__ == "__main__":

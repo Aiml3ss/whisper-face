@@ -12,6 +12,7 @@ dependencies or Apple credentials are available.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -331,6 +332,21 @@ def _verify_drag_launcher(app: Path, source_root: Path, source_zip: Path,
     )
 
 
+@contextlib.contextmanager
+def _verified_source(source_zip: Path, version: str, revision: str):
+    """Unpack a release's source ZIP to a scratch folder and prove it is the
+    exact source of that release; yields its root and its tree receipt."""
+    expected_root = f"Whisper Face {version}"
+    _check_zip_members(source_zip, expected_root)
+    with tempfile.TemporaryDirectory(prefix="whisper-face-package-verify.") as directory:
+        extracted = Path(directory)
+        _extract_zip(source_zip, extracted)
+        zip_root = extracted / expected_root
+        zip_receipt = verify_tree(zip_root, version, revision)
+        verify_exact_checkout(zip_root, version, revision)
+        yield zip_root, zip_receipt
+
+
 def verify_artifacts(
     source_zip: Path, disk_image: Path, version: str, revision: str
 ) -> dict:
@@ -340,15 +356,7 @@ def verify_artifacts(
     disk_image = disk_image.resolve()
     if not source_zip.is_file() or not disk_image.is_file():
         raise PackageError("source ZIP and disk image must both exist")
-    expected_root = f"Whisper Face {version}"
-    _check_zip_members(source_zip, expected_root)
-    with tempfile.TemporaryDirectory(prefix="whisper-face-package-verify.") as directory:
-        extracted = Path(directory)
-        _extract_zip(source_zip, extracted)
-        zip_root = extracted / expected_root
-        zip_receipt = verify_tree(zip_root, version, revision)
-        verify_exact_checkout(zip_root, version, revision)
-
+    with _verified_source(source_zip, version, revision) as (zip_root, zip_receipt):
         mount_point, device = _attach_disk_image(disk_image)
         try:
             verify_volume_layout(mount_point)
@@ -358,6 +366,37 @@ def verify_artifacts(
         finally:
             _run("hdiutil", "detach", device)
     return zip_receipt
+
+
+def verify_release_app(
+    source_zip: Path, app: Path, version: str, revision: str
+) -> dict:
+    """Prove an app taken off a release's disk image, wherever it now is,
+    is the app that release's own source describes: the ZIP is the exact
+    source, and the app passes that source's launcher contract with the ZIP
+    sealed inside it. The in-app update checks the copy it is about to put
+    in place this way, after copying, so nothing can change in between."""
+    version = _require_version(version)
+    revision = _require_revision(revision)
+    source_zip = source_zip.resolve()
+    app = app.resolve()
+    if not source_zip.is_file() or not app.is_dir():
+        raise PackageError("source ZIP and app must both exist")
+    with _verified_source(source_zip, version, revision) as (zip_root, zip_receipt):
+        _verify_drag_launcher(app, zip_root, source_zip, version, revision)
+    return zip_receipt
+
+
+@contextlib.contextmanager
+def attached_disk_image(disk_image: Path):
+    """Attach a disk image read-only and out of sight, check it holds just
+    the app and the Applications link, and detach it afterwards."""
+    mount_point, device = _attach_disk_image(disk_image.resolve())
+    try:
+        verify_volume_layout(mount_point)
+        yield mount_point
+    finally:
+        _run("hdiutil", "detach", device)
 
 
 def build_parser() -> argparse.ArgumentParser:
