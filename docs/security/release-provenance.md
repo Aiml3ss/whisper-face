@@ -5,7 +5,7 @@ A checksum answers "are these the bytes someone published?". It cannot answer
 proves today, what the release workflow is designed to add, and what still is
 not covered.
 
-## The drag-install disk image (built from this revision on)
+## The drag-install disk image (from v0.6.0)
 
 The disk image now holds only `Whisper Face.app` and a link to Applications.
 The app carries the release's published source ZIP byte for byte; its SHA-256
@@ -22,7 +22,7 @@ image is made; none of that has run yet, for want of the Developer ID.
 
 ## What published releases carry today
 
-Every release published so far (through v0.5.0) was built and uploaded by
+Every release published so far (through v0.6.0) was built and uploaded by
 hand. The release workflow has not completed on any tag, so **no published
 release has a Developer ID signature, notarization, a stapled ticket, or a
 build-provenance attestation**. The launcher app inside the disk image is

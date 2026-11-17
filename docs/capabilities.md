@@ -19,7 +19,8 @@ another product exists; see
 Last reviewed: **14 November 2026**, against the source that includes the
 November 2026 audit fixes. v0.5.0 is the first published build with them;
 v0.4.0 and earlier behave differently in places (they install Ollama by
-default, for example).
+default, for example). v0.6.0 is the first whose Mac download is the
+drag-install app.
 
 **What a default install contains.** On a Mac: Parakeet Unified (English) and
 Whisper Tiny. Whisper large-v3-turbo and the Qwen3.5-4B cleanup model (with
@@ -213,7 +214,7 @@ Qwen3.5-4B, and has no Parakeet.
   their own work. Reruns are idempotent and never overwrite personal files.
   A Mac install from a folder or clone needs an administrator account
   (Homebrew), the Command Line Tools with Swift 6, and macOS 14 or newer.
-  From the next release, the Mac disk image is an app to drag into
+  From v0.6.0, the Mac disk image is an app to drag into
   Applications that sets itself up in a window, with no Homebrew; it still
   asks Apple to install the Command Line Tools. That path has been checked
   only by its tests and a dry run, never on a clean Mac. The Windows
