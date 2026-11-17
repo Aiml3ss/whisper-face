@@ -358,6 +358,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.outbox.summary.paste_attempted": "Paste may have landed — verify before reusing",
         "overview.outbox.summary.not_pasted": "Not pasted — destination changed",
         "overview.outbox.summary.pasted_unchecked": "Pasted, not double-checked",
+        "overview.outbox.summary.interrupted": "Kept when Whisper Face stopped — check before reusing",
         "overview.action.pause": "Pause",
         "overview.action.resume": "Resume",
         "overview.action.pause.help": "Pause or resume the global dictation hotkey.",
@@ -682,7 +683,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.self_correction.help": "Off by default. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm”: between two numbers, days, months or times, only the second is kept. A sentence contrasting two things, like “I thought it was Tuesday, actually Wednesday”, changes too.",
         "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",
         "settings.dialog.recent.title": "Recent dictations",
-        "settings.dialog.recent.message": "Metadata only. Reveal a dictation to see its words. To insert one again, click where it should go and use Recent Dictations in the menu bar.",
+        "settings.dialog.recent.message": "Each dictation and what became of it. Its words stay hidden until you show them. To insert one again, click where it should go and use Recent Dictations in the menu bar.",
         "settings.dialog.recent.empty": "Nothing recorded yet.",
         "settings.dialog.recent.row": "{when} · {words} · {app}",
         "settings.dialog.recent.words": "{count} words",
@@ -695,8 +696,15 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.recent.reveal": "Reveal Text…",
         "settings.dialog.recent.revealed.title": "Recent dictation",
         "settings.dialog.recent.revealed.gone": "That dictation is no longer in the local log.",
-        "settings.accessibility.recent_list.label": "Recent dictations list",
-        "settings.accessibility.recent_list.help": "Choose one recent dictation to reveal.",
+        "settings.accessibility.recent_list.label": "Show the words of the dictation from {when} in {app}",
+        "settings.accessibility.recent_list.help": "Shows this dictation's words here. Nothing is pasted.",
+        "recent.receipt.proven": "In your document · checked word for word",
+        "recent.receipt.position": "In your document · checked by the cursor",
+        "recent.receipt.unchecked": "Pasted · this app could not be checked",
+        "recent.receipt.not_pasted": "Not pasted · a copy went to the Voice Outbox",
+        "recent.receipt.unconfirmed": "May not have landed · a copy went to the Voice Outbox",
+        "recent.receipt.interrupted": "Not delivered · Whisper Face stopped, a copy went to the Voice Outbox",
+        "recent.receipt.unknown": "No delivery record",
         "settings.notice.hotkey": "Capture key is now {hotkey}.",
         "settings.notice.undo_hotkey": "Undo key is now {hotkey}.",
         "settings.notice.undo_hotkey.cleared": "Undo key cleared.",
@@ -1120,6 +1128,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
 
         "sheets.notice.error.label": "Problem",
         "sheets.notice.result.label": "Result",
+        "sheets.recent.show": "Show Words",
+        "sheets.recent.back": "Back",
+        "sheets.recent.back.help": "Back to the list of recent dictations.",
+        "sheets.recent.tally": "{proven} of {count} checked in your document after pasting.",
+        "sheets.recent.words.label": "Words of this dictation",
+        "sheets.recent.words.help": "Select and copy them if you need them. Nothing here is pasted.",
         "sheets.tones.message": "Choose how cleanup should sound in each app.",
         "sheets.tones.choice.label": "Cleanup tone for {app}",
         "sheets.tones.refused": "{app}: {reason}",
@@ -2177,6 +2191,19 @@ def recent_dictation_row(entry: Mapping[str, Any], *,
     words = words if isinstance(words, int) and not isinstance(words, bool) \
         else 0
     words = max(0, words)
+    when, app = recent_dictation_when_app(entry, locale=locale)
+    return localized_string(
+        "settings.dialog.recent.row", locale=locale, when=when,
+        words=(localized_string("settings.dialog.recent.word", locale=locale)
+               if words == 1 else localized_string(
+                   "settings.dialog.recent.words", locale=locale,
+                   count=words)),
+        app=app)
+
+
+def recent_dictation_when_app(entry: Mapping[str, Any], *,
+                              locale: str = "en") -> tuple[str, str]:
+    """A coarse "when" and the app's name for one dictation's row."""
     seconds = entry.get("age_seconds")
     try:
         seconds = float(seconds)
@@ -2194,14 +2221,44 @@ def recent_dictation_row(entry: Mapping[str, Any], *,
         when = localized_string(
             "recent.age.days", locale=locale, count=int(seconds // 86400))
     app = entry.get("app")
+    return when, (str(app) if isinstance(app, str) and app
+                  else localized_string("recent.app.unknown", locale=locale))
+
+
+# What became of a dictation, by the runtime's closed receipt name: the
+# SF Symbol its row leads with, and whether it counts as checked in place.
+RECENT_RECEIPTS = {
+    "proven": ("checkmark.circle", True),
+    "position": ("checkmark.circle", True),
+    "unchecked": ("circle.dashed", False),
+    "not_pasted": ("tray.and.arrow.down", False),
+    "unconfirmed": ("tray.and.arrow.down", False),
+    "interrupted": ("tray.and.arrow.down", False),
+    "unknown": ("minus.circle", False),
+}
+
+
+def recent_dictation_receipt(entry: Mapping[str, Any]) -> str:
+    """The entry's receipt name, or "unknown" for anything not in the set."""
+    receipt = entry.get("receipt")
+    return receipt if isinstance(receipt, str) and receipt in RECENT_RECEIPTS \
+        else "unknown"
+
+
+def recent_dictation_receipt_text(entry: Mapping[str, Any], *,
+                                  locale: str = "en") -> str:
+    """What became of one dictation, in plain words — never its text."""
     return localized_string(
-        "settings.dialog.recent.row", locale=locale, when=when,
-        words=(localized_string("settings.dialog.recent.word", locale=locale)
-               if words == 1 else localized_string(
-                   "settings.dialog.recent.words", locale=locale,
-                   count=words)),
-        app=str(app) if isinstance(app, str) and app else localized_string(
-            "recent.app.unknown", locale=locale))
+        f"recent.receipt.{recent_dictation_receipt(entry)}", locale=locale)
+
+
+def recent_dictations_tally(entries: Sequence[Mapping[str, Any]], *,
+                            locale: str = "en") -> str:
+    """How many of the listed dictations were checked in place."""
+    proven = sum(1 for entry in entries
+                 if RECENT_RECEIPTS[recent_dictation_receipt(entry)][1])
+    return localized_string("sheets.recent.tally", locale=locale,
+                            proven=proven, count=len(entries))
 
 
 def support_snapshot_text(state: GUIState) -> str:
@@ -4037,6 +4094,7 @@ def _localized_runtime_overview_copy(
             "overview.outbox.summary.paste_attempted",
             "overview.outbox.summary.not_pasted",
             "overview.outbox.summary.pasted_unchecked",
+            "overview.outbox.summary.interrupted",
         ),
     }.get(kind, ())
     key = next((
@@ -8436,6 +8494,8 @@ if APPKIT_AVAILABLE:
     # ------------------------------------------------------------------
 
     SHEET_WIDTH = 540.0
+    # The receipt symbol that leads each recent dictation's row.
+    SHEET_RECEIPT_ICON_SIZE = 18.0
     # Sheet edge to the header, the body and the footer's buttons.
     SHEET_INSET = 20.0
     SHEET_FACE_SIZE = 40.0
@@ -13646,52 +13706,111 @@ if APPKIT_AVAILABLE:
                 current_label=self.view_model.state.undo_hotkey_label,
                 allow_unbound=True)
 
+        @objc.python_method
+        def _recent_page(self, sheet: Any,
+                         entries: Sequence[Mapping[str, Any]]
+                         ) -> Mapping[str, Any]:
+            """Each recent dictation as a row: when, how long, which app,
+            and what became of it, with Show Words. The words themselves
+            are never on this page."""
+            locale = self.view_model.locale
+            rows = []
+            for entry in entries:
+                when, app = recent_dictation_when_app(entry, locale=locale)
+                show = self._sheet_button(
+                    sheet, f"show:{entry.get('id') or ''}",
+                    self._l("sheets.recent.show"),
+                    label=self._l("settings.accessibility.recent_list.label",
+                                  when=when, app=app),
+                    help_text=self._l(
+                        "settings.accessibility.recent_list.help"),
+                    item=entry)
+                icon = NSImageView.alloc().initWithFrame_(NSMakeRect(
+                    0, 0, SHEET_RECEIPT_ICON_SIZE, SHEET_RECEIPT_ICON_SIZE))
+                icon.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+                icon.setEditable_(False)
+                image = _symbol_image(
+                    RECENT_RECEIPTS[recent_dictation_receipt(entry)][0],
+                    size=15.0)
+                if image is not None:
+                    icon.setImage_(image)
+                # The caption says what the symbol shows.
+                _silence_image(icon)
+                self._register("symbol", icon)
+                row, _title, _caption = self._sheet_row(
+                    recent_dictation_row(entry, locale=locale),
+                    caption=recent_dictation_receipt_text(
+                        entry, locale=locale),
+                    accessories=(show,), leading=icon)
+                rows.append(row)
+            notes = ([self._page_note(recent_dictations_tally(
+                entries, locale=locale))] if entries else [])
+            if not rows:
+                rows = [self._sheet_empty_row(
+                    self._l("settings.dialog.recent.empty"))]
+            return {
+                "title": self._l("settings.dialog.recent.title"),
+                "message": self._l("settings.dialog.recent.message"),
+                "sections": [(None, rows, notes)],
+                "buttons": self._sheet_footer(sheet, save=False),
+            }
+
+        @objc.python_method
+        def _recent_words_page(self, sheet: Any, entry: Mapping[str, Any],
+                               words: str) -> Mapping[str, Any]:
+            """One dictation's words, shown because they were asked for:
+            read-only and selectable, with what became of it above."""
+            locale = self.view_model.locale
+            if words:
+                row = self._sheet_editor_row(
+                    sheet, "words", words,
+                    label=self._l("sheets.recent.words.label"),
+                    help_text=self._l("sheets.recent.words.help"))
+                sheet.controls["words"].setEditable_(False)
+            else:
+                row = self._sheet_empty_row(
+                    self._l("settings.dialog.recent.revealed.gone"))
+            back = self._sheet_button(
+                sheet, "back", self._l("sheets.recent.back"),
+                help_text=self._l("sheets.recent.back.help"))
+            return {
+                "title": self._l("settings.dialog.recent.revealed.title"),
+                "message": " · ".join((
+                    recent_dictation_row(entry, locale=locale),
+                    recent_dictation_receipt_text(entry, locale=locale))),
+                "sections": [(None, [row], [])],
+                "buttons": self._sheet_footer(sheet, save=False),
+                "leading": [back],
+            }
+
         def browseRecentDictations_(self, _sender: Any) -> None:
-            """List recent dictations as metadata; text needs a second step."""
+            """List recent dictations with what became of each; a
+            dictation's words take a second, explicit step."""
             entries = self.view_model.recent_dictations()
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l("settings.dialog.recent.title"))
-            alert.setInformativeText_(
-                self._l("settings.dialog.recent.message") if entries
-                else self._l("settings.dialog.recent.empty"))
-            chooser = None
-            if entries:
-                chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                    NSMakeRect(0, 0, 460, 26), False)
-                # Rows are metadata, so two can read the same, and
-                # addItemWithTitle: drops duplicates. Each item carries its
-                # entry id instead.
-                for entry in entries:
-                    item = NSMenuItem.alloc() \
-                        .initWithTitle_action_keyEquivalent_(
-                            recent_dictation_row(
-                                entry, locale=self.view_model.locale),
-                            None, "")
-                    item.setRepresentedObject_(str(entry.get("id") or ""))
-                    chooser.menu().addItem_(item)
-                _accessible(
-                    chooser,
-                    self._l("settings.accessibility.recent_list.label"),
-                    self._l("settings.accessibility.recent_list.help"))
-                alert.setAccessoryView_(chooser)
-                alert.addButtonWithTitle_(
-                    self._l("settings.dialog.recent.reveal"))
-            alert.addButtonWithTitle_(self._l("settings.action.done"))
-            response = self._run_modal(alert)
-            if chooser is None or chooser.selectedItem() is None:
-                return
-            entry_id = str(chooser.selectedItem().representedObject() or "")
-            if response == 1000:
-                revealed = self.view_model.reveal_recent_dictation(entry_id)
-                detail = NSAlert.alloc().init()
-                detail.setMessageText_(
-                    self._l("settings.dialog.recent.revealed.title"))
-                detail.setInformativeText_(
-                    revealed or self._l(
-                        "settings.dialog.recent.revealed.gone"))
-                detail.addButtonWithTitle_(self._l("settings.action.done"))
-                self._run_modal(detail)
-            self.render()
+            sheet = self._new_sheet()
+            shown: tuple[Mapping[str, Any], str] | None = None
+            try:
+                while True:
+                    if shown is None:
+                        self._sheet_fill(sheet, lambda: self._recent_page(
+                            sheet, entries))
+                    else:
+                        entry, words = shown
+                        self._sheet_fill(
+                            sheet, lambda: self._recent_words_page(
+                                sheet, entry, words))
+                    action, selected = self._run_sheet(sheet)
+                    if action == "show":
+                        shown = (selected, self.view_model
+                                 .reveal_recent_dictation(
+                                     str(selected.get("id") or "")))
+                    elif action == "back":
+                        shown = None
+                    else:
+                        return
+            finally:
+                self._end_sheet(sheet)
+                self.render()
 
         def viewModes_(self, _sender: Any) -> None:
             """Show the six voice-mode shortcuts, using the key that is bound."""
@@ -14167,11 +14286,11 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         # the same app within a minute do.
         recent_dictations=lambda: (
             {"id": "smoke-1", "at": 0.0, "age_seconds": 90.0,
-             "words": 4, "app": "Mail"},
+             "words": 4, "app": "Mail", "receipt": "proven"},
             {"id": "smoke-2", "at": 0.0, "age_seconds": 90.0,
-             "words": 1, "app": "Slack"},
+             "words": 1, "app": "Slack", "receipt": "unchecked"},
             {"id": "smoke-3", "at": 0.0, "age_seconds": 90.0,
-             "words": 1, "app": "Slack"}),
+             "words": 1, "app": "Slack", "receipt": "interrupted"}),
         reveal_recent_dictation=lambda entry_id: calls.append(
             ("reveal_recent", entry_id)) and None,
         insert_recent_dictation=lambda entry_id: {
@@ -16356,28 +16475,44 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             "recent dictations become browsable once enabled")
         require(
             len(model.recent_dictations()) == 3, "recent metadata reaches UI")
-        recent_dialogs: list[Any] = []
+        recent_pages: list[tuple[str, tuple[str, ...], str]] = []
 
-        def reveal_last_row(alert: Any) -> int:
-            recent_dialogs.append(alert)
-            if len(recent_dialogs) == 1:
-                alert.accessoryView().selectItemAtIndex_(2)
-            return 1000
+        def show_last_row(sheet: Any) -> str:
+            # Each page as drawn: its title, its buttons and what it says.
+            recent_pages.append((
+                str(sheet.title.stringValue()), tuple(sheet.buttons),
+                " ".join(str(label.stringValue())
+                         for role in sheet.themed.values()
+                         for label in role
+                         if label.respondsToSelector_("stringValue"))))
+            return ("show:smoke-3", "back", "done")[len(recent_pages) - 1]
 
-        controller.modal_responder = reveal_last_row
+        controller.modal_responder = show_last_row
         controller.browseRecentDictations_(None)
         controller.modal_responder = None
+        require(len(recent_pages) == 3, "recent dictations list, words, back")
+        listing, words, back = recent_pages
         require(
-            int(recent_dialogs[0].accessoryView().numberOfItems()) == 3,
+            sorted(name for name in listing[1] if name.startswith("show:"))
+            == ["show:smoke-1", "show:smoke-2", "show:smoke-3"],
             "every recent dictation is listed, even with equal rows")
+        require(
+            set(listing[1]) == {
+                "show:smoke-1", "show:smoke-2", "show:smoke-3", "done"},
+            "recent dictations offer their words and nothing else")
+        require(
+            all(localized_string(f"recent.receipt.{kind}") in listing[2]
+                for kind in ("proven", "unchecked", "interrupted")),
+            "each recent dictation says what became of it")
         require(
             ("reveal_recent", "smoke-3") in calls,
             "recent dictation acts on the selected entry")
         require(
-            localized_string("settings.dialog.recent.reveal") in [
-                str(button.title()) for button in recent_dialogs[0].buttons()]
-            and len(recent_dialogs[0].buttons()) == 2,
-            "recent dictations offer reveal only")
+            words[0] == localized_string(
+                "settings.dialog.recent.revealed.title")
+            and set(words[1]) == {"back", "done"},
+            "a dictation's words are a page of their own")
+        require(back[:2] == listing[:2], "back returns to the same list")
         require(
             recent_dictation_row(model.recent_dictations()[0])
             == "1 min ago · 4 words · Mail", "recent row is metadata only")
@@ -17060,7 +17195,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         require(
             face_icon is not None
             and all(dialog.icon() == face_icon
-                    for dialog in dialogs + [recent_dialogs[0]]),
+                    for dialog in dialogs),
             "a system alert's icon is the chosen face")
         model.choose_face("owl")
         model.choose_language("ja")

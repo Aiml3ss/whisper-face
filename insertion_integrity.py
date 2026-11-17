@@ -37,6 +37,9 @@ class ReceiptReason(str, Enum):
     READBACK_UNAVAILABLE = "readback_unavailable"
     READBACK_CONFLICT = "readback_conflict"
     PASTE_OUTCOME_UNKNOWN = "paste_outcome_unknown"
+    # Whisper Face stopped after the dictation was journaled and before its
+    # history line was written: delivery was never settled in this process.
+    INTERRUPTED = "interrupted"
 
 
 def fingerprint_surrounding(text: str) -> str:
@@ -625,6 +628,35 @@ class InsertionCoordinator:
                     and entry.receipt.state != ReceiptState.VERIFIED
                     and not entry.receipt.pasted_unchecked)
             )
+
+    def keep(self, utterance_id: str, text: str, *,
+             paste_attempted: bool) -> InsertionReceipt:
+        """Hold text that was never settled here as recoverable.
+
+        For a dictation the delivery journal still held when Whisper Face
+        started: it was recognised, and then the app stopped before its
+        delivery was recorded. Nothing is pasted and nothing can be: the
+        entry is terminal from the start, unresolved, and says whether a
+        paste may already have been sent. An id already known keeps what it
+        has, so a recovery that runs twice cannot make two copies.
+        """
+        with self._lock:
+            if utterance_id in self._entries \
+                    or utterance_id in self._tombstones:
+                return self.receipt(utterance_id)
+            lease = InsertionLease(
+                utterance_id, "recovered", (0, 0),
+                fingerprint_surrounding(""))
+            receipt = InsertionReceipt(
+                utterance_id,
+                ReceiptState.UNRESOLVED,
+                ReceiptReason.INTERRUPTED,
+                bool(paste_attempted),
+            )
+            entry = _OutboxEntry(lease, text, receipt, terminal=True)
+            self._entries[utterance_id] = entry
+            self._settle_locked(utterance_id, entry)
+            return receipt
 
     def acknowledge(self, utterance_id: str) -> bool:
         """Dismiss one recoverable payload while retaining bounded dedupe."""

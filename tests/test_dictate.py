@@ -277,6 +277,12 @@ def load_definitions(*names, assignments=(), extra=None):
         **{name: getattr(insertion_integrity, name) for name in (
             "position_check", "position_count", "readback_difference",
             "readback_stage", "same_but_whitespace_form", "utf16_units")},
+        # finish_and_process journals every dictation before its paste. A
+        # harness about something else gets a journal that keeps nothing;
+        # DeliveryJournalTests load the real ones, which replace these.
+        "journal_dictation": lambda *_args, **_kwargs: False,
+        "settle_journaled_dictation": lambda *_args, **_kwargs: None,
+        "recover_journaled_dictations": lambda *_args, **_kwargs: 0,
     }
     # Shared constants come first so an explicit `extra` still overrides them
     # (tests pin IS_MACOS both ways), and a per-call copy keeps one test's
@@ -7664,8 +7670,8 @@ class TranscriptRetentionTests(unittest.TestCase):
     NOW = 1_800_000_000.0
     DAY = 24 * 3600.0
     NAMES = (
-        "append_transcript", "transcript_app_identity",
-        "_transcript_entry_time", "retained_transcript_lines",
+        "append_transcript", "_append_transcript_entry",
+        "transcript_app_identity", "_transcript_entry_time", "retained_transcript_lines",
         "_trim_transcripts_locked", "_rebase_learned_processed",
         "prune_transcripts", "clear_transcript_history",
         "load_learned", "save_learned",
@@ -14704,8 +14710,11 @@ class RecentDictationTests(unittest.TestCase):
         return load_definitions(
             "recent_dictation_metadata", "recent_dictation_menu_title",
             "describe_dictation_age", "undo_menu_title",
-            assignments={"RECENT_DICTATION_LIMIT"},
+            "transcript_receipt",
+            assignments={"RECENT_DICTATION_LIMIT", "TRANSCRIPT_RECEIPTS"},
             extra={"time": SimpleNamespace(time=lambda: 3700.0),
+                   "ReceiptReason": ReceiptReason,
+                   "ReceiptState": ReceiptState,
                    "math": __import__("math"),
                    "TRANSCRIPTS_LOCK": threading.Lock(),
                    "app_display_name":
@@ -14731,6 +14740,52 @@ class RecentDictationTests(unittest.TestCase):
         # A blank transcript and a corrupt line are simply not offered.
         self.assertEqual(len(ns["recent_dictation_metadata"](
             lines=self.LOG, now=3700.0)), 3)
+
+    def receipt(self, **metrics):
+        return self.namespace()["transcript_receipt"](
+            {"clean": "x", "metrics": metrics})
+
+    def test_each_dictation_says_what_became_of_it(self):
+        opaque = {"insertion_opaque_reason": "value-unsupported"}
+        for expected, metrics in (
+            ("proven", {"insertion_state": "verified",
+                        "insertion_reason": "commit_verified",
+                        "paste_attempted": True}),
+            ("proven", {"insertion_state": "verified",
+                        "insertion_reason": "commit_verified_whitespace_form",
+                        "paste_attempted": True}),
+            ("position", {"insertion_state": "verified",
+                          "insertion_reason": "commit_verified_position",
+                          "paste_attempted": True}),
+            ("unchecked", {"insertion_state": "unverifiable",
+                           "insertion_reason": "readback_unavailable",
+                           "paste_attempted": True, **opaque}),
+            ("unchecked", {"insertion_state": "legacy",
+                           "insertion_reason": "unsupported_field",
+                           "paste_attempted": True}),
+            # A field that could be read and went quiet is not "unchecked".
+            ("unconfirmed", {"insertion_state": "unverifiable",
+                             "insertion_reason": "readback_unavailable",
+                             "paste_attempted": True,
+                             "insertion_opaque_reason": None}),
+            ("unconfirmed", {"insertion_state": "conflict",
+                             "insertion_reason": "readback_conflict",
+                             "paste_attempted": True}),
+            ("not_pasted", {"insertion_state": "conflict",
+                            "insertion_reason": "focus_drift",
+                            "paste_attempted": False}),
+            ("interrupted", {"insertion_state": "unresolved",
+                             "insertion_reason": "interrupted",
+                             "paste_attempted": True}),
+        ):
+            with self.subTest(expected=expected, metrics=metrics):
+                self.assertEqual(self.receipt(**metrics), expected)
+        ns = self.namespace()
+        self.assertEqual(ns["transcript_receipt"]({"clean": "x"}), "unknown")
+        entries = ns["recent_dictation_metadata"](lines=self.LOG, now=3700.0)
+        self.assertEqual({entry["receipt"] for entry in entries}, {"unknown"})
+        for entry in entries:
+            self.assertIn(entry["receipt"], ns["TRANSCRIPT_RECEIPTS"])
 
     def test_older_entries_without_an_id_stay_addressable_by_position(self):
         ns = self.namespace()
@@ -14911,6 +14966,138 @@ class UndoLastDictationTests(unittest.TestCase):
 
         self.assertTrue(result["undone"])
         self.assertEqual(ns["_state"]["pasted"], ["hello"])
+
+    SAID = "um thanks for the note"
+
+    def _said_record(self, ns, said=None):
+        return ns["UndoableInsertion"](
+            element=ns["_element"],
+            bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-1",
+            inserted=self.INSERTED,
+            before=self.BEFORE,
+            selection=(len(self.BEFORE), 0),
+            said=self.SAID if said is None else said,
+        )
+
+    def test_replace_with_what_you_said_puts_the_raw_words_in_place(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._said_record(ns))
+        self.assertTrue(ns["undoable_insertion_status"]()["said_available"])
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), said=True)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE + self.SAID)
+        # Selected exactly the cleaned text, then pasted the raw words in
+        # one step: nothing was deleted on its own.
+        self.assertEqual(ns["_state"]["keys"].count(("shift", "left")),
+                         len(self.INSERTED))
+        self.assertNotIn(("backspace",), ns["_state"]["keys"])
+        self.assertEqual(ns["_state"]["pasted"], [self.SAID])
+        # The correction watcher must not learn from it.
+        self.assertTrue(ns["utterance_was_undone"]("utterance-1"))
+        # The raw words are now the undoable insertion, with nothing more
+        # to put back, and one more undo takes the dictation away.
+        status = ns["undoable_insertion_status"]()
+        self.assertTrue(status["available"])
+        self.assertFalse(status["said_available"])
+        again = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(
+                ns, caret=(len(self.BEFORE + self.SAID), 0)))
+        self.assertTrue(again["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_replace_with_what_you_said_refuses_when_nothing_differs(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._said_record(ns, said=""))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), said=True)
+
+        self.assertEqual(result, {"undone": False,
+                                  "reason": "nothing_to_change"})
+        self.assertEqual(ns["_state"]["keys"], [])
+        # The ordinary undo is still there.
+        self.assertTrue(ns["undoable_insertion_status"]()["available"])
+
+    def test_replace_with_what_you_said_is_held_to_undos_checks(self):
+        for reason, reader, bundle in (
+                ("selection_drift",
+                 lambda ns: self._snapshot(ns, caret=(3, 0)),
+                 "com.apple.mail"),
+                ("focus_drift", lambda ns: self._snapshot(ns),
+                 "com.tinyspeck.slackmacgap"),
+                ("target_unreadable", lambda ns: None, "com.apple.mail")):
+            with self.subTest(reason=reason):
+                ns = self.namespace()
+                record = self._said_record(ns)
+                ns["record_undoable_insertion"](record)
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=lambda: reader(ns),
+                    bundle_reader=lambda: bundle, said=True)
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual(ns["_state"]["text"],
+                                 self.BEFORE + self.INSERTED)
+                self.assertEqual(ns["_state"]["keys"], [])
+                self.assertIs(ns["UNDOABLE_INSERTION"]["record"], record)
+
+    def test_the_raw_words_keep_the_insertions_join_and_differ_from_it(self):
+        ns = self.namespace()
+        build = ns["build_undoable_insertion"]
+        snapshot = ns["FocusSnapshot"](
+            element=ns["_element"], text="Dear Ada,", selection=(9, 0))
+        ns["focus_destination_id"] = lambda *_args: "mail:field-1"
+        rec = SimpleNamespace(committed_text=" Thanks for the note.")
+        record = build(rec, snapshot, "com.apple.mail", "u-1",
+                       said="um thanks for the note")
+        self.assertEqual(record.said, " um thanks for the note")
+        same = build(rec, snapshot, "com.apple.mail", "u-1",
+                     said="Thanks for the note.")
+        self.assertEqual(same.said, "")
+        self.assertEqual(build(rec, snapshot, "com.apple.mail", "u-1").said,
+                         "")
+
+    def test_a_refusal_is_said_in_plain_words_and_logged_without_text(self):
+        ns = load_definitions(
+            "replace_with_what_you_said", "said_undo_refusal_text",
+            assignments=("SAID_UNDO_REASONS", "SAID_UNDO_UNCHECKED"))
+        logs, shown = [], []
+        ns["print"] = lambda *args: logs.append(" ".join(map(str, args)))
+        ns["AppHelper"] = SimpleNamespace(
+            callAfter=lambda function, *args: function(*args))
+        for reason in ("nothing_to_change", "selection_drift",
+                       "focus_drift", "surrounding_text_drift",
+                       "target_unreadable", "readback_conflict"):
+            with self.subTest(reason=reason):
+                ns["replace_with_what_you_said"](
+                    shown.append,
+                    undo=lambda said: {"undone": False, "reason": reason})
+                self.assertTrue(shown[-1])
+                self.assertNotIn("_", shown[-1])
+        self.assertIn("Nothing was changed", ns["said_undo_refusal_text"](
+            "selection_drift"))
+        self.assertIn("could not check", ns["said_undo_refusal_text"](
+            "readback_conflict"))
+        before = len(shown)
+        ns["replace_with_what_you_said"](
+            shown.append, undo=lambda said: {"undone": True, "reason": "x"})
+        self.assertEqual(len(shown), before)
+        for line in logs:
+            self.assertRegex(line, r"^\[undo\] what was said was not put "
+                                   r"back \([a-z_]+\)$")
+
+    def test_the_said_row_names_why_it_is_dimmed(self):
+        title = load_definitions(
+            "said_menu_title",
+            assignments=("SAID_MENU_TITLE",))["said_menu_title"]
+        self.assertEqual(title({"available": True, "said_available": True}),
+                         "Replace with What You Said")
+        self.assertEqual(
+            title({"available": True, "said_available": False}),
+            "Replace with What You Said — clean-up changed nothing")
+        self.assertEqual(title({"available": False}),
+                         "Replace with What You Said")
 
     def test_undo_refuses_when_focus_moved(self):
         ns = self.namespace()
@@ -17474,6 +17661,317 @@ class ParakeetWordEvidenceRuntimeTests(unittest.TestCase):
         self.assertTrue(voice.pause_punctuation)
 
 
+class ProcessStopped(BaseException):
+    """Raised by a test to stop a dictation the way a kill does: nothing in
+    the dictation path catches it, so no outcome is recorded."""
+
+
+class DeliveryJournalTests(unittest.TestCase):
+    """Never lose a word: a dictation is on disk before its paste.
+
+    The journal functions run for real against a temporary folder, with the
+    real atomic writer, so the file's mode and contents are what the app
+    would leave behind. Only the history log is a list.
+    """
+
+    NAMES = (
+        "journal_dictation", "settle_journaled_dictation",
+        "recover_journaled_dictations", "_read_delivery_journal_locked",
+        "_write_delivery_journal_locked", "transcript_app_identity",
+        "atomic_write_text",
+    )
+
+    def journal(self, folder, *, coordinator=None, history=None):
+        history = [] if history is None else history
+        ns = load_definitions(
+            *self.NAMES, assignments=("DELIVERY_JOURNAL_MAX",),
+            extra={
+                "hashlib": hashlib, "os": os, "tempfile": tempfile,
+                "time": time, "Path": Path, "LANGUAGE_DEFAULT": "en",
+                "ReceiptState": ReceiptState,
+                "ReceiptReason": ReceiptReason,
+                "_append_transcript_entry": history.append,
+                "print": lambda *_args: None,
+            })
+        ns.update({
+            "DELIVERY_JOURNAL_FILE": Path(folder) / "delivery_journal.json",
+            "DELIVERY_JOURNAL_LOCK": threading.Lock(),
+            "INSERTION_COORDINATOR": coordinator or InsertionCoordinator(),
+        })
+        return ns, history
+
+    @staticmethod
+    def entries(ns):
+        path = ns["DELIVERY_JOURNAL_FILE"]
+        if not path.exists():
+            return []
+        return json.loads(path.read_text(encoding="utf-8"))["entries"]
+
+    def test_the_words_are_on_disk_owner_only_before_the_paste(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            self.assertTrue(ns["journal_dictation"](
+                "take-1", raw="meet me at the station", text="",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="recognized"))
+            path = ns["DELIVERY_JOURNAL_FILE"]
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            [first] = self.entries(ns)
+            self.assertEqual(
+                (first["raw"], first["clean"], first["stage"]),
+                ("meet me at the station", "", "recognized"))
+            # The final text replaces the raw words in the same entry and
+            # keeps the time they were said.
+            ns["journal_dictation"](
+                "take-1", raw="meet me at the station",
+                text="Meet me at the station.", bundle="com.apple.Notes",
+                mode="capture", language="en", stage="pasting")
+            [second] = self.entries(ns)
+            self.assertEqual(second["clean"], "Meet me at the station.")
+            self.assertEqual(second["stage"], "pasting")
+            self.assertEqual(second["ts"], first["ts"])
+            ns["settle_journaled_dictation"]("take-1")
+            self.assertFalse(path.exists())
+
+    def test_a_window_title_never_reaches_the_journal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["journal_dictation"](
+                "take-1", raw="hello", text="Hello.",
+                bundle="windows:Q3 layoffs plan.docx - Word",
+                mode="capture", language="en", stage="pasting")
+            written = ns["DELIVERY_JOURNAL_FILE"].read_text(encoding="utf-8")
+        self.assertNotIn("layoffs", written)
+        self.assertRegex(json.loads(written)["entries"][0]["app"],
+                         r"^windows:[0-9a-f]{16}$")
+
+    def test_recovery_gives_back_every_word_once(self):
+        coordinator = InsertionCoordinator()
+        with tempfile.TemporaryDirectory() as folder:
+            ns, history = self.journal(folder, coordinator=coordinator)
+            # One stopped during the clean-up, one during the paste.
+            ns["journal_dictation"](
+                "take-1", raw="call dana back", text="",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="recognized")
+            ns["journal_dictation"](
+                "take-2", raw="ship it friday", text="Ship it Friday.",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="pasting")
+            self.assertEqual(ns["recover_journaled_dictations"](), 2)
+            self.assertFalse(ns["DELIVERY_JOURNAL_FILE"].exists())
+            # A second start finds nothing more to give back.
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+        kept = coordinator.recoverable()
+        self.assertEqual([item.text for item in kept],
+                         ["call dana back", "Ship it Friday."])
+        self.assertEqual({item.receipt.reason for item in kept},
+                         {ReceiptReason.INTERRUPTED})
+        self.assertEqual([item.receipt.paste_attempted for item in kept],
+                         [False, True])
+        self.assertFalse(any(item.receipt.pasted_unchecked for item in kept))
+        self.assertEqual([line["id"] for line in history],
+                         ["take-1", "take-2"])
+        for line in history:
+            self.assertEqual(line["path"], "outbox/recovered")
+            self.assertIs(line["metrics"]["insertion_verified"], False)
+            self.assertEqual(line["metrics"]["insertion_reason"],
+                             "interrupted")
+        # Recovering an id the outbox already holds makes no second copy.
+        coordinator.keep("take-2", "Ship it Friday.", paste_attempted=True)
+        self.assertEqual(coordinator.recoverable_count(), 2)
+
+    def test_an_entry_that_cannot_be_recorded_stays_journaled(self):
+        coordinator = InsertionCoordinator()
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder, coordinator=coordinator)
+
+            def full_disk(_entry):
+                raise OSError("no space left on device")
+
+            ns["_append_transcript_entry"] = full_disk
+            ns["journal_dictation"](
+                "take-1", raw="keep me", text="Keep me.", bundle="app",
+                mode="capture", language="en", stage="pasting")
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+            self.assertEqual(len(self.entries(ns)), 1)
+        self.assertEqual(coordinator.recoverable_count(), 0)
+
+    def test_recovery_of_one_dictation_leaves_the_others(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            for event_id in ("take-1", "take-2"):
+                ns["journal_dictation"](
+                    event_id, raw=event_id, text="", bundle="app",
+                    mode="capture", language="en", stage="recognized")
+            self.assertEqual(
+                ns["recover_journaled_dictations"](only="take-2"), 1)
+            self.assertEqual([entry["id"] for entry in self.entries(ns)],
+                             ["take-1"])
+
+    def test_a_damaged_journal_never_stops_a_dictation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["DELIVERY_JOURNAL_FILE"].write_text("{not json", "utf-8")
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+            self.assertTrue(ns["journal_dictation"](
+                "take-1", raw="still here", text="", bundle="app",
+                mode="capture", language="en", stage="recognized"))
+            self.assertEqual(len(self.entries(ns)), 1)
+
+    def test_the_journal_stays_bounded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["DELIVERY_JOURNAL_MAX"] = 3
+            for index in range(5):
+                ns["journal_dictation"](
+                    f"take-{index}", raw="x", text="", bundle="app",
+                    mode="capture", language="en", stage="recognized")
+            self.assertEqual([entry["id"] for entry in self.entries(ns)],
+                             ["take-2", "take-3", "take-4"])
+
+
+class StartupRecoveryTests(unittest.TestCase):
+    """What a stop left in the journal is given back before anything can
+    dictate again."""
+
+    def test_main_recovers_the_journal_before_dictation_can_start(self):
+        main = next(node for node in TREE.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "main")
+        calls = [node.func.id for node in ast.walk(main)
+                 if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)]
+        self.assertIn("recover_journaled_dictations", calls)
+        source = ast.unparse(main)
+        recover = source.index("recover_journaled_dictations()")
+        for later in ("apply_speech_runtime()", "SERVER_ONLY",
+                      "hotkey_worker"):
+            with self.subTest(later=later):
+                self.assertLess(recover, source.index(later))
+        self.assertGreater(recover, source.index("ensure_single_instance()"))
+
+
+class DictationKillTests(unittest.TestCase):
+    """A stop at any stage of a dictation loses no words.
+
+    The real ``finish_and_process`` runs over the real commit path with a
+    real journal in a temporary folder. A step is made to stop the process
+    the way a kill does; the next start's recovery must then give the words
+    back. A dictation that finishes leaves nothing behind.
+    """
+
+    def run_dictation(self, folder, *, stop_at=None, fail_at=None):
+        coordinator = InsertionCoordinator()
+        journal, history = DeliveryJournalTests().journal(
+            folder, coordinator=coordinator)
+
+        def stop(*_args, **_kwargs):
+            raise ProcessStopped()
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("synthetic failure")
+
+        overrides = {name: journal[name] for name in (
+            "journal_dictation", "settle_journaled_dictation",
+            "recover_journaled_dictations")}
+        step = {"cleanup": "apply_vocabulary_casing", "paste": "paste",
+                "history": "append_transcript"}
+        if stop_at:
+            overrides[step[stop_at]] = stop
+        if fail_at:
+            overrides[step[fail_at]] = fail
+        seen = UncheckedPasteDeliveryTests().deliver(
+            "verified", coordinator=coordinator, overrides=overrides,
+            expect_failure=bool(fail_at))
+        return seen, journal, history, coordinator
+
+    def test_a_finished_dictation_leaves_the_journal_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            seen, journal, _history, _coordinator = self.run_dictation(folder)
+            self.assertEqual(len(seen.records), 1)
+            self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+
+    def test_a_stop_at_any_stage_loses_no_words(self):
+        spoken = UncheckedPasteDeliveryTests.SPOKEN
+        for stage, attempted in (("cleanup", False), ("paste", True),
+                                 ("history", True)):
+            with self.subTest(stage=stage), \
+                    tempfile.TemporaryDirectory() as folder:
+                seen, journal, history, _old = self.run_dictation(
+                    folder, stop_at=stage)
+                self.assertTrue(seen.stopped)
+                self.assertEqual(seen.records, [])
+                [entry] = DeliveryJournalTests.entries(journal)
+                self.assertIn("station", entry["clean"] or entry["raw"])
+                # The next start: a new process with an empty outbox.
+                coordinator = InsertionCoordinator()
+                journal["INSERTION_COORDINATOR"] = coordinator
+                self.assertEqual(journal["recover_journaled_dictations"](), 1)
+                [kept] = coordinator.recoverable()
+                self.assertEqual(kept.text.strip(" ."), spoken.strip(" ."))
+                self.assertEqual(kept.receipt.paste_attempted, attempted)
+                self.assertEqual(history[-1]["path"], "outbox/recovered")
+                self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+
+    def test_a_failure_before_the_paste_keeps_the_words_now(self):
+        with tempfile.TemporaryDirectory() as folder:
+            seen, journal, history, coordinator = self.run_dictation(
+                folder, fail_at="cleanup")
+            self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+        self.assertEqual(seen.caption.get("text"),
+                         "Dictation failed — saved in Voice Outbox")
+        [kept] = coordinator.recoverable()
+        self.assertIn("station", kept.text)
+        self.assertEqual(history[-1]["path"], "outbox/recovered")
+
+
+class SaidWordsDeliveryTests(unittest.TestCase):
+    """A proven plain dictation keeps its raw words for "Replace with What
+    You Said"; one whose clean-up changed nothing has none to offer."""
+
+    def test_a_cleaned_dictation_offers_its_raw_words(self):
+        seen = UncheckedPasteDeliveryTests().deliver(
+            "verified", spoken="um, meet me at the station")
+        [record] = [item for item in seen.undoable if item is not None]
+        self.assertNotEqual(record.inserted.strip(),
+                            "um, meet me at the station")
+        self.assertEqual(record.said.strip(), "um, meet me at the station")
+
+    def test_an_unchanged_dictation_has_nothing_to_offer(self):
+        seen = UncheckedPasteDeliveryTests().deliver("verified")
+        [record] = [item for item in seen.undoable if item is not None]
+        self.assertEqual(record.said, "")
+
+
+class HistoryReceiptTests(unittest.TestCase):
+    """The receipt the history shows is read from what the real delivery
+    path wrote, so the two cannot drift apart."""
+
+    def test_each_delivery_outcome_reaches_the_history_as_its_receipt(self):
+        classify = load_definitions(
+            "transcript_receipt",
+            extra={"ReceiptReason": ReceiptReason,
+                   "ReceiptState": ReceiptState})["transcript_receipt"]
+        for outcome, expected in (
+                ("verified", "proven"),
+                ("position-exact", "position"),
+                ("unchecked", "unchecked"),
+                ("conflict", "unconfirmed"),
+                ("readback-empty", "unconfirmed"),
+                ("destination-changed", "not_pasted")):
+            with self.subTest(outcome=outcome):
+                seen = UncheckedPasteDeliveryTests().deliver(outcome)
+                [record] = seen.records
+                self.assertEqual(
+                    classify({"metrics": record.metrics}), expected)
+        windows = UncheckedPasteDeliveryTests().deliver(
+            "verified", is_macos=False)
+        self.assertEqual(
+            classify({"metrics": windows.records[0].metrics}), "unchecked")
+
+
 class UncheckedPasteDeliveryTests(unittest.TestCase):
     """A paste that was sent and could not be read back is not an error.
 
@@ -17490,12 +17988,15 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
     def deliver(self, outcome, *, snippet=None, is_macos=True,
                 paused=False, route="standard", spoken=None,
                 coordinator=None, utterance="take-1", recording=None,
-                spoken_edits=False, force_position=False):
+                spoken_edits=False, force_position=False, overrides=None,
+                expect_failure=False):
         """One dictation with a named delivery outcome; what it did.
 
         ``force_position`` makes the commit report a check by position
         whatever the field is, so that what a check by position may not
         unlock is seen even where the text could have been read.
+        ``overrides`` replaces collaborators by name once the rest is
+        built: a real delivery journal, or a step that stops the process.
         """
         spoken = self.SPOKEN if spoken is None else spoken
         seen = SimpleNamespace(
@@ -17698,6 +18199,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         ns["_ax_character_count"] = lambda _element: field["count"]
         ns["PREFERENCES"]["spoken_edit_commands"] = spoken_edits
         ns["LAST_INSERTION"] = None
+        ns.update(overrides or {})
         if force_position:
             ns["position_check_applies"] = lambda *_args: True
             ns["position_readback"] = lambda *_args: (
@@ -17760,11 +18262,18 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         hud = SimpleNamespace(showMode_=seen.modes.append)
         # ``recording`` is a newer take the hotkey worker is recording
         # while this one finishes.
-        ns["finish_and_process"](recorder, hud, {"rec": recording})
+        seen.stopped = False
+        try:
+            ns["finish_and_process"](recorder, hud, {"rec": recording})
+        except ProcessStopped:
+            # A step an override made stop the process, as a kill would.
+            seen.stopped = True
         for log in seen.logs:
-            # The harness must never pass by the pipeline falling over.
+            # The harness must never pass by the pipeline falling over,
+            # unless the test made it fall over on purpose.
             self.assertNotIn("follow-up failed", log)
-            self.assertNotIn("dictation failed during", log)
+            if not expect_failure:
+                self.assertNotIn("dictation failed during", log)
         seen.recorder = recorder
         seen.receipt = recorder.insertion_receipt
         seen.text = getattr(recorder, "committed_text", None)

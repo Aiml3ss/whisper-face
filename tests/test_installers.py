@@ -30,6 +30,7 @@ PERSONAL_FILES = (
     "preferences.json",
     "learned.json",
     "transcripts.jsonl",
+    "delivery_journal.json",
     "voice_inbox.json",
     "demonstrations.json",
     "acoustic_keyword_memory.json",
@@ -442,6 +443,11 @@ class InstallerContractTests(unittest.TestCase):
             for target in unconditional:
                 with self.subTest(personal=personal, target=target):
                     self.assertNotIn(personal, target)
+        # They hold the person's words: none of them may ever be committed.
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for personal in PERSONAL_FILES:
+            with self.subTest(personal=personal, gitignored=True):
+                self.assertIn(f"\n{personal}\n", ignored)
         # The prompt has to say plainly what these files are.
         for installer in (mac_personal, windows_personal):
             self.assertIn("your words and your corrections", installer)

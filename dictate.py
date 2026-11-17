@@ -421,6 +421,7 @@ from insertion_integrity import (  # noqa: E402
     InsertionCoordinator,
     InsertionLease,
     ReadbackResult,
+    ReceiptReason,
     ReceiptState,
     position_check,
     position_count,
@@ -891,6 +892,10 @@ PARAKEET_RUNTIME_PINNED = bool(
 PARAKEET_RUNTIME_HELPER = HERE / ".models" / "bin" / "parrot-speech-runtime"
 DICTIONARY_FILE = HERE / "dictionary.txt"
 TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
+# Dictations recognised and not yet settled: written before any paste, emptied
+# once the history line is written. What a stop leaves here is recovered at
+# the next start (``recover_journaled_dictations``).
+DELIVERY_JOURNAL_FILE = HERE / "delivery_journal.json"
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
 ACOUSTIC_KEYWORD_MEMORY_FILE = HERE / "acoustic_keyword_memory.json"
 ACOUSTIC_KEYWORD_ACTIVATION_FILE = (
@@ -1455,6 +1460,12 @@ GLOSS = {
 
 # Serializes transcript-log writes against the learning loop's trim rewrite.
 TRANSCRIPTS_LOCK = threading.Lock()
+# Serializes the delivery journal's read-modify-write. Taken before
+# TRANSCRIPTS_LOCK when both are held, never after it.
+DELIVERY_JOURNAL_LOCK = threading.Lock()
+# Dictations in flight at once are a handful; a journal past this keeps its
+# newest entries, so a settle that keeps failing cannot grow it without end.
+DELIVERY_JOURNAL_MAX = 50
 
 # Last moment the user touched dictation (press or finished processing);
 # gates the learn pass and the keep-warm heartbeat.
@@ -2555,6 +2566,17 @@ def voice_outbox_menu_title(count, needs_home=None) -> str:
             return (f"Voice Outbox — {needs_home} recoverable, "
                     f"{count - needs_home} pasted")
     return f"Voice Outbox — {count} recoverable"
+
+
+SAID_MENU_TITLE = "Replace with What You Said"
+
+
+def said_menu_title(status) -> str:
+    """Name the raw-words row; say why when there is nothing to put back."""
+    if (isinstance(status, dict) and status.get("available")
+            and not status.get("said_available")):
+        return f"{SAID_MENU_TITLE} — clean-up changed nothing"
+    return SAID_MENU_TITLE
 
 
 def undo_menu_title(status, hotkey_label: str = "") -> str:
@@ -3998,6 +4020,12 @@ class StatusBar(NSObject):
         # title carries a length and an app — never any dictated text.
         self.undo_item = mk("Undo Last Dictation", "undoLastDictation:")
         self.undo_item.setHidden_(True)
+        # Beside Undo and only with it: the raw transcript put back where
+        # the cleaned text stands. Dimmed, saying why, when clean-up
+        # changed nothing.
+        self.said_item = mk(
+            SAID_MENU_TITLE, "replaceWithWhatYouSaid:")
+        self.said_item.setHidden_(True)
         # Recent dictations are off by default and stay metadata-only until
         # an explicit reveal, exactly like the Voice Inbox.
         self.recent_root = mk("Recent Dictations", None)
@@ -4036,6 +4064,7 @@ class StatusBar(NSObject):
         menu.addItem_(self.faces_root)
         menu.addItem_(self.recognition_item)
         menu.addItem_(self.undo_item)
+        menu.addItem_(self.said_item)
         menu.addItem_(self.recent_root)
         menu.addItem_(self.voice_outbox_item)
         menu.addItem_(self.voice_inbox_item)
@@ -4194,10 +4223,27 @@ class StatusBar(NSObject):
         self.undo_item.setTitle_(undo_menu_title(
             status, hotkey_label_for(UNDO_HOTKEY_NAME)))
         self.undo_item.setEnabled_(bool(status["available"]))
+        self.said_item.setHidden_(not status["available"])
+        self.said_item.setTitle_(said_menu_title(status))
+        self.said_item.setEnabled_(bool(status.get("said_available")))
 
     def undoLastDictation_(self, sender):
         """Run the undo transaction off the main thread; it synthesizes keys."""
         threading.Thread(target=undo_last_dictation, daemon=True).start()
+
+    def replaceWithWhatYouSaid_(self, sender):
+        """Put the raw words back, off the main thread like Undo; a refusal
+        comes back to the main thread to be said."""
+        threading.Thread(
+            target=replace_with_what_you_said,
+            args=(self.show_said_refusal,), daemon=True).start()
+
+    def show_said_refusal(self, detail):
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(SAID_MENU_TITLE)
+        alert.setInformativeText_(str(detail))
+        alert.addButtonWithTitle_("OK")
+        alert.runModal()
 
     def rebuild_recent_dictations(self):
         """Rebuild the metadata-only recent list from the log on disk.
@@ -6660,7 +6706,9 @@ def runtime_status_snapshot() -> dict:
     outbox_summary = ""
     if outbox_needs_home:
         outbox_summary = (
-            "Paste may have landed — verify before reusing"
+            "Kept when Whisper Face stopped — check before reusing"
+            if outbox_needs_home[-1].reason == ReceiptReason.INTERRUPTED
+            else "Paste may have landed — verify before reusing"
             if outbox_needs_home[-1].paste_attempted
             else "Not pasted — destination changed")
     elif outbox:
@@ -7574,6 +7622,11 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
         entry["id"] = event_id
     if metrics:
         entry["metrics"] = metrics
+    _append_transcript_entry(entry)
+
+
+def _append_transcript_entry(entry: dict):
+    """Append one finished history line, owner-only, then apply retention."""
     with TRANSCRIPTS_LOCK:
         fd = os.open(
             TRANSCRIPTS_FILE,
@@ -7598,6 +7651,182 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
     _rebase_learned_processed(dropped)
     with USAGE_CACHE["lock"]:
         USAGE_CACHE["at"] = 0.0
+
+
+# ---- Delivery journal -------------------------------------------------------
+# A dictation is written here, owner-only and atomically, before anything is
+# pasted, and leaves once its history line is written. Between the two it
+# exists on disk, so a crash, a hang or a kill between recognition and the
+# history line cannot take the words with it. What the journal still holds at
+# the next start is recovered: into the history as not delivered, and into
+# the Voice Outbox, where Copy & Dismiss offers it.
+# Stages: "recognized" (the clean-up has not run; only the raw words exist)
+# and "pasting" (the final text, written just before the one paste attempt).
+
+
+def _read_delivery_journal_locked() -> list[dict]:
+    """The journal's entries; the caller holds DELIVERY_JOURNAL_LOCK."""
+    try:
+        payload = json.loads(
+            DELIVERY_JOURNAL_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as error:
+        # Every write is atomic, so this is damage from outside. It must not
+        # stop a dictation; the next write replaces it.
+        print(f"! delivery journal unreadable: {type(error).__name__}")
+        return []
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries
+            if isinstance(entry, dict)
+            and isinstance(entry.get("id"), str) and entry["id"]]
+
+
+def _write_delivery_journal_locked(entries: list[dict]) -> None:
+    """Replace the journal atomically; an empty one leaves no file."""
+    if not entries:
+        try:
+            DELIVERY_JOURNAL_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    atomic_write_text(
+        DELIVERY_JOURNAL_FILE,
+        json.dumps({"version": 1,
+                    "entries": entries[-DELIVERY_JOURNAL_MAX:]}),
+        mode=0o600)
+
+
+def journal_dictation(event_id: str, *, raw: str, text: str, bundle: str,
+                      mode: str, language: str, stage: str) -> bool:
+    """Record one dictation on disk before anything is pasted.
+
+    Called once the words are recognised (``stage="recognized"``, no clean
+    text yet) and again with the final text just before the paste
+    (``stage="pasting"``); the second replaces the first and keeps its time.
+    A failed write is reported and the dictation goes on: the journal is a
+    safety net, never a reason to withhold a paste.
+    """
+    if not isinstance(event_id, str) or not event_id:
+        return False
+    entry = {
+        "id": event_id,
+        "ts": time.time(),
+        # The same identity the history keeps: on Windows a digest of the
+        # window title, never the title, so no document name reaches disk.
+        "app": transcript_app_identity(bundle),
+        "raw": str(raw or ""),
+        "clean": str(text or ""),
+        "mode": str(mode or "capture"),
+        "language": str(language or LANGUAGE_DEFAULT),
+        "stage": "pasting" if stage == "pasting" else "recognized",
+    }
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        for existing in entries:
+            if existing.get("id") == event_id:
+                entry["ts"] = existing.get("ts", entry["ts"])
+        entries = [existing for existing in entries
+                   if existing.get("id") != event_id]
+        entries.append(entry)
+        try:
+            _write_delivery_journal_locked(entries)
+        except OSError as error:
+            print(f"! delivery journal write failed: {type(error).__name__}")
+            return False
+    return True
+
+
+def settle_journaled_dictation(event_id: str) -> None:
+    """Remove one dictation from the journal: its outcome is recorded."""
+    if not isinstance(event_id, str) or not event_id:
+        return
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        remaining = [entry for entry in entries
+                     if entry.get("id") != event_id]
+        if len(remaining) == len(entries):
+            return
+        try:
+            _write_delivery_journal_locked(remaining)
+        except OSError as error:
+            # The entry stays, and is recovered as not delivered at the next
+            # start: a duplicate copy, never a lost one.
+            print(f"! delivery journal settle failed: {type(error).__name__}")
+
+
+def recover_journaled_dictations(only: str | None = None,
+                                 coordinator=None) -> int:
+    """Give back what the journal holds; return how many were recovered.
+
+    At start-up ``only`` is None and every entry is recovered: Whisper Face
+    stopped before it recorded what became of them. During a dictation that
+    failed before its paste, ``only`` names that one. Each entry is written to
+    the history as not delivered, kept in the Voice Outbox, and only then
+    removed from the journal; one whose history line cannot be written stays
+    for the next try. Nothing is pasted, and no text is printed.
+    """
+    coordinator = coordinator or INSERTION_COORDINATOR
+    recovered: set[str] = set()
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        for entry in entries:
+            event_id = entry["id"]
+            if only is not None and event_id != only:
+                continue
+            raw = entry.get("raw") if isinstance(entry.get("raw"), str) \
+                else ""
+            clean = entry.get("clean") \
+                if isinstance(entry.get("clean"), str) else ""
+            text = clean if clean.strip() else raw
+            if not text.strip():
+                recovered.add(event_id)
+                continue
+            attempted = entry.get("stage") == "pasting"
+            try:
+                at = float(entry.get("ts"))
+            except (TypeError, ValueError):
+                at = time.time()
+            app = entry.get("app") if isinstance(entry.get("app"), str) \
+                else ""
+            mode = str(entry.get("mode") or "capture")
+            path = "outbox/recovered" if mode == "capture" \
+                else f"outbox/{mode}/recovered"
+            try:
+                _append_transcript_entry({
+                    "ts": at, "app": app, "raw": raw, "clean": text,
+                    "path": path,
+                    "language": str(entry.get("language")
+                                    or LANGUAGE_DEFAULT),
+                    "id": event_id,
+                    "metrics": {
+                        "insertion_state": ReceiptState.UNRESOLVED.value,
+                        "insertion_reason": ReceiptReason.INTERRUPTED.value,
+                        "paste_attempted": attempted,
+                        "insertion_verified": False,
+                        "recovered": True,
+                    },
+                })
+            except OSError as error:
+                print("! recovered dictation not written to history: "
+                      f"{type(error).__name__}")
+                continue
+            coordinator.keep(event_id, text, paste_attempted=attempted)
+            recovered.add(event_id)
+        if recovered:
+            try:
+                _write_delivery_journal_locked([
+                    entry for entry in entries
+                    if entry["id"] not in recovered])
+            except OSError as error:
+                print("! delivery journal not emptied after recovery: "
+                      f"{type(error).__name__}")
+    if recovered:
+        print(f"[journal] {len(recovered)} dictation(s) were not delivered "
+              "before Whisper Face stopped; kept in Voice Outbox")
+    return len(recovered)
 
 
 def _ollama_stream_reply(response, deadline: float,
@@ -7628,6 +7857,42 @@ def _ollama_stream_reply(response, deadline: float,
 
 
 RECENT_DICTATION_LIMIT = 10
+
+# What became of one dictation, as the history can prove it: a closed
+# vocabulary the window words, read from the receipt fields each history line
+# already carries. Never from the text.
+TRANSCRIPT_RECEIPTS = frozenset({
+    "proven",        # read back from the field: it is in the document
+    "position",      # checked by where the cursor went
+    "unchecked",     # pasted where nothing could be read back
+    "not_pasted",    # never pasted; a copy went to the Voice Outbox
+    "unconfirmed",   # pasted, and the check failed; a copy went there too
+    "interrupted",   # Whisper Face stopped first; recovered at the next start
+    "unknown",       # written before receipts were recorded
+})
+
+
+def transcript_receipt(entry: dict) -> str:
+    """Classify one history line's delivery into ``TRANSCRIPT_RECEIPTS``."""
+    metrics = entry.get("metrics") if isinstance(entry, dict) else None
+    if not isinstance(metrics, dict) or "insertion_state" not in metrics:
+        return "unknown"
+    if metrics.get("insertion_reason") == ReceiptReason.INTERRUPTED.value:
+        return "interrupted"
+    state = metrics.get("insertion_state")
+    if state == ReceiptState.VERIFIED.value:
+        return ("position" if metrics.get("insertion_reason")
+                == "commit_verified_position" else "proven")
+    if state == "legacy":
+        # No lease: pasted the way the app did before receipts (Windows).
+        return "unchecked"
+    if metrics.get("paste_attempted") is False:
+        return "not_pasted"
+    if (state == ReceiptState.UNVERIFIABLE.value
+            and metrics.get("insertion_opaque_reason") is not None):
+        # The field hid its text from the start: nothing to compare.
+        return "unchecked"
+    return "unconfirmed"
 
 
 def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
@@ -7679,6 +7944,7 @@ def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
                 0.0, (time.time() if now is None else float(now)) - at),
             "words": len(text.split()),
             "app": namer(bundle) if bundle else "",
+            "receipt": transcript_receipt(entry),
         })
     return out
 
@@ -11428,6 +11694,11 @@ class UndoableInsertion:
     inserted: str
     before: str
     selection: tuple[int, int]
+    # What was said, as the recogniser heard it and before any clean-up,
+    # with the inserted text's joining whitespace. Empty when there is no
+    # other form to offer: a mode whose words were an instruction, or a
+    # clean-up that changed nothing.
+    said: str = ""
 
     @property
     def replaced(self) -> str:
@@ -11474,16 +11745,24 @@ UNDO_COORDINATOR = InsertionCoordinator()
 
 def build_undoable_insertion(rec, snapshot: "FocusSnapshot | None",
                              bundle: str,
-                             utterance_id: str) -> "UndoableInsertion | None":
+                             utterance_id: str,
+                             said: str = "") -> "UndoableInsertion | None":
     """Describe an undoable insertion, or None when nothing can be restored.
 
     A destination whose text or selection Accessibility would not report has
     no recorded prior state, so there is nothing honest to put back and undo
-    stays unavailable rather than guessing.
+    stays unavailable rather than guessing. ``said`` is the raw transcript,
+    offered back by "Replace with What You Said" when it differs from what
+    was inserted; it takes the inserted text's leading join whitespace.
     """
     inserted = getattr(rec, "committed_text", None)
     if not isinstance(inserted, str) or not inserted:
         return None
+    spoken = said.strip() if isinstance(said, str) else ""
+    if spoken:
+        spoken = inserted[:len(inserted) - len(inserted.lstrip())] + spoken
+    if spoken == inserted:
+        spoken = ""
     if snapshot is None or snapshot.text is None or snapshot.selection is None:
         return None
     start, length = snapshot.selection
@@ -11500,6 +11779,7 @@ def build_undoable_insertion(rec, snapshot: "FocusSnapshot | None",
         inserted=inserted,
         before=snapshot.text,
         selection=(int(start), int(length)),
+        said=spoken,
     )
 
 
@@ -11514,11 +11794,14 @@ def undoable_insertion_status() -> dict:
     with UNDOABLE_INSERTION["lock"]:
         record = UNDOABLE_INSERTION["record"]
     if record is None:
-        return {"available": False, "characters": 0, "app": ""}
+        return {"available": False, "characters": 0, "app": "",
+                "said_available": False}
     return {
         "available": True,
         "characters": len(record.inserted),
         "app": app_display_name(record.bundle) if record.bundle else "",
+        # Whether "Replace with What You Said" has anything to put back.
+        "said_available": bool(record.said),
     }
 
 
@@ -11541,6 +11824,47 @@ def utterance_was_undone(utterance_id: str) -> bool:
 def undo_refusal(reason: str) -> dict:
     """One shape for every refusal: a state and a reason, never any text."""
     return {"undone": False, "reason": reason}
+
+
+# Why "Replace with What You Said" did nothing, in the words the person sees.
+# Every reason leaves the field exactly as it was, except the last group,
+# where the replacement was sent and could not be checked.
+SAID_UNDO_REASONS = {
+    "nothing_to_undo": "There is no dictation to change back.",
+    "nothing_to_change": "Clean-up changed nothing in that dictation.",
+    "too_long_to_undo": "That dictation is too long to change back safely.",
+    "already_undone": "That dictation was already changed back.",
+    "focus_drift": "You are in a different place now. Nothing was changed.",
+    "selection_drift": (
+        "The cursor moved since the dictation. Nothing was changed."),
+    "surrounding_text_drift": (
+        "The text there changed since the dictation. Nothing was changed."),
+    "target_unreadable": (
+        "Whisper Face cannot read that field now. Nothing was changed."),
+}
+SAID_UNDO_UNCHECKED = (
+    "Your words were put back, but Whisper Face could not check them. "
+    "Look at the field.")
+
+
+def said_undo_refusal_text(reason: str) -> str:
+    """Plain words for why the raw words were not put back."""
+    return SAID_UNDO_REASONS.get(str(reason or ""), SAID_UNDO_UNCHECKED)
+
+
+def replace_with_what_you_said(presenter=None, *, undo=None) -> dict:
+    """Run "Replace with What You Said" and say why when it did nothing.
+
+    ``presenter`` is handed the plain-words reason on the main thread; the
+    log gets the closed reason name only, never any text.
+    """
+    result = (undo or undo_last_dictation)(said=True)
+    if not result.get("undone"):
+        reason = str(result.get("reason") or "")
+        print(f"[undo] what was said was not put back ({reason})")
+        if presenter is not None:
+            AppHelper.callAfter(presenter, said_undo_refusal_text(reason))
+    return result
 
 
 def _grapheme_attaches(character: str) -> bool:
@@ -11661,7 +11985,8 @@ def _ax_select_text_range(element, text: str, selection: tuple[int, int],
 @with_cocoa_pool
 def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                         coordinator=None, presser=None, paster=None,
-                        readback=None, selector=None) -> dict:
+                        readback=None, selector=None,
+                        said: bool = False) -> dict:
     """Put the destination back exactly as it was before the last insertion.
 
     Undo is an insertion in reverse and is held to the same standard: it
@@ -11670,6 +11995,11 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
     readback, and reports the same content-free receipt vocabulary. If focus
     moved, the caret moved, or the surrounding text changed, it refuses and
     says which, rather than deleting whatever happens to be there now.
+
+    With ``said`` it is "Replace with What You Said": the same transaction,
+    with the raw transcript put where the cleaned text was instead of the
+    text the dictation replaced. Proven, it leaves the raw words undoable in
+    turn, so one more undo still takes the whole dictation away.
     """
     snapshot_reader = snapshot_reader or focused_snapshot
     bundle_reader = bundle_reader or frontmost_bundle
@@ -11682,10 +12012,16 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
         record = UNDOABLE_INSERTION["record"]
         if record is None:
             return undo_refusal("nothing_to_undo")
+        if said and not record.said:
+            return undo_refusal("nothing_to_change")
         if len(record.inserted) > UNDO_MAX_CHARACTERS:
             return undo_refusal("too_long_to_undo")
 
-    undo_id = undo_utterance_id(record.utterance_id)
+    # What goes where the dictation stands: the text it replaced, or what
+    # was said. Each has its own id, so each can happen once.
+    replacement = record.said if said else record.replaced
+    undo_id = (f"said:{record.utterance_id}" if said
+               else undo_utterance_id(record.utterance_id))
     lease = InsertionLease.capture(
         undo_id,
         record.destination_id,
@@ -11710,7 +12046,7 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
             return undo_refusal("nothing_to_undo")
         UNDOABLE_INSERTION["record"] = None
     try:
-        coordinator.stage(lease, record.replaced)
+        coordinator.stage(lease, replacement)
     except ValueError:
         # Already staged: this insertion has been undone once already.
         return undo_refusal("already_undone")
@@ -11744,13 +12080,14 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                 text=record.expected,
                 selection=record.inserted_range,
             ),
-            record.replaced,
+            replacement,
             timeout=READBACK_TIMEOUT,
         )
 
     receipt = coordinator.commit(undo_id, observation, perform, prove)
-    # What undo staged is the text the dictation replaced, never something
-    # waiting to be delivered, so no payload outlives the attempt.
+    # What undo staged is the text the dictation replaced, or the words that
+    # were said, never something waiting to be delivered, so no payload
+    # outlives the attempt.
     coordinator.acknowledge(undo_id)
     if receipt.state == ReceiptState.VERIFIED:
         # Suppress before announcing: the correction watcher may still be
@@ -11760,7 +12097,23 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
         if LAST_INSERTION is not None \
                 and LAST_INSERTION.get("utterance_id") == record.utterance_id:
             LAST_INSERTION = None
-        print(f"[undo] restored ({receipt.log_reason})")
+        if said:
+            # The raw words now stand where the dictation did, proven by
+            # readback, so they can be undone like any insertion.
+            with UNDOABLE_INSERTION["lock"]:
+                if UNDOABLE_INSERTION["record"] is None:
+                    UNDOABLE_INSERTION["record"] = UndoableInsertion(
+                        element=record.element,
+                        bundle=record.bundle,
+                        destination_id=record.destination_id,
+                        utterance_id=undo_id,
+                        inserted=record.said,
+                        before=record.before,
+                        selection=record.selection,
+                    )
+            print(f"[undo] put back what was said ({receipt.log_reason})")
+        else:
+            print(f"[undo] restored ({receipt.log_reason})")
         return {"undone": True, "reason": receipt.reason.value}
     if receipt.paste_attempted:
         # The substitution ran but could not be proven. The field was still
@@ -14005,6 +14358,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     dispatched_at = time.perf_counter()
     phase = "capture-finalize"
     delivery_reported = False
+    # The id under which this dictation's words are in the delivery journal,
+    # once they are; whether its one paste has been attempted; and whether a
+    # failure must leave the entry for the next start to recover.
+    journaled = ""
+    insertion_committed = False
+    keep_journal = False
+    # Whatever was already being handled when this began, so the ``finally``
+    # below can tell it from something escaping this function.
+    handling_already = sys.exc_info()[1]
     try:
         full_audio, cut, chunk_futs, pre_future, tail_done_at = \
             capture_release(rec)
@@ -14238,6 +14600,16 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                   f"asr {t_asr:.2f}s]")
             return
 
+        # Journal before paste: from here on the words are on disk, owner
+        # only, until the history line records what became of them. The
+        # clean-up below can take seconds; a stop during it, or anywhere up
+        # to the history line, leaves them for the next start to recover.
+        event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
+        if journal_dictation(
+                event_id, raw=recognized_raw, text="", bundle=bundle,
+                mode=rec.mode, language=rec.language, stage="recognized"):
+            journaled = event_id
+
         # Inline snippet expansion is additive to the whole-utterance command
         # handled above: the same cue inside a longer dictation ("send it to
         # insert my address and say thanks") expands only the cue while the
@@ -14455,12 +14827,19 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             insertion_target = resolve_insertion_target(rec)
         else:
             insertion_target = focused_snapshot() if learn_correction else None
-        event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
+        # The final text replaces the raw words in the journal before the
+        # one paste attempt, so what a stop leaves behind is what would have
+        # been pasted, marked as possibly sent.
+        if journal_dictation(
+                event_id, raw=recognized_raw, text=text, bundle=bundle,
+                mode=rec.mode, language=rec.language, stage="pasting"):
+            journaled = event_id
         phase = "insertion"
         insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
         receipt_at = time.perf_counter()
+        insertion_committed = True
         t_insert = receipt_at - insertion_started_at
         receipt = committed_paste_receipt(
             rec, insertion_target, text, bundle, rec.mode, event_id) \
@@ -14504,8 +14883,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # A new dictation replaces whatever was undoable; a destination
             # the runtime could not read is not undoable at all, because
             # there is no prior state to restore.
+            # Only a plain dictation offers its raw words back: in the
+            # rewriting modes they were an instruction, and in code mode
+            # spoken symbols, not the text anyone wants in place.
             record_undoable_insertion(build_undoable_insertion(
-                rec, insertion_target, bundle, event_id)
+                rec, insertion_target, bundle, event_id,
+                said=recognized_raw if rec.mode == "capture" else "")
                 if text_verified else None)
         elif integrity_receipt.pasted_unchecked:
             # Sent into an app that hides its text, so there was never
@@ -14802,13 +15185,37 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             print(
                 f"! post-delivery follow-up failed: {type(error).__name__}")
         else:
+            # Words that were recognised and never reached the paste are
+            # not thrown away with the failure: they go to the Voice Outbox
+            # now. If even that fails they stay journaled for the next start.
+            kept = False
+            if journaled and not insertion_committed:
+                try:
+                    kept = recover_journaled_dictations(only=journaled) > 0
+                except Exception:
+                    kept = False
+                keep_journal = not kept
             report_dictation_problem(
                 rec,
                 hud,
-                "Dictation failed — try again",
+                "Dictation failed — saved in Voice Outbox" if kept
+                else "Dictation failed — try again",
                 f"! dictation failed during {phase}: {type(error).__name__}",
             )
     finally:
+        # Something that is not an ``Exception`` escaping (the interpreter
+        # going down, a thread being torn out) is a stop, not an outcome:
+        # the words stay journaled for the next start, as after a kill.
+        escaping = sys.exc_info()[1]
+        stopping = escaping is not None and escaping is not handling_already
+        if journaled and not keep_journal and not stopping:
+            # The history line is written (or the dictation was set aside on
+            # purpose), so the journal no longer needs to hold it.
+            try:
+                settle_journaled_dictation(journaled)
+            except Exception as error:
+                print("! delivery journal settle failed: "
+                      f"{type(error).__name__}")
         if rec.recording:
             try:
                 rec.stop()
@@ -15500,6 +15907,12 @@ def main():
         print(line)
     load_app_tones()
     load_preferences()
+    # Before anything can dictate: words a previous run recognised and never
+    # recorded the delivery of go to the history and the Voice Outbox.
+    try:
+        recover_journaled_dictations()
+    except Exception as error:
+        print(f"! delivery journal recovery failed: {type(error).__name__}")
     apply_speech_runtime()
     load_delayed_cleanup_activation()
     refresh_acoustic_calibration()

@@ -361,6 +361,42 @@ class InsertionIntegrityTests(unittest.TestCase):
         self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
 
 
+class RecoveredDictationTests(unittest.TestCase):
+    """What the delivery journal gives back at start-up is kept, not sent."""
+
+    def test_a_recovered_dictation_is_recoverable_and_never_pasted(self):
+        coordinator = InsertionCoordinator()
+        receipt = coordinator.keep("take-1", "Ship it", paste_attempted=False)
+        self.assertEqual(receipt.state, ReceiptState.UNRESOLVED)
+        self.assertEqual(receipt.reason, ReceiptReason.INTERRUPTED)
+        self.assertFalse(receipt.paste_attempted)
+        self.assertFalse(receipt.pasted_unchecked)
+        [item] = coordinator.recoverable()
+        self.assertEqual(item.text, "Ship it")
+        self.assertEqual(coordinator.needs_home_count(), 1)
+        # Terminal from the start: a commit cannot paste it.
+        pasted = []
+        again = coordinator.commit(
+            "take-1", DestinationObservation.capture("x", (0, 0), ""),
+            pasted.append, ReadbackResult.verified)
+        self.assertEqual(pasted, [])
+        self.assertEqual(again.reason, ReceiptReason.INTERRUPTED)
+
+    def test_keeping_a_known_id_twice_makes_no_second_copy(self):
+        coordinator = InsertionCoordinator()
+        coordinator.keep("take-1", "Ship it", paste_attempted=True)
+        coordinator.keep("take-1", "Ship it", paste_attempted=True)
+        self.assertEqual(coordinator.recoverable_count(), 1)
+        self.assertTrue(coordinator.acknowledge("take-1"))
+        coordinator.keep("take-1", "Ship it", paste_attempted=True)
+        self.assertEqual(coordinator.recoverable_count(), 0)
+
+    def test_blank_text_is_not_kept(self):
+        coordinator = InsertionCoordinator()
+        coordinator.keep("take-1", "   ", paste_attempted=False)
+        self.assertEqual(coordinator.recoverable_count(), 0)
+
+
 class ReadbackConflictShapeTests(unittest.TestCase):
     """A conflict has to say how it differed, without ever saying what."""
 
