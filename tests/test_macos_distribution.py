@@ -1220,6 +1220,22 @@ class DragInstallAppTests(unittest.TestCase):
         self.assertIn("does not carry the published source archive",
                       refused.stderr)
 
+    def test_a_developer_id_app_is_checked_program_by_program(self):
+        # codesign --verify --deep accepts an ad-hoc uv inside a Developer ID
+        # app, which notarization refuses, so a signed app's programs are
+        # each checked as well. No Developer ID exists here, so the signature
+        # checks are stood in for and only the call is proved.
+        app, result = self.package("program-by-program")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        module = load_launcher_tool()
+        checked = []
+        module._is_adhoc_signed = lambda _app: False
+        module._verify_pinned_signature = lambda _app, _policy: None
+        module._verify_release_programs = (
+            lambda app_path, policy: checked.append((app_path, policy)))
+        module.verify_drag_app(app)
+        self.assertEqual(checked, [(app.resolve(), module.DEFAULT_POLICY)])
+
     def test_a_source_archive_carrying_a_program_is_never_packaged(self):
         # Notarization would refuse the unsigned program inside the archive,
         # and signing it would change the published source.
