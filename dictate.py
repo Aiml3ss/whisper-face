@@ -734,6 +734,16 @@ PERFORMANCE_TRACE_SCHEMAS = {
         "release_ms", "asr_ms", "compiler_ms",
         "cleanup_ms", "context_ms", "insertion_ms",
     ),
+    # One per pasted dictation (release_path_metrics). The first eight are
+    # contiguous stages from the key-up event to the paste keystroke and add
+    # up to release_to_paste_ms, the headline; receipt_ms follows the paste;
+    # the last four are measured inside or beside those stages.
+    "release_path": (
+        "dispatch_ms", "tail_ms", "stop_ms", "asr_ms", "order_ms",
+        "compile_ms", "cleanup_ms", "pre_paste_ms", "release_to_paste_ms",
+        "receipt_ms", "asr_native_ms", "crosscheck_ms", "escalation_ms",
+        "audio_ms",
+    ),
 }
 CONSEQUENCE_RISK_IDS = frozenset({
     "name", "number", "currency", "date", "time", "recipient", "contact",
@@ -5495,6 +5505,7 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
     language = normalize_language(
         current_language() if language is None else language)
     segment = np.concatenate(frames).flatten()
+    fast_started_at = time.perf_counter()
     fast = ASR_POOL.submit(
         transcribe_detailed,
         segment,
@@ -5506,6 +5517,7 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
         # working cross-check.
         language=language,
     ).result()
+    fast_s = time.perf_counter() - fast_started_at
     if still_valid is not None and not still_valid():
         return fast
     # On Mac, the warm Parakeet batch path is both more accurate and faster
@@ -5528,6 +5540,9 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
         crosscheck_text=fast.text or None, language=language).result()
     if fast.text and fast.text != accurate.text:
         accurate.alternative = fast.text
+    if getattr(accurate, "crosscheck_s", None) is None and fast.text:
+        # Tiny's pass above was this decode's cross-check.
+        accurate.crosscheck_s = fast_s
     return accurate
 
 
@@ -8878,21 +8893,33 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     duration = len(audio) / SAMPLE_RATE
     helper_future = PARAKEET_IO_POOL.submit(PARAKEET.transcribe, audio)
     tiny_text = crosscheck_text
-    if (tiny_text is None and verify and PARAKEET_CROSSCHECK
-            and duration <= PARAKEET_CROSSCHECK_MAX_SECONDS
-            and asr_model_is_cached(FAST_WHISPER_REPO)):
+    crosscheck_s = None
+    wants_crosscheck = (
+        tiny_text is None and verify and PARAKEET_CROSSCHECK
+        and duration <= PARAKEET_CROSSCHECK_MAX_SECONDS
+        and asr_model_is_cached(FAST_WHISPER_REPO))
+
+    def run_crosscheck():
+        nonlocal crosscheck_s
+        started_at = time.perf_counter()
         try:
             # English explicitly, rather than whatever the preference says:
             # this decode exists only to cross-check Parakeet, which is
             # reached for English alone, and the comparison means nothing if
             # the two engines decode different languages.
-            tiny_text = transcribe_detailed(
+            return transcribe_detailed(
                 audio, prompt, verify=False,
                 model_repo=FAST_WHISPER_REPO, language="en",
                 _prepared=True).text
         except Exception as error:
             print(f"! Tiny cross-check unavailable: {error}")
-            tiny_text = None
+            return None
+        finally:
+            crosscheck_s = time.perf_counter() - started_at
+
+    # Tiny runs here while the helper request waits on the I/O pool.
+    if wants_crosscheck:
+        tiny_text = run_crosscheck()
     parakeet = helper_future.result()
     if parakeet is None or not parakeet[0]:
         return None
@@ -8926,6 +8953,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         native_processing_s=_clean_native_processing_s(parakeet[1]),
         acoustic_confidence=getattr(parakeet, "avg_confidence", None),
         word_evidence_status=status,
+        crosscheck_s=crosscheck_s,
     )
     # Escalation needs a third engine. asr_decode_target would quietly decode
     # with Tiny when Turbo is not installed, and Tiny is the engine that just
@@ -8941,6 +8969,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         # an optional upgrade: if the decode itself fails, the primary
         # transcript must survive rather than turn a working dictation into a
         # dropped one.
+        escalation_started_at = time.perf_counter()
         try:
             fallback = transcribe_detailed(
                 audio, prompt, verify=False, model_repo=WHISPER_REPO,
@@ -8948,6 +8977,9 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         except Exception as error:
             print(f"! Turbo escalation unavailable: {error}")
             return recognition
+        finally:
+            recognition.escalation_s = (
+                time.perf_counter() - escalation_started_at)
         if not fallback.text:
             return recognition
         with_parakeet = crosscheck_agreement(text, fallback.text)
@@ -8958,6 +8990,8 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
             # Turbo's transcript is delivered, never Tiny's.
             fallback.alternative = text
             fallback.verified = True
+            fallback.crosscheck_s = recognition.crosscheck_s
+            fallback.escalation_s = recognition.escalation_s
             return fallback
         if fallback.text != text:
             recognition.alternative = fallback.text
@@ -10825,8 +10859,19 @@ def commit_insertion(rec, text: str, bundle: str,
     # separator included, so it is published here rather than reconstructed
     # from the pre-join text a caller happens to still be holding.
     rec.committed_text = text
+    rec.paste_posted_at = None
+
+    def paste_and_mark(staged: str):
+        """Paste, and note when the keystroke was posted (the release-path
+        trace's headline ends here)."""
+        paste(staged)
+        try:
+            rec.paste_posted_at = time.perf_counter()
+        except Exception:
+            pass    # timing only: it never stands in the way of a paste
+
     if lease is None:
-        paste(text)
+        paste_and_mark(text)
         PIPELINE_STATE["last_insertion_state"] = "legacy"
         rec.insertion_receipt = None
         return None
@@ -10872,7 +10917,7 @@ def commit_insertion(rec, text: str, bundle: str,
             getattr(rec, "focus_at_press", None),
             getattr(rec, "bundle_at_press", bundle),
         ),
-        paste,
+        paste_and_mark,
         readback,
     )
     PIPELINE_STATE["last_insertion_state"] = receipt.state.value
@@ -13320,6 +13365,14 @@ def assemble_raw(chunk_futs: list, pre_future,
                 acoustic_confidences.append(acoustic)
             if result.engine:
                 engines.append(result.engine)
+            for seconds, times in (
+                    (getattr(result, "crosscheck_s", None), crosscheck_times),
+                    (getattr(result, "escalation_s", None),
+                     escalation_times)):
+                if (isinstance(seconds, (int, float))
+                        and not isinstance(seconds, bool)
+                        and math.isfinite(seconds) and seconds >= 0.0):
+                    times.append(float(seconds))
             verifications.append(result.verified)
             if result.alternative:
                 alternatives.append(result.alternative)
@@ -13334,6 +13387,7 @@ def assemble_raw(chunk_futs: list, pre_future,
     timing_reliable = not bool(chunk_futs)
     native_processing_times = []
     native_processing_complete = True
+    crosscheck_times, escalation_times = [], []
     for f in chunk_futs:
         harvest(f, parts, confidences, alternatives)
     if pre_future is not None:
@@ -13370,76 +13424,138 @@ def assemble_raw(chunk_futs: list, pre_future,
         acoustic_confidence=(
             min(acoustic_confidences) if acoustic_confidences else None),
         word_evidence_status=combine_word_evidence_status(evidence_statuses),
+        crosscheck_s=sum(crosscheck_times) if crosscheck_times else None,
+        escalation_s=sum(escalation_times) if escalation_times else None,
     )
+
+
+def release_path_metrics(marks, recognition, audio_seconds) -> dict | None:
+    """Milliseconds per release-path stage, from monotonic marks.
+
+    ``marks`` are perf_counter readings, in order: key-up event, dispatch
+    to the finishing thread, tail quiet, capture stopped, recognition
+    joined, release order reached, compiled (with the risk and context
+    checks), text ready, paste keystroke posted, receipt settled. Each
+    stage is the gap between two neighbouring marks, so the eight stages
+    up to the paste add up to ``release_to_paste_ms`` and nothing between
+    release and paste goes untimed. Returns None when a mark is missing,
+    not a finite number, or out of order: a dictation with no paste has no
+    release-to-paste time, and none is made up.
+    """
+    try:
+        values = [float(mark) for mark in marks]
+    except (TypeError, ValueError):
+        return None
+    if (len(values) != 10 or not all(math.isfinite(v) for v in values)
+            or any(later < earlier
+                   for earlier, later in zip(values, values[1:]))):
+        return None
+
+    def ms(seconds) -> float:
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(seconds) or seconds < 0.0:
+            return 0.0
+        return round(seconds * 1000.0, 3)
+
+    gaps = [later - earlier for earlier, later in zip(values, values[1:])]
+    metrics = dict(zip(
+        ("dispatch_ms", "tail_ms", "stop_ms", "asr_ms", "order_ms",
+         "compile_ms", "cleanup_ms", "pre_paste_ms"),
+        (ms(gap) for gap in gaps[:8])))
+    metrics["release_to_paste_ms"] = ms(values[8] - values[0])
+    metrics["receipt_ms"] = ms(gaps[8])
+    # Zero when the stage did not run: no Parakeet program answered, no
+    # cross-check, no escalation.
+    metrics["asr_native_ms"] = ms(
+        getattr(recognition, "native_processing_s", None))
+    metrics["crosscheck_ms"] = ms(getattr(recognition, "crosscheck_s", None))
+    metrics["escalation_ms"] = ms(getattr(recognition, "escalation_s", None))
+    metrics["audio_ms"] = ms(audio_seconds)
+    return metrics
+
+
+def capture_release(rec):
+    """End the take at key release and choose what decodes its last part.
+
+    Returns ``(audio, cut, chunks, remainder_future, tail_done_at)``, the
+    last being when the tail wait ended (at once when there was none).
+    """
+    if release_should_wait_for_tail(rec):
+        # Do not start a decode that would be discarded if the tail adds
+        # speech. Capture first, then decode the expanded remainder once.
+        wait_for_tail_silence(rec)
+        tail_done_at = time.perf_counter()
+        full_audio = rec.stop()
+        cut = rec.cut_samples
+        chunk_futs = list(rec.chunks)
+        if can_reuse_speculation(
+                rec.speculative_future is not None,
+                rec.speculative_invalid,
+                rec.speculative_start,
+                cut):
+            return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+                rec.speculative_future,
+                rec.speculative_start,
+                rec.speculative_end,
+            ), tail_done_at
+        rem = full_audio[cut:]
+        if (len(rem) / SAMPLE_RATE >= 0.25
+                and peak_rms(rem) >= GATE_PEAK_RMS):
+            return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+                ASR_POOL.submit(
+                    transcribe_detailed, rem, rec.prompt,
+                    language=rec.language),
+                cut,
+                cut + len(rem),
+            ), tail_done_at
+        return full_audio, cut, chunk_futs, None, tail_done_at
+    # Speech already ended. Quiesce the callback before reading the
+    # chunk/cut plan so one final callback cannot add an overlapping
+    # rolling chunk after the remainder boundary was captured.
+    tail_done_at = time.perf_counter()
+    full_audio = rec.stop()
+    cut = rec.cut_samples
+    chunk_futs = list(rec.chunks)
+    rem = full_audio[cut:]
+    if can_reuse_speculation(
+            rec.speculative_future is not None,
+            rec.speculative_invalid,
+            rec.speculative_start,
+            cut):
+        return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+            rec.speculative_future,
+            rec.speculative_start,
+            rec.speculative_end,
+        ), tail_done_at
+    if (len(rem) / SAMPLE_RATE >= (
+            MIN_SECONDS if not chunk_futs else 0.25)
+            and peak_rms(rem) >= GATE_PEAK_RMS):
+        return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+            ASR_POOL.submit(
+                transcribe_detailed, rem, rec.prompt,
+                language=rec.language),
+            cut,
+            cut + len(rem),
+        ), tail_done_at
+    return full_audio, cut, chunk_futs, None, tail_done_at
 
 
 def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     """Runs at key release: chunks cut during the hold are already decoding;
-    kick off the remainder in parallel with the tail capture, then join."""
+    capture_release ends the take and starts the last part, then everything
+    is joined, compiled, cleaned and pasted. Each stage's end is
+    marked on the monotonic clock for the release-path trace."""
     global LAST_INSERTION
     released_at = rec.released_at or time.perf_counter()
+    dispatched_at = time.perf_counter()
     phase = "capture-finalize"
     delivery_reported = False
     try:
-        wait_for_tail = release_should_wait_for_tail(rec)
-        pre_future = None
-        if wait_for_tail:
-            # Do not start a decode that would be discarded if the tail adds
-            # speech. Capture first, then decode the expanded remainder once.
-            wait_for_tail_silence(rec)
-            full_audio = rec.stop()
-            cut = rec.cut_samples
-            chunk_futs = list(rec.chunks)
-            if can_reuse_speculation(
-                    rec.speculative_future is not None,
-                    rec.speculative_invalid,
-                    rec.speculative_start,
-                    cut):
-                pre_future = BoundedRecognitionFuture(
-                    rec.speculative_future,
-                    rec.speculative_start,
-                    rec.speculative_end,
-                )
-            else:
-                rem = full_audio[cut:]
-                if (len(rem) / SAMPLE_RATE >= 0.25
-                        and peak_rms(rem) >= GATE_PEAK_RMS):
-                    pre_future = BoundedRecognitionFuture(
-                        ASR_POOL.submit(
-                            transcribe_detailed, rem, rec.prompt,
-                            language=rec.language),
-                        cut,
-                        cut + len(rem),
-                    )
-        else:
-            # Speech already ended. Quiesce the callback before reading the
-            # chunk/cut plan so one final callback cannot add an overlapping
-            # rolling chunk after the remainder boundary was captured.
-            full_audio = rec.stop()
-            cut = rec.cut_samples
-            chunk_futs = list(rec.chunks)
-            rem = full_audio[cut:]
-            if can_reuse_speculation(
-                    rec.speculative_future is not None,
-                    rec.speculative_invalid,
-                    rec.speculative_start,
-                    cut):
-                pre_future = BoundedRecognitionFuture(
-                    rec.speculative_future,
-                    rec.speculative_start,
-                    rec.speculative_end,
-                )
-            else:
-                if (len(rem) / SAMPLE_RATE >= (
-                        MIN_SECONDS if not chunk_futs else 0.25)
-                        and peak_rms(rem) >= GATE_PEAK_RMS):
-                    pre_future = BoundedRecognitionFuture(
-                        ASR_POOL.submit(
-                            transcribe_detailed, rem, rec.prompt,
-                            language=rec.language),
-                        cut,
-                        cut + len(rem),
-                    )
+        full_audio, cut, chunk_futs, pre_future, tail_done_at = \
+            capture_release(rec)
         capture_done_at = time.perf_counter()
 
         duration, peak = audio_gate_measurements(full_audio)
@@ -13467,12 +13583,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         recognition = assemble_raw(
             chunk_futs, pre_future, full_audio[cut:], rec.prompt,
             rec.language)
-        t_asr = time.perf_counter() - asr_started_at
+        recognized_at = time.perf_counter()
+        t_asr = recognized_at - asr_started_at
         # A later take may finish ASR first, but user-visible cleanup, commands,
         # and insertion must follow release order. Capture is already stopped,
         # so waiting here never holds the microphone.
         phase = "release-order"
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
+        ordered_at = time.perf_counter()
         raw = recognition.text
         if not raw or is_hallucination(raw, rec.language, recognition):
             report_dictation_problem(
@@ -13552,6 +13670,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         # cannot replace this active result or affect downstream routing.
         t_context_firewall = runtime_context_firewall_evidence(
             voice_ir, compiler_result)
+        compiled_at = time.perf_counter()
         raw = compiler_result.text
         alternatives = []
         if recognition.alternative:
@@ -13873,6 +13992,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             )
             return
 
+        text_ready_at = time.perf_counter()
         learn_correction = not verbatim and rec.mode != "edit"
         if rec.insertion_lease is not None:
             insertion_target = resolve_insertion_target(rec)
@@ -13883,7 +14003,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
-        t_insert = time.perf_counter() - insertion_started_at
+        receipt_at = time.perf_counter()
+        t_insert = receipt_at - insertion_started_at
         receipt = committed_paste_receipt(
             rec, insertion_target, text, bundle, rec.mode, event_id) \
             if learn_correction else None
@@ -14083,6 +14204,19 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 })
         except Exception:
             pass
+        # The release path, stage by stage, from the key-up event to the
+        # paste keystroke. Contiguous stages that add up to the headline,
+        # release_to_paste_ms; None when no paste was sent.
+        release_path = release_path_metrics(
+            (released_at, dispatched_at, tail_done_at, capture_done_at,
+             recognized_at, ordered_at, compiled_at, text_ready_at,
+             getattr(rec, "paste_posted_at", None), receipt_at),
+            recognition, duration)
+        if release_path is not None:
+            try:
+                emit_performance_trace("release_path", release_path)
+            except Exception:
+                pass
         append_transcript(recognized_raw, text, bundle, path, metrics={
             "release_s": round(release_total, 4),
             "press_s": round(press_total, 4),
@@ -14097,6 +14231,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "context_firewall_s": round(t_context_firewall, 4),
             "cleanup_s": round(t_clean, 4),
             "insertion_s": round(t_insert, 4),
+            # Milliseconds per release-path stage (RELEASE_PATH_STAGES);
+            # None when no paste was sent.
+            "release_path_ms": release_path,
             "asr_engine": recognition.engine or "unknown",
             "confidence": round(compiler_result.confidence, 4),
             # Second-pass ASR agreement, never insertion. Insertion truth is

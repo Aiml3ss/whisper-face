@@ -39,7 +39,9 @@ from performance_lab import (
     run_compiler_stress,
     run_lifecycle_simulation,
     summarize_corpus,
+    summarize_release_path,
     summarize_warm_path,
+    RELEASE_PATH_STAGES,
 )
 
 
@@ -644,6 +646,140 @@ class WarmPathLatencyTests(unittest.TestCase):
             error.getvalue().strip(),
             "performance lab configuration error: runtime trace input unavailable",
         )
+
+
+class ReleasePathReportTests(unittest.TestCase):
+    """The release-path report reads timings only, and accounts for all of
+    release to paste."""
+
+    SECRET = "Dana's account number is 4417"
+
+    @staticmethod
+    def stages(scale=1.0, audio_ms=3_000.0, **overrides):
+        stages = {
+            "dispatch_ms": 1.0, "tail_ms": 0.0, "stop_ms": 2.0,
+            "asr_ms": 40.0, "order_ms": 0.0, "compile_ms": 5.0,
+            "cleanup_ms": 1.0, "pre_paste_ms": 51.0,
+        }
+        stages = {key: value * scale for key, value in stages.items()}
+        stages.update(
+            release_to_paste_ms=sum(stages.values()), receipt_ms=30.0,
+            asr_native_ms=35.0, crosscheck_ms=20.0, escalation_ms=0.0,
+            audio_ms=audio_ms)
+        stages.update(overrides)
+        return stages
+
+    def record(self, stages=None, **metrics):
+        if stages is not None:
+            metrics["release_path_ms"] = stages
+        return json.dumps({
+            "ts": 1.0, "app": "com.example.secret-app", "raw": self.SECRET,
+            "clean": self.SECRET, "path": "fast", "metrics": metrics})
+
+    def test_the_schema_is_the_runtime_trace_and_its_stages_add_up(self):
+        fields = RUNTIME_TRACE_SCHEMAS["release_path"]
+        self.assertEqual(fields[:8], RELEASE_PATH_STAGES)
+        self.assertEqual(fields[8], "release_to_paste_ms")
+        self.assertEqual(len(set(fields)), len(fields))
+
+    def test_report_has_percentiles_per_stage_and_no_text(self):
+        lines = [self.record(self.stages(scale)) for scale in (1, 2, 3, 4)]
+        lines.append(self.record(self.stages(1, audio_ms=9_000.0)))
+        lines.append(self.record(self.stages(1, audio_ms=40_000.0)))
+        lines.append("[trace] " + json.dumps({
+            "schema_version": 1, "event": "release_path",
+            **self.stages(1)}))
+        # Neither a record nor a trace, or a trace with an unknown field.
+        lines.append("not json " + self.SECRET)
+        lines.append("[trace] " + json.dumps({
+            "schema_version": 1, "event": "release_path",
+            "transcript": self.SECRET, **self.stages(1)}))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secret-transcripts.jsonl"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                report = summarize_release_path(path)
+            self.assertEqual(printed.getvalue(), "")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main(["release-path", "--record", str(path),
+                               "--format", "json"])
+            table = io.StringIO()
+            with contextlib.redirect_stdout(table):
+                main(["release-path", "--record", str(path)])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["records"], 7)
+        self.assertEqual(report["rejected_records"], 1)
+        self.assertEqual(report["ignored_lines"], 1)
+        self.assertEqual(
+            set(report["release_path_ms"]),
+            set(RUNTIME_TRACE_SCHEMAS["release_path"]))
+        headline = report["release_path_ms"]["release_to_paste_ms"]
+        self.assertEqual(headline["samples"], 7)
+        self.assertEqual(headline["p50"], 100.0)
+        self.assertEqual(headline["max"], 400.0)
+        self.assertEqual(report["coverage"], {"p50": 1.0, "min": 1.0})
+        self.assertEqual(
+            {label: band["samples"]
+             for label, band in report["by_take_length"].items()},
+            {"up to 5 s": 5, "5 to 15 s": 1, "over 15 s": 1})
+        for rendered in (json.dumps(report), output.getvalue(),
+                         table.getvalue()):
+            self.assertNotIn("Dana", rendered)
+            self.assertNotIn("4417", rendered)
+            self.assertNotIn("secret", rendered)
+        self.assertIn("100.0% of release-to-paste", table.getvalue())
+
+    def test_an_untimed_gap_shows_as_coverage_below_one(self):
+        gap = self.stages(1)
+        gap["release_to_paste_ms"] += 100.0
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "record.jsonl"
+            path.write_text(self.record(gap) + "\n", encoding="utf-8")
+            report = summarize_release_path(path)
+        self.assertEqual(report["coverage"]["p50"], 0.5)
+
+    def test_older_records_are_summarised_with_what_no_stage_held(self):
+        legacy = dict(
+            release_s=0.44, tail_s=0.106, asr_s=0.1, compiler_s=0.004,
+            consequence_s=0.0003, context_firewall_s=0.0002,
+            cleanup_s=0.0001, insertion_s=0.1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "record.jsonl"
+            path.write_text(
+                self.record(**legacy) + "\n" + self.record(None) + "\n",
+                encoding="utf-8")
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                report = summarize_release_path(path)
+                main(["release-path", "--record", str(path)])
+        self.assertNotIn("Dana", printed.getvalue())
+        self.assertNotIn("secret", printed.getvalue())
+        self.assertEqual(report["records"], 0)
+        self.assertEqual(report["legacy_records"], 1)
+        self.assertEqual(report["ignored_lines"], 1)
+        legacy_ms = report["legacy_ms"]
+        self.assertEqual(legacy_ms["release"]["p50"], 440.0)
+        self.assertEqual(legacy_ms["tail+stop"]["p50"], 106.0)
+        self.assertEqual(legacy_ms["compile"]["p50"], 4.5)
+        self.assertAlmostEqual(legacy_ms["unattributed"]["p50"], 129.4, 3)
+
+    def test_an_empty_record_fails_and_a_missing_one_is_not_echoed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "empty.jsonl"
+            path.write_text("", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["release-path", "--record", str(path)]),
+                                 1)
+        private_path = "/Users/private/secret-transcripts.jsonl"
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            status = main(["release-path", "--record", private_path])
+        self.assertEqual(status, 2)
+        self.assertNotIn("secret", error.getvalue())
 
 
 class PerformanceBudgetTests(unittest.TestCase):

@@ -256,6 +256,11 @@ class Recognition:
     acoustic_confidence: float | None = None
     # One of WORD_EVIDENCE_STATUSES: what became of the helper's words.
     word_evidence_status: str = "absent"
+    # Wall seconds spent on the Whisper Tiny cross-check and on the Turbo
+    # escalation for this decode; None when neither ran. Timings only: they
+    # let the release-path trace say where recognition time went.
+    crosscheck_s: float | None = None
+    escalation_s: float | None = None
 
 
 # --- word evidence from the Parakeet helper (protocol 2) ---------------------

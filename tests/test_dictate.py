@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import math
 import time
 import types
 import unittest
@@ -151,6 +152,10 @@ BASELINE_DEFINITIONS = (
     "position_check_applies",
     "position_readback",
     "_ax_character_count",
+    # How finish_and_process ends a take and times its release path, so
+    # every harness that finishes a take runs the real ones.
+    "capture_release",
+    "release_path_metrics",
 )
 BASELINE_ASSIGNMENTS = (
     "IS_MACOS",
@@ -233,7 +238,9 @@ def load_definitions(*names, assignments=(), extra=None):
         raise AssertionError(f"production definitions missing: {sorted(missing)}")
     namespace = {
         "json": json,
+        "math": math,
         "re": re,
+        "time": time,
         "threading": threading,
         "contextlib": contextlib,
         "functools": functools,
@@ -5884,7 +5891,7 @@ class FlightRecorderTests(unittest.TestCase):
             press_at = 42.0
             source = "hold"
 
-            def stop(self):
+            def stop(self, wait_for_stream=True):
                 calls.append(("stop",))
                 # Detach would run pending recovery and clear the real Flight
                 # Recorder's frames at this point.
@@ -8084,7 +8091,7 @@ class LearningTests(unittest.TestCase):
                 raise AssertionError(f"pipeline stopped early: {log}")
 
             rec = SimpleNamespace(
-                released_at=clock[0], stop=lambda: np.zeros(
+                released_at=clock[0], stop=lambda **_kwargs: np.zeros(
                     16_000, dtype=np.float32),
                 cut_samples=0, chunks=[], speculative_future=None,
                 speculative_invalid=False, speculative_start=0,
@@ -8122,11 +8129,16 @@ class LearningTests(unittest.TestCase):
             }
             # Every other collaborator of the pipeline is inert here: it is
             # called, returns nothing, and so takes no branch of its own.
-            pipeline_node = next(
+            # capture_release is the pipeline's own first step, so its
+            # collaborators are the pipeline's too.
+            pipeline_nodes = [
                 node for node in TREE.body
                 if isinstance(node, ast.FunctionDef)
-                and node.name == "finish_and_process")
-            for node in ast.walk(pipeline_node):
+                and node.name in {"finish_and_process", "capture_release"}]
+            assert len(pipeline_nodes) == 2, pipeline_nodes
+            for node in (
+                    inner for pipeline_node in pipeline_nodes
+                    for inner in ast.walk(pipeline_node)):
                 if isinstance(node, ast.Name) and node.id not in ns \
                         and node.id not in fakes \
                         and not hasattr(builtins, node.id):
@@ -10748,7 +10760,7 @@ class ReleasePlanTests(unittest.TestCase):
             released_at = 1.0
             recording = False
 
-            def stop(self):
+            def stop(self, wait_for_stream=True):
                 raise RuntimeError("private device detail")
 
         ns["finish_and_process"](
@@ -11325,7 +11337,7 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.stopped = False
 
-            def stop(self):
+            def stop(self, wait_for_stream=True):
                 self.stopped = True
                 return audio
 
@@ -11474,7 +11486,7 @@ class ReleasePlanTests(unittest.TestCase):
             focus_at_press=SimpleNamespace(
                 selected_text=selected, text=selected,
                 selection=(0, len(selected))),
-            stop=lambda: np.ones(16_000, dtype=np.float32),
+            stop=lambda **_kwargs: np.ones(16_000, dtype=np.float32),
             cut_samples=8_000,
             chunks=[],
         )
@@ -11949,7 +11961,7 @@ class AcousticTimeMachineRuntimeTests(unittest.TestCase):
             def __init__(self):
                 self.stopped = False
 
-            def stop(self):
+            def stop(self, wait_for_stream=True):
                 self.stopped = True
 
         class FakeTimer:
@@ -13342,18 +13354,73 @@ class TailSilencePollTests(unittest.TestCase):
         self.assertLess(waited, 0.05)
 
 
+class ReleasePathMetricsTests(unittest.TestCase):
+    """The release-path trace: contiguous stages from monotonic marks."""
+
+    MARKS = (10.0, 10.001, 10.001, 10.003, 10.043, 10.043, 10.048,
+             10.049, 10.100, 10.130)
+
+    def metrics(self, marks=MARKS, recognition=None, seconds=3.0):
+        ns = load_definitions("release_path_metrics")
+        return ns["release_path_metrics"](
+            marks, recognition or Recognition(
+                "x", native_processing_s=0.035, crosscheck_s=0.02),
+            seconds)
+
+    def test_stages_add_up_to_release_to_paste(self):
+        metrics = self.metrics()
+        schema = load_definitions(
+            assignments={"PERFORMANCE_TRACE_SCHEMAS"})[
+                "PERFORMANCE_TRACE_SCHEMAS"]["release_path"]
+        self.assertEqual(tuple(metrics), schema)
+        stages = schema[:schema.index("release_to_paste_ms")]
+        self.assertAlmostEqual(
+            sum(metrics[stage] for stage in stages),
+            metrics["release_to_paste_ms"], delta=0.01)
+        self.assertAlmostEqual(metrics["release_to_paste_ms"], 100.0, 3)
+        self.assertAlmostEqual(metrics["asr_ms"], 40.0, 3)
+        self.assertAlmostEqual(metrics["pre_paste_ms"], 51.0, 3)
+        self.assertAlmostEqual(metrics["receipt_ms"], 30.0, 3)
+        self.assertEqual(
+            (metrics["asr_native_ms"], metrics["crosscheck_ms"],
+             metrics["escalation_ms"], metrics["audio_ms"]),
+            (35.0, 20.0, 0.0, 3000.0))
+
+    def test_no_paste_or_a_broken_clock_gives_no_numbers(self):
+        no_paste = list(self.MARKS)
+        no_paste[8] = None
+        backwards = list(self.MARKS)
+        backwards[4] = 9.0
+        for marks in (no_paste, backwards, self.MARKS[:9],
+                      [*self.MARKS[:9], float("nan")]):
+            with self.subTest(marks=marks):
+                self.assertIsNone(self.metrics(marks))
+
+    def test_every_value_is_one_the_closed_trace_accepts(self):
+        ns = load_definitions(
+            "emit_performance_trace", "release_path_metrics",
+            assignments={"PERFORMANCE_TRACE_SCHEMAS",
+                         "PERFORMANCE_TRACE_PREFIX",
+                         "PERFORMANCE_TRACE_SCHEMA_VERSION"},
+            extra={"print": lambda *_args: None})
+        metrics = ns["release_path_metrics"](
+            self.MARKS, Recognition("x"), 0.0)
+        self.assertTrue(ns["emit_performance_trace"]("release_path", metrics))
+
+
 class ParakeetCrosscheckTests(unittest.TestCase):
     """Agreement-derived route confidence on the Parakeet primary path."""
 
     @staticmethod
     def crosschecked(*, parakeet_result, tiny_text=None, fallback=None,
                      crosscheck_enabled=True, tiny_cached=True,
-                     calls=None):
+                     calls=None, routing=False):
         from parrot_core import (
             hypothesis_agreement,
             parakeet_confidence_from_agreement,
             should_escalate_uncertain,
         )
+        from voice_compiler import project_word_evidence
         calls = calls if calls is not None else []
 
         class ImmediatePool:
@@ -13395,12 +13462,36 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                 "parakeet_confidence_from_agreement":
                     parakeet_confidence_from_agreement,
                 "should_escalate_uncertain": should_escalate_uncertain,
+                "project_word_evidence": project_word_evidence,
+                "PARAKEET_WORD_CONFIDENCE_ROUTING": routing,
                 "Recognition": Recognition,
                 "print": lambda *args, **kwargs: None,
             },
         )
         audio = np.zeros(16_000 * 4, dtype=np.float32)
         return ns["_parakeet_crosschecked"](audio, None, verify=True), calls
+
+    @staticmethod
+    def worded(text, *confidences):
+        """A protocol 2 answer whose words carry these confidences."""
+        from parrot_core import HelperWord
+        tokens = text.split()
+        return ParakeetResult(
+            text, 0.05, avg_confidence=0.9, word_evidence_status="native",
+            words=tuple(
+                HelperWord(token, 0.5 * index, 0.5 * index + 0.4, confidence)
+                for index, (token, confidence)
+                in enumerate(zip(tokens, confidences))))
+
+    def test_off_the_crosscheck_runs_and_its_time_is_recorded(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=self.worded("Ship it today.", 0.99, 0.99, 0.99),
+            tiny_text="ship it today")
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo"])
+        self.assertAlmostEqual(recognition.confidence, 0.93)
+        self.assertGreaterEqual(recognition.crosscheck_s, 0.0)
+        self.assertIsNone(recognition.escalation_s)
 
     def test_full_agreement_yields_high_confidence_and_no_alternative(self):
         recognition, _ = self.crosschecked(
@@ -17176,7 +17267,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 if is_macos else None),
             focus_at_press=at_press if is_macos else None,
             input_signature_at_press=None,
-            stop=lambda: np.ones(16_000, dtype=np.float32),
+            stop=lambda **_kwargs: np.ones(16_000, dtype=np.float32),
             cut_samples=8_000, chunks=[],
         )
         hud = SimpleNamespace(showMode_=seen.modes.append)

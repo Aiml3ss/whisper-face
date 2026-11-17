@@ -64,6 +64,11 @@ every side effect; nearly every algorithm is imported from pure modules
 - [[protected-anchor]]s never invent words.
 - [[consequence-receipts]] are evidence-only.
 - Release order is preserved even though ASR overlaps.
+- Every stage from the key-up event to the paste keystroke is timed on
+  the monotonic clock: the `release_path` trace and the record's
+  `release_path_ms` hold contiguous stages that add up to
+  `release_to_paste_ms`, and `uv run performance_lab.py release-path
+  --record transcripts.jsonl` prints p50/p95 per stage, timings only.
 - Correction learning is strictly downstream of a verified receipt.
 - Private state is written atomically at 0600; a flock enforces a
   single instance.

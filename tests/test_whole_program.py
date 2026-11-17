@@ -1177,6 +1177,36 @@ class HelperWordEvidenceTests(unittest.TestCase):
             mac.desktop.word_confidence = 0.95
 
 
+class ReleasePathTests(unittest.TestCase):
+    """From key release to the paste: every stage is timed."""
+
+    SPOKEN = "Ship the release notes before the review starts."
+    RATE = 16_000
+
+    def setUp(self):
+        self.mac = booted()
+        self.desktop = self.mac.desktop
+
+    def test_the_record_and_trace_time_every_stage_to_the_paste(self):
+        self.mac.dictate_sentence(self.SPOKEN, field=TextField())
+        stages = transcript_records()[-1]["metrics"]["release_path_ms"]
+        fields = self.mac.dictate.PERFORMANCE_TRACE_SCHEMAS["release_path"]
+        self.assertEqual(set(stages), set(fields))
+        contiguous = fields[:fields.index("release_to_paste_ms")]
+        self.assertAlmostEqual(
+            sum(stages[field] for field in contiguous),
+            stages["release_to_paste_ms"], delta=0.01)
+        self.assertGreater(stages["release_to_paste_ms"], 0.0)
+        self.assertAlmostEqual(stages["audio_ms"], 1500.0, delta=1.0)
+        traces = [
+            json.loads(line.removeprefix("[trace] "))
+            for line in self.mac.log.getvalue().splitlines()
+            if line.startswith("[trace] ") and '"release_path"' in line]
+        self.assertTrue(traces)
+        self.assertEqual(set(traces[-1]) - {"event", "schema_version"},
+                         set(fields))
+
+
 class SpeechRuntimeTests(unittest.TestCase):
     """Whisper Face's own runtime, behind PARROT_ASR_RUNTIME.
 
