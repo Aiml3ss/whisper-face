@@ -246,7 +246,8 @@ def load_definitions(*names, assignments=(), extra=None):
         # insertion_integrity, so a selected readback runs the real ones.
         **{name: getattr(insertion_integrity, name) for name in (
             "position_check", "position_count", "readback_difference",
-            "readback_stage", "same_but_whitespace_form", "utf16_units")},
+            "readback_stage", "review_selection_drift",
+            "same_but_whitespace_form", "user_input_since", "utf16_units")},
     }
     # Shared constants come first so an explicit `extra` still overrides them
     # (tests pin IS_MACOS both ways), and a per-call copy keeps one test's
@@ -9114,6 +9115,38 @@ class LearningTests(unittest.TestCase):
 
 
 class InsertionAdapterTests(unittest.TestCase):
+    def test_the_input_signature_counts_in_the_order_drift_reads_it(self):
+        # A selection drift is renewed only when no key or click came in
+        # between, read from these counters by position: the signature has
+        # to write them in exactly the order insertion_integrity names.
+        definition = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "user_input_signature")
+        written = next(
+            [element.id for element in node.value.elts]
+            for node in ast.walk(definition)
+            if isinstance(node, ast.Assign)
+            and any(getattr(target, "id", None) == "event_types"
+                    for target in node.targets))
+        names = {
+            "kCGEventKeyDown": "key-down",
+            "kCGEventLeftMouseDown": "left-down",
+            "kCGEventLeftMouseUp": "left-up",
+            "kCGEventRightMouseDown": "right-down",
+            "kCGEventRightMouseUp": "right-up",
+            "kCGEventOtherMouseDown": "other-down",
+            "kCGEventOtherMouseUp": "other-up",
+            "kCGEventMouseMoved": "moved",
+            "kCGEventLeftMouseDragged": "left-dragged",
+            "kCGEventRightMouseDragged": "right-dragged",
+            "kCGEventOtherMouseDragged": "other-dragged",
+            "kCGEventScrollWheel": "scroll",
+        }
+        self.assertEqual(
+            tuple(names[name] for name in written),
+            insertion_integrity.USER_INPUT_EVENTS)
+
     def test_no_ax_element_fails_closed_instead_of_pasting_by_window(self):
         coordinator = InsertionCoordinator()
         pasted = []
@@ -16951,12 +16984,17 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
     def deliver(self, outcome, *, snippet=None, is_macos=True,
                 paused=False, route="standard", spoken=None,
                 coordinator=None, utterance="take-1", recording=None,
-                spoken_edits=False, force_position=False):
+                spoken_edits=False, force_position=False, drift=None):
         """One dictation with a named delivery outcome; what it did.
 
         ``force_position`` makes the commit report a check by position
         whatever the field is, so that what a check by position may not
         unlock is seen even where the text could have been read.
+
+        ``drift`` makes the key-down read lag the field by its last
+        keystroke, so the caret has moved by commit, and names what the
+        input counters saw in between: "untouched", "typed", "clicked" or
+        "uncounted".
         """
         spoken = self.SPOKEN if spoken is None else spoken
         seen = SimpleNamespace(
@@ -17048,7 +17086,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
             "FocusSnapshot", "UndoableInsertion", "build_undoable_insertion",
             "PasteReceipt", "make_paste_receipt", "committed_paste_receipt",
             "paste_snippet_and_watch", "opaque_destination_evidence",
-            "ax_value_kind", "ax_role_name",
+            "ax_value_kind", "ax_role_name", "review_lease_drift",
             "collapse_repeats", "extract_tone_override", "needs_llm_cleanup",
             "quick_clean", "is_hallucination", "weak_whisper_evidence",
             "strip_context_echo",
@@ -17180,6 +17218,24 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 window_title="Notes"),
             "target-unreadable": None,
         }.get(outcome, at_press)
+        signatures = (None, None)
+        if drift is not None:
+            # Read at key-down before the field caught up with the space
+            # just typed: one character short, its caret one to the left.
+            lagging = self.BEFORE.rstrip()
+            at_press = snapshot(
+                element=element, text=lagging,
+                selection=(len(lagging), 0), window_title="Chat")
+            press = ":".join(["10"] * 12)
+            signatures = (press, {
+                # The pointer moved and the page scrolled; nothing more.
+                "untouched": ":".join(["10"] * 7 + ["55"] + ["10"] * 3
+                                      + ["14"]),
+                "typed": ":".join(["11"] + ["10"] * 11),
+                "clicked": ":".join(["10", "11", "11"] + ["10"] * 9),
+                "uncounted": None,
+            }[drift])
+        ns["user_input_signature"] = lambda: signatures[1]
         ns["focused_snapshot"] = lambda: at_release
         # Every other collaborator is inert: called, returns nothing, and
         # so takes no branch of its own.
@@ -17214,7 +17270,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                     focused=lambda: (0, element))
                 if is_macos else None),
             focus_at_press=at_press if is_macos else None,
-            input_signature_at_press=None,
+            input_signature_at_press=signatures[0],
             stop=lambda: np.ones(16_000, dtype=np.float32),
             cut_samples=8_000, chunks=[],
         )
@@ -17768,6 +17824,83 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                     ["[insertion] paste attempted but unverified "
                      f"(readback_conflict; difference {difference}; "
                      f"stage {stage}); saved in Voice Outbox"])
+
+    DRIFT_METRICS = tuple(f"insertion_drift_{field}" for field in (
+        "direction", "distance", "selection", "text", "input", "stage"))
+
+    def test_a_caret_nobody_moved_is_not_a_changed_destination(self):
+        seen = self.deliver("verified", drift="untouched")
+
+        # Pasted once, where the caret is now, and read back there.
+        self.assertEqual(seen.pasted, [self.SPOKEN])
+        self.assertEqual(seen.receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(seen.modes, [])
+        self.assertEqual(seen.sounds, ["Pop"])
+        self.assertEqual(len(seen.undoable), 1)
+        self.assertEqual(seen.coordinator.recoverable(), ())
+        self.assertEqual(seen.recorder.insertion_lease.selection,
+                         (len(self.BEFORE), 0))
+        metrics = seen.records[0].metrics
+        self.assertEqual(metrics["insertion_reason"], "commit_verified")
+        self.assertEqual(
+            [metrics[key] for key in self.DRIFT_METRICS],
+            ["forward", "1", "cursor-to-cursor", "changed", "none",
+             "renewed"])
+
+    def test_a_caret_moved_by_a_key_or_a_click_still_refuses(self):
+        for drift in ("typed", "clicked", "uncounted"):
+            with self.subTest(drift=drift):
+                seen = self.deliver("verified", drift=drift)
+
+                self.assertEqual(seen.pasted, [])
+                self.assertEqual(seen.receipt.reason.value,
+                                 "selection_drift")
+                self.assertEqual(seen.modes, ["error"])
+                self.assertEqual(seen.sounds, ["Funk"])
+                self.assertEqual(
+                    seen.caption["text"],
+                    "Destination changed — saved in Voice Outbox")
+                self.assert_unverified_everywhere(seen)
+                since = {"typed": "keys", "clicked": "clicks",
+                         "uncounted": "unavailable"}[drift]
+                metrics = seen.records[0].metrics
+                self.assertIs(metrics["paste_attempted"], False)
+                self.assertEqual(
+                    [metrics[key] for key in self.DRIFT_METRICS],
+                    ["forward", "1", "cursor-to-cursor", "changed", since,
+                     "refused"])
+                self.assertEqual(
+                    [log for log in seen.logs
+                     if log.startswith("[insertion]")],
+                    ["[insertion] destination changed (selection_drift; "
+                     "drift forward 1; selection cursor-to-cursor; "
+                     f"text changed; input {since}; refused); text saved "
+                     "in Voice Outbox"])
+
+    def test_a_renewed_lease_still_fails_a_short_or_misplaced_paste(self):
+        for outcome, difference in (
+                ("truncated", "leading-part"), ("missing", "unchanged"),
+                ("misplaced", "elsewhere"), ("conflict", "absent")):
+            with self.subTest(outcome=outcome):
+                seen = self.deliver(outcome, drift="untouched")
+
+                self.assertEqual(seen.pasted, [self.SPOKEN])
+                self.assertEqual(seen.receipt.state, ReceiptState.CONFLICT)
+                self.assertEqual(seen.modes, ["error"])
+                self.assert_unverified_everywhere(seen)
+                metrics = seen.records[0].metrics
+                self.assertEqual(
+                    metrics["insertion_reason"], "readback_conflict")
+                self.assertEqual(
+                    metrics["insertion_readback_difference"], difference)
+                self.assertEqual(metrics["insertion_drift_stage"], "renewed")
+
+    def test_no_drift_records_no_drift(self):
+        for outcome in ("verified", "conflict", "destination-changed"):
+            with self.subTest(outcome=outcome):
+                metrics = self.deliver(outcome).records[0].metrics
+                for key in self.DRIFT_METRICS:
+                    self.assertIsNone(metrics[key], key)
 
     def test_the_new_record_is_categories_only(self):
         from insertion_integrity import (

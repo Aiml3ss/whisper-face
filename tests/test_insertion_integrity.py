@@ -16,6 +16,13 @@ from insertion_integrity import (
     READBACK_CONFLICT_SHAPES,
     READBACK_DIFFERENCES,
     READBACK_STAGES,
+    SELECTION_DRIFT_DIRECTIONS,
+    SELECTION_DRIFT_DISTANCES,
+    SELECTION_DRIFT_SHAPES,
+    SELECTION_DRIFT_STAGES,
+    SELECTION_DRIFT_TEXT,
+    USER_INPUT_EVENTS,
+    USER_INPUT_SINCE,
     DestinationObservation,
     InsertionCoordinator,
     InsertionLease,
@@ -28,7 +35,10 @@ from insertion_integrity import (
     position_count,
     readback_difference,
     readback_stage,
+    review_selection_drift,
     same_but_whitespace_form,
+    SelectionDrift,
+    user_input_since,
     utf16_units,
     whitespace_form,
 )
@@ -938,6 +948,207 @@ class PositionCheckTests(unittest.TestCase):
             ReceiptReason.READBACK_UNAVAILABLE, True).log_reason,
             "readback_unavailable")
         self.assertNotIn("hunter2", json.dumps(conflict.log_reason))
+
+
+def signature(**changed):
+    """An input signature in USER_INPUT_EVENTS order, every counter 10
+    except the ones named (with ``-`` written ``_``)."""
+    counts = {name: 10 for name in USER_INPUT_EVENTS}
+    for name, value in changed.items():
+        counts[name.replace("_", "-")] = value
+    return ":".join(str(counts[name]) for name in USER_INPUT_EVENTS)
+
+
+class SelectionDriftTests(unittest.TestCase):
+    """A selection that moved since key-down: who moved it, and what then.
+
+    The lease is "Hi.|" at the end of the field; at commit the same field
+    reads with its caret somewhere else.
+    """
+
+    DESTINATION = "pid:42/field:7"
+
+    def setUp(self):
+        self.lease = InsertionLease.capture(
+            "utterance-1", self.DESTINATION, (3, 0), "Hi.")
+
+    def at(self, selection, nearby="Hi. ", destination=None):
+        return DestinationObservation.capture(
+            destination or self.DESTINATION, selection, nearby)
+
+    def test_input_is_counted_by_kind_and_never_guessed(self):
+        press = signature()
+        for now, expected in (
+                (signature(), "none"),
+                # Moving the pointer, scrolling, or a button coming up that
+                # went down before key-down cannot move a caret.
+                (signature(moved=90, scroll=40, left_up=11), "none"),
+                (signature(key_down=11), "keys"),
+                (signature(left_down=11), "clicks"),
+                (signature(right_down=11), "clicks"),
+                (signature(other_down=11), "clicks"),
+                (signature(left_dragged=12), "clicks"),
+                (signature(key_down=11, left_down=11), "keys-and-clicks")):
+            with self.subTest(expected=expected):
+                self.assertEqual(user_input_since(press, now), expected)
+        for before, after in (
+                (None, press), (press, None), ("", press),
+                ("1:2:3", "1:2:3"),                 # not this layout
+                (press, press.replace("10", "x", 1)),
+                (signature(key_down=11), signature())):   # went backwards
+            with self.subTest(before=before, after=after):
+                self.assertEqual(
+                    user_input_since(before, after), "unavailable")
+
+    def test_a_drift_nobody_caused_renews_the_lease_at_the_field_as_it_is(self):
+        current = self.at((4, 0))
+        staged, drift = review_selection_drift(
+            self.lease, current, text_changed=True, input_since="none")
+
+        self.assertEqual(drift, SelectionDrift(
+            "forward", "1", "cursor-to-cursor", "changed", "none", "renewed"))
+        self.assertEqual(staged.selection, (4, 0))
+        self.assertEqual(staged.utterance_id, self.lease.utterance_id)
+        self.assertEqual(staged.destination_id, self.lease.destination_id)
+        self.assertFalse(staged.opaque)
+        # The renewed lease is exactly what commit will now validate.
+        self.assertIsNone(InsertionCoordinator.validate(staged, current))
+
+    def test_any_input_or_none_countable_keeps_the_refusal(self):
+        current = self.at((0, 4))
+        for since in ("keys", "clicks", "keys-and-clicks", "unavailable"):
+            with self.subTest(since=since):
+                staged, drift = review_selection_drift(
+                    self.lease, current, text_changed=False,
+                    input_since=since)
+                self.assertIs(staged, self.lease)
+                self.assertEqual(drift.stage, "refused")
+                self.assertEqual(drift.input, since)
+                self.assertEqual(
+                    (drift.direction, drift.distance, drift.selection),
+                    ("backward", "3-8", "cursor-to-range"))
+                self.assertEqual(
+                    InsertionCoordinator.validate(staged, current),
+                    ReceiptReason.SELECTION_DRIFT)
+
+    def test_only_a_drift_on_the_same_readable_destination_is_reviewed(self):
+        for current, reason in (
+                (self.at((3, 0), nearby="Hi."), None),
+                (self.at((4, 0), destination="pid:42/field:8"),
+                 ReceiptReason.FOCUS_DRIFT),
+                (self.at((3, 0), nearby="Hello."),
+                 ReceiptReason.SURROUNDING_TEXT_DRIFT),
+                (DestinationObservation.capture(None, None, None),
+                 ReceiptReason.TARGET_UNREADABLE)):
+            with self.subTest(reason=reason):
+                staged, drift = review_selection_drift(
+                    self.lease, current, text_changed=True,
+                    input_since="none")
+                self.assertIs(staged, self.lease)
+                self.assertIsNone(drift)
+                self.assertEqual(
+                    InsertionCoordinator.validate(staged, current), reason)
+        opaque = InsertionLease.capture_opaque(
+            "utterance-2", self.DESTINATION, "Messages")
+        staged, drift = review_selection_drift(
+            opaque, self.at((4, 0)), text_changed=True, input_since="none")
+        self.assertIs(staged, opaque)
+        self.assertIsNone(drift)
+        with self.assertRaises(ValueError):
+            opaque.renewed_for(self.at((4, 0)))
+        with self.assertRaises(ValueError):
+            self.lease.renewed_for(self.at((4, 0), destination="other"))
+
+    def test_how_far_and_which_way_are_buckets_never_positions(self):
+        for selection, direction, distance, shape in (
+                ((3, 2), "same-start", "0", "cursor-to-range"),
+                ((2, 0), "backward", "1", "cursor-to-cursor"),
+                ((5, 0), "forward", "2", "cursor-to-cursor"),
+                ((11, 0), "forward", "3-8", "cursor-to-cursor"),
+                ((12, 0), "forward", "9+", "cursor-to-cursor"),
+                ((900, 3), "forward", "9+", "cursor-to-range")):
+            with self.subTest(selection=selection):
+                _staged, drift = review_selection_drift(
+                    self.lease, self.at(selection), text_changed=None,
+                    input_since="keys")
+                self.assertEqual(drift.direction, direction)
+                self.assertEqual(drift.distance, distance)
+                self.assertEqual(drift.selection, shape)
+                self.assertEqual(drift.text, "unknown")
+                self.assertIn(drift.direction, SELECTION_DRIFT_DIRECTIONS)
+                self.assertIn(drift.distance, SELECTION_DRIFT_DISTANCES)
+                self.assertIn(drift.selection, SELECTION_DRIFT_SHAPES)
+        ranged = InsertionLease.capture(
+            "utterance-3", self.DESTINATION, (1, 2), "Hi.")
+        _staged, drift = review_selection_drift(
+            ranged, self.at((1, 0)), text_changed=False, input_since="none")
+        self.assertEqual(drift.selection, "range-to-cursor")
+        self.assertIn(drift.text, SELECTION_DRIFT_TEXT)
+        self.assertIn(drift.stage, SELECTION_DRIFT_STAGES)
+        self.assertIn(drift.input, USER_INPUT_SINCE)
+        with self.assertRaises(ValueError):
+            SelectionDrift("forward", "37", "cursor-to-cursor", "same",
+                           "none", "renewed")
+        with self.assertRaises(ValueError):
+            review_selection_drift(self.lease, self.at((4, 0)),
+                                   text_changed=True, input_since="maybe")
+
+    def commit(self, current, since, text="Ship it", readback=None):
+        coordinator = InsertionCoordinator()
+        staged, drift = review_selection_drift(
+            self.lease, current, text_changed=True, input_since=since)
+        coordinator.stage(staged, text)
+        pasted = []
+        receipt = coordinator.commit(
+            "utterance-1", current, pasted.append,
+            readback or ReadbackResult.verified, drift=drift)
+        return coordinator, receipt, pasted
+
+    def test_a_renewed_lease_pastes_once_and_the_receipt_says_so(self):
+        _coordinator, receipt, pasted = self.commit(self.at((4, 0)), "none")
+
+        self.assertEqual(pasted, ["Ship it"])
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(receipt.selection_drift.stage, "renewed")
+        self.assertEqual(
+            receipt.log_reason,
+            "commit_verified; drift forward 1; selection cursor-to-cursor; "
+            "text changed; input none; renewed")
+
+    def test_a_renewed_lease_still_fails_a_short_or_misplaced_paste(self):
+        for difference in ("leading-part", "elsewhere", "absent"):
+            with self.subTest(difference=difference):
+                coordinator, receipt, pasted = self.commit(
+                    self.at((4, 0)), "none",
+                    readback=lambda: ReadbackResult.conflict(
+                        "divergent", difference=difference,
+                        stage="settled"))
+                self.assertEqual(pasted, ["Ship it"])
+                self.assertEqual(receipt.state, ReceiptState.CONFLICT)
+                self.assertEqual(
+                    receipt.reason, ReceiptReason.READBACK_CONFLICT)
+                self.assertEqual(receipt.selection_drift.stage, "renewed")
+                self.assertEqual(coordinator.needs_home_count(), 1)
+
+    def test_a_refused_drift_never_pastes_and_says_how_it_drifted(self):
+        coordinator, receipt, pasted = self.commit(
+            self.at((4, 0)), "keys", text="hunter2")
+
+        self.assertEqual(pasted, [])
+        self.assertEqual(receipt.reason, ReceiptReason.SELECTION_DRIFT)
+        self.assertFalse(receipt.paste_attempted)
+        self.assertEqual(
+            receipt.log_reason,
+            "selection_drift; drift forward 1; selection cursor-to-cursor; "
+            "text changed; input keys; refused")
+        self.assertEqual(coordinator.recoverable()[0].text, "hunter2")
+        self.assertEqual(
+            coordinator.recoverable()[0].receipt.selection_drift.stage,
+            "refused")
+        written = json.dumps([receipt.log_reason,
+                              repr(receipt.selection_drift)])
+        for word in ("hunter2", "Hi."):
+            self.assertNotIn(word, written)
 
 
 if __name__ == "__main__":
