@@ -48,7 +48,12 @@ speech is recognized *while you talk* through rolling chunk cuts, so a
   for the take only when the cross-check has nothing left to do: no gain
   needed, every rolling chunk came back from Parakeet, and every word after
   the last cut clears `CROSSCHECK_SKIP_CONFIDENCE`. Otherwise the take is
-  decoded from its chunks as before.
+  decoded from its chunks as before. When every chunk and the last part
+  are decoded already at release (a speculation stood because the speaker
+  paused before letting go), the session is not finished at all: its last
+  window would be a decode at release that the joined parts do not need.
+  On the public benchmark, whose takes end in 0.3 s of silence, finishing
+  it anyway had cost long takes about 75 ms at release.
 - **Cross-check timing**: the time Tiny's cross-check and a Turbo
   escalation took is recorded per dictation (`crosscheck_ms`,
   `escalation_ms` in the release-path trace). A decode whose every word

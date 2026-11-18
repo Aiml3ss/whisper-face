@@ -1765,9 +1765,33 @@ class SpeechRuntimeTests(unittest.TestCase):
             fake_platform.speech_audio(15.5, 0.8, seed=21),
             fake_platform.speech_audio(1.5, 0.3, seed=22)])
 
+    def last_part_still_decoding(self):
+        """At release the fake decodes the last part at once, where a real
+        one is still decoding it unless a speculation stood; these tests
+        are about what the session does when it is needed."""
+        dictate = self.mac.dictate
+        self.addCleanup(setattr, dictate, "usual_decode_ready",
+                        dictate.usual_decode_ready)
+        dictate.usual_decode_ready = lambda *_args: False
+
+    def test_a_long_take_decoded_during_the_hold_finishes_no_session(self):
+        # The long take ends in a pause, so a speculation of its last part
+        # stood before the key-up: the usual path is decoded already, and
+        # finishing the session would only decode the last window again.
+        desktop = self.mac.desktop
+        self.switch_on()
+        audio = self.long_take()
+        sessions = len(desktop.runtime_sessions)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio, timeout=20.0).text
+        self.assertEqual(desktop.runtime_sessions[sessions:], [])
+        # The fake hears the sentence once in each decoded part.
+        self.assertEqual(typed, f"{self.SPOKEN} {self.SPOKEN}")
+
     def test_a_long_take_is_decoded_whole_by_its_session(self):
         desktop = self.mac.desktop
         self.switch_on()
+        self.last_part_still_decoding()
         self.assertEqual(self.mac.dictate.OWN_PARAKEET.protocol, 3)
         audio = self.long_take()
         sessions = len(desktop.runtime_sessions)
@@ -1785,6 +1809,7 @@ class SpeechRuntimeTests(unittest.TestCase):
     def test_an_unsure_ending_takes_the_chunked_path(self):
         desktop = self.mac.desktop
         self.switch_on()
+        self.last_part_still_decoding()
         audio = self.long_take()
         sessions = len(desktop.runtime_sessions)
         desktop.word_confidence = 0.5
@@ -1810,6 +1835,7 @@ class SpeechRuntimeTests(unittest.TestCase):
     def test_a_failed_session_falls_back_to_the_chunked_path(self):
         desktop = self.mac.desktop
         self.switch_on()
+        self.last_part_still_decoding()
         desktop.runtime_failure = "session"
         try:
             typed = self.mac.dictate_sentence(
