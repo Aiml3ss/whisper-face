@@ -430,7 +430,9 @@ from insertion_integrity import (  # noqa: E402
     position_count,
     readback_difference,
     readback_stage,
+    review_selection_drift,
     same_but_whitespace_form,
+    user_input_since,
     utf16_units,
 )
 from personal_regression import PersonalRegressionLab  # noqa: E402
@@ -11953,6 +11955,40 @@ def insertion_capability_buckets(rec, lease, current: FocusSnapshot | None, *,
     }
 
 
+def review_lease_drift(rec, lease: InsertionLease, current: FocusSnapshot,
+                       bundle: str):
+    """Whether a selection that moved since key-down was moved by the person.
+
+    The lease is taken as the dictation begins and the paste is due seconds
+    later. Chromium (browsers and Electron apps alike) publishes its
+    Accessibility value and range late, so the key-down read can show the
+    caret where it stood before the last keystrokes, the last click, or the
+    last paste; read again at commit it has moved without anyone touching
+    it. ``review_selection_drift`` renews the lease only when no key went
+    down and no button went down or dragged since key-down, counted by the
+    same system counters an opaque window lease is sealed with; any input,
+    or none countable, keeps the refusal. Either way the drift is recorded
+    in categories, so a refusal that remains explains itself.
+    """
+    original = getattr(rec, "focus_at_press", None)
+    observation = destination_observation(
+        current, frontmost_bundle(), lease, original,
+        getattr(rec, "bundle_at_press", bundle))
+    if observation.destination_id != lease.destination_id:
+        return lease, None      # another destination: the strict check's
+    before = getattr(original, "text", None)
+    text_changed = (None if before is None or current.text is None
+                    else before != current.text)
+    since = user_input_since(
+        getattr(rec, "input_signature_at_press", None),
+        user_input_signature())
+    staged, drift = review_selection_drift(
+        lease, observation, text_changed=text_changed, input_since=since)
+    if staged is not lease:
+        rec.insertion_lease = staged
+    return staged, drift
+
+
 def insertion_join_prefix(snapshot: FocusSnapshot | None, text: str,
                           language: str = LANGUAGE_DEFAULT) -> str:
     """Return the separator to place before ``text`` at the insertion point.
@@ -12023,6 +12059,10 @@ def commit_insertion(rec, text: str, bundle: str,
         PIPELINE_STATE["last_insertion_state"] = "legacy"
         rec.insertion_receipt = None
         return None
+    drift = None
+    moved = getattr(current, "selection", None)
+    if not lease.opaque and moved is not None and moved != lease.selection:
+        lease, drift = review_lease_drift(rec, lease, current, bundle)
     try:
         INSERTION_COORDINATOR.stage(lease, text)
     except ValueError:
@@ -12067,6 +12107,7 @@ def commit_insertion(rec, text: str, bundle: str,
         ),
         paste_and_mark,
         readback,
+        drift=drift,
     )
     PIPELINE_STATE["last_insertion_state"] = receipt.state.value
     rec.insertion_receipt = receipt
@@ -15647,6 +15688,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 emit_performance_trace("release_path", release_path)
             except Exception:
                 pass
+        drift_detail = getattr(integrity_receipt, "selection_drift", None)
         append_transcript(recognized_raw, text, bundle, path, metrics={
             "release_s": round(release_total, 4),
             "press_s": round(press_total, 4),
@@ -15751,6 +15793,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_position_count": (
                 integrity_receipt.position_count or None
                 if integrity_receipt is not None else None),
+            # Absent (None) unless the selection moved between key-down and
+            # the paste. Categories and bucketed small counts only: which
+            # way and how far the caret went, whether a range appeared or
+            # went, whether the field's text changed, whether a key or a
+            # click came in between, and whether the lease was refused or
+            # renewed and pasted.
+            **{f"insertion_drift_{field}": getattr(drift_detail, field, None)
+               for field in ("direction", "distance", "selection", "text",
+                             "input", "stage")},
             "paste_attempted": attempted,
             "insertion_verified": verified,
             # The capability half of a compatibility observation. Absent
