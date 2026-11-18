@@ -253,6 +253,7 @@ if IS_MACOS:
         NSAffineTransform,
         NSAlert,
         NSAlertFirstButtonReturn,
+        NSAlertSecondButtonReturn,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
         NSAppearanceNameAqua,
@@ -375,6 +376,7 @@ from parrot_core import (  # noqa: E402
     transform_last_insertion,
     compile_cleanup,
     compile_code_dictation,
+    finish_cleanup,
     NUMBER_WORDS,
     combine_word_evidence_status,
     confidence_from_segments,
@@ -526,6 +528,7 @@ from voice_objects import (  # noqa: E402
     TaskDraft,
 )
 import self_update  # noqa: E402
+import voice_check  # noqa: E402
 
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
@@ -4522,24 +4525,38 @@ class StatusBar(NSObject):
             return {}
         return answer if isinstance(answer, dict) else {}
 
-    def _begin_release_update(self, version, revision):
+    def _begin_release_update(self, version, revision, update_anyway=False):
         """The person accepted: download, verify and hand over to the new
-        app, off the main thread. Only a failure comes back here; on success
-        the new app's own window carries on."""
+        app, off the main thread. Only a failure, or an update held because
+        it heard the person less well, comes back here; on success the new
+        app's own window carries on."""
+        arguments = ["install", "--version", version, "--revision", revision]
+        if update_anyway:
+            arguments.append("--update-anyway")
+
         def worker():
             outcome = self._release_update_result(
-                self._release_update_command(
-                    "install", "--version", version, "--revision", revision),
-                timeout=1800)
+                self._release_update_command(*arguments), timeout=1800)
+            if outcome.get("status") == "held":
+                from whisper_face_gui import voice_check_update_label
+                AppHelper.callAfter(
+                    self._present_voice_hold, outcome.get("voice_check") or {},
+                    voice_check_update_label(version=version),
+                    lambda: self._begin_release_update(
+                        version, revision, update_anyway=True))
+                return
             detail = release_update_failure(outcome)
             if detail is not None:
                 AppHelper.callAfter(
                     self._update_alert, "Couldn't install the update.", detail)
         threading.Thread(target=worker, daemon=True).start()
-        self._update_alert(
-            f"Downloading Whisper Face {version}…",
-            "Its update window opens when the download is ready and "
-            "checked. You can keep working until then.")
+        detail = ("Its update window opens when the download is ready and "
+                  "checked. You can keep working until then.")
+        if not update_anyway:
+            from whisper_face_gui import voice_check_ahead
+            ahead = voice_check_ahead(voice_check.corpus_size())
+            detail = f"{detail}\n\n{ahead}" if ahead else detail
+        self._update_alert(f"Downloading Whisper Face {version}…", detail)
 
     def _present_update_check(self, report):
         try:
@@ -4585,7 +4602,7 @@ class StatusBar(NSObject):
         except Exception as e:
             print(f"! update check UI failed: {e}")
 
-    def _begin_update(self, target_rev):
+    def _begin_update(self, target_rev, update_anyway=False):
         if not target_rev:
             self._update_alert(
                 "Couldn't start the update.",
@@ -4623,6 +4640,8 @@ class StatusBar(NSObject):
                 "--result", str(result_path),
                 "--label", label,
             ]
+            if update_anyway:
+                command.append("--update-anyway")
             submitted = subprocess.run(
                 command, capture_output=True, text=True, timeout=15)
             if submitted.returncode != 0:
@@ -4630,13 +4649,43 @@ class StatusBar(NSObject):
                     "Couldn't start the update.",
                     "The detached updater could not be launched.")
                 return
-            self._update_alert(
-                "Updating Whisper Face…",
-                "The update is running safely in the background. "
-                "Whisper Face will restart and report the result.")
+            detail = ("The update is running safely in the background. "
+                      "Whisper Face will restart and report the result.")
+            if not update_anyway:
+                from whisper_face_gui import voice_check_ahead
+                ahead = voice_check_ahead(voice_check.corpus_size())
+                if ahead:
+                    detail = f"{detail}\n\n{ahead}"
+                    # A held update changes nothing and restarts nothing,
+                    # so this copy, still running, looks for the answer.
+                    threading.Thread(
+                        target=self._await_held_update, args=(result_path,),
+                        daemon=True).start()
+            self._update_alert("Updating Whisper Face…", detail)
         except Exception as e:
             self._update_alert(
                 "Couldn't start the update.", type(e).__name__)
+
+    def _await_held_update(self, result_path, *, deadline_s=3600.0,
+                           interval_s=2.0, sleep=time.sleep):
+        """Off the main thread: wait for the detached updater to say the
+        update was held. Any other answer restarts this app, and the next
+        start reads it; this thread just ends with the process."""
+        deadline = time.monotonic() + deadline_s
+        while time.monotonic() < deadline:
+            try:
+                outcome = json.loads(Path(result_path).read_text(
+                    encoding="utf-8"))
+            except (OSError, ValueError):
+                outcome = {}
+            status = outcome.get("status") if isinstance(outcome, dict) \
+                else None
+            if status == "held":
+                AppHelper.callAfter(self._consume_update_result)
+                return
+            if status not in (None, "running"):
+                return
+            sleep(interval_s)
 
     def _consume_update_result(self):
         result_path = (
@@ -4647,7 +4696,8 @@ class StatusBar(NSObject):
                 return
             outcome = json.loads(result_path.read_text(encoding="utf-8"))
             if outcome.get("status") not in {
-                    "applied", "rolled_back", "rollback_failed", "failed"}:
+                    "applied", "rolled_back", "rollback_failed", "failed",
+                    "held"}:
                 return
             result_path.unlink(missing_ok=True)
             # Consuming the result deletes it, which used to erase the only
@@ -4661,21 +4711,61 @@ class StatusBar(NSObject):
                         f"{outcome.get('status')} "
                         f"{str(outcome.get('from') or '')[:7]}->"
                         f"{str(outcome.get('to') or '')[:7]} "
-                        f"{outcome.get('error') or ''}\n")
+                        f"{outcome.get('error') or ''}"
+                        f"{self._voice_check_log(outcome)}\n")
             except OSError:
                 pass
             self._present_update_result(outcome)
         except Exception as e:
             print(f"! could not consume update result: {e}")
 
+    @staticmethod
+    def _voice_check_log(outcome):
+        """The voice check's counts for update.log; never a word."""
+        checked = outcome.get("voice_check") if isinstance(outcome, dict) \
+            else None
+        if not isinstance(checked, dict) or checked.get("status") in (
+                None, "no-corpus"):
+            return ""
+        return " " + voice_check.summary_line(checked)
+
+    def _present_voice_hold(self, outcome, update_label, on_anyway):
+        """An update that heard the person less well: what got worse, in
+        counts, and their choice. Wait is the default; nothing changed."""
+        try:
+            from whisper_face_gui import localized_string, voice_check_held
+            title, detail = voice_check_held(outcome, update_label)
+            alert = NSAlert.alloc().init()
+            self._brand_update_alert(alert)
+            alert.setMessageText_(title)
+            alert.setInformativeText_(detail)
+            alert.addButtonWithTitle_(
+                localized_string("update.voice_check.held.wait"))
+            alert.addButtonWithTitle_(
+                localized_string("update.voice_check.held.anyway"))
+            if alert.runModal() == NSAlertSecondButtonReturn:
+                on_anyway()
+        except Exception as e:
+            print(f"! update hold UI failed: {e}")
+
     def _present_update_result(self, outcome):
         try:
             status = outcome.get("status")
-            if status == "applied":
+            if status == "held":
+                from whisper_face_gui import voice_check_update_label
+                target = str(outcome.get("to") or "")
+                self._present_voice_hold(
+                    outcome.get("voice_check") or {},
+                    voice_check_update_label(build=target),
+                    lambda: self._begin_update(target, update_anyway=True))
+            elif status == "applied":
+                from whisper_face_gui import voice_check_note
                 revision = str(outcome.get("to") or "")[:7]
-                self._update_alert(
-                    "Whisper Face is up to date.",
-                    f"Now running build {revision}." if revision else "")
+                detail = f"Now running build {revision}." if revision else ""
+                note = voice_check_note(outcome.get("voice_check"))
+                if note:
+                    detail = f"{detail}\n\n{note}" if detail else note
+                self._update_alert("Whisper Face is up to date.", detail)
             elif status == "rolled_back":
                 # Say why. A bare "it failed" gave nobody -- user or
                 # maintainer -- anything to act on, so the same failure kept
@@ -13084,24 +13174,10 @@ def quick_clean(text: str, verbatim: bool = False,
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
     if remove_repeats is None:
         remove_repeats = PREFERENCES["remove_repeats"]
-    t = compile_cleanup(t, language, PREFERENCES["self_correction"],
-                        remove_repeats).text
-    if not t:
-        return ""
-    if language != "en":
-        # Sentence casing and the ASCII terminator set are English rules.
-        # Capitalization does not exist in Japanese, Chinese, or Korean;
-        # German capitalizes nouns anywhere; and appending "." to a sentence
-        # that already ends in "。" or "？" is a visible defect. The
-        # deterministic pass therefore stops at whitespace normalization.
-        return t
-    if t[0].islower() and not continuing:   # mid-sentence joins stay lower
-        t = t[0].upper() + t[1:]
-    if t[-1] in ",;":
-        t = t[:-1] + "."
-    elif t[-1] not in ".!?…:":
-        t += "."
-    return t
+    # The finish itself lives in parrot_core, where voice_check.py replays
+    # exactly this when it tries an update on the person's recordings.
+    return finish_cleanup(t, language, PREFERENCES["self_correction"],
+                          remove_repeats, continuing=continuing)
 
 
 def needs_llm_cleanup(raw: str, tone_override: str | None,

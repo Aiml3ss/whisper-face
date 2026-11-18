@@ -1452,6 +1452,40 @@ def compile_cleanup(raw: str, language: str = "en",
                        needs_semantic_cleanup=needs_semantic)
 
 
+def finish_cleanup(text: str, language: str = "en",
+                   self_correction: bool = False,
+                   remove_repeats: bool = True, *,
+                   continuing: bool = False) -> str:
+    """The deterministic finish a dictation gets when no model rewrites it:
+    the cleanup compiler, then English sentence casing and a terminator.
+
+    dictate.py's ``quick_clean`` is this with the person's preferences, and
+    voice_check.py replays the same function when it tries an update on the
+    person's own recordings, so the two can never drift apart.
+    """
+    t = str(text or "").strip()
+    if not t:
+        return t
+    language = str(language or "").strip().casefold() or "en"
+    t = compile_cleanup(t, language, self_correction, remove_repeats).text
+    if not t:
+        return ""
+    if language != "en":
+        # Sentence casing and the ASCII terminator set are English rules.
+        # Capitalization does not exist in Japanese, Chinese, or Korean;
+        # German capitalizes nouns anywhere; and appending "." to a sentence
+        # that already ends in "。" or "？" is a visible defect. The
+        # deterministic pass therefore stops at whitespace normalization.
+        return t
+    if t[0].islower() and not continuing:   # mid-sentence joins stay lower
+        t = t[0].upper() + t[1:]
+    if t[-1] in ",;":
+        t = t[:-1] + "."
+    elif t[-1] not in ".!?…:":
+        t += "."
+    return t
+
+
 # Spoken edit commands: a closed, whole-utterance grammar. A phrase only counts
 # when the entire normalized utterance is exactly a command, so a lone spoken
 # command can act on already-dictated text while ordinary prose that merely

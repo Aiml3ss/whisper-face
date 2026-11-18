@@ -446,7 +446,8 @@ class OfferedUpdateTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, "", "")
         return run
 
-    def install(self, fetch, *, verify_app=None, version="0.6.1", revision=NEW):
+    def install(self, fetch, *, verify_app=None, version="0.6.1", revision=NEW,
+                voice_check=None):
         calls, verified = [], []
 
         def default_verify(source_zip, app, v, r):
@@ -454,8 +455,72 @@ class OfferedUpdateTests(unittest.TestCase):
         result = MODULE.install(
             version=version, revision=revision, home=self.home, fetch=fetch,
             runner=self.runner(calls), verify_app=verify_app or default_verify,
-            attach=self.staged_image("0.6.1", NEW))
+            attach=self.staged_image("0.6.1", NEW), voice_check=voice_check)
         return result, calls, verified
+
+    def test_a_release_that_hears_the_person_less_well_is_held(self):
+        make_release(self.server, "0.6.1", NEW)
+        asked = []
+
+        def held(layout, source_zip, version, current_version):
+            # Asked once the download verified, before anything is replaced.
+            asked.append((Path(source_zip).name, version, current_version,
+                          MODULE.app_release(self.app)["version"]))
+            return {"status": "held", "worse": ["word_errors"],
+                    "current": {"word_errors": 41},
+                    "candidate": {"word_errors": 50}, "recordings": 40}
+        result, calls, verified = self.install(
+            FakeReleases(self.server), voice_check=held)
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["voice_check"]["worse"], ["word_errors"])
+        self.assertEqual((result["version"], result["revision"]),
+                         ("0.6.1", NEW))
+        self.assertEqual(asked, [("WhisperFace-0.6.1-source.zip", "0.6.1",
+                                  "0.6.0", "0.6.0")])
+        self.assertEqual(len(verified), 1)
+        # Nothing replaced, nothing opened, nothing left behind.
+        self.assertEqual(MODULE.app_release(self.app)["version"], "0.6.0")
+        self.assertEqual(sorted(p.name for p in self.app.parent.iterdir()),
+                         ["Whisper Face.app"])
+        self.assertFalse(any(call[0] == "/usr/bin/open" for call in calls))
+        self.assertFalse((self.layout.support / "update-download").exists())
+        line = self.layout.log.read_text().strip().splitlines()[-1]
+        self.assertIn("app-update held", line)
+        self.assertIn("voice-check held recordings=40 words 41->50", line)
+
+    def test_a_release_that_passes_goes_ahead_as_before(self):
+        make_release(self.server, "0.6.1", NEW)
+        result, calls, _verified = self.install(
+            FakeReleases(self.server),
+            voice_check=lambda *_args: {"status": "passed", "recordings": 40,
+                                        "current": {}, "candidate": {}})
+        self.assertEqual(result["status"], "installed")
+        self.assertEqual(result["voice_check"]["status"], "passed")
+        self.assertEqual(MODULE.app_release(self.app)["version"], "0.6.1")
+        self.assertEqual(calls[-1][0], "/usr/bin/open")
+
+    def test_without_recordings_the_release_is_not_even_unpacked(self):
+        source_zip = self.root / "source.zip"
+        source_zip.write_bytes(b"not a zip")
+        outcome = MODULE.voice_check_release(
+            self.layout, source_zip, "0.6.1", "0.6.0",
+            check=lambda **_kwargs: self.fail("checked without recordings"))
+        self.assertEqual(outcome, {"status": "no-corpus"})
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()),
+                         sorted(["Applications", "home", "source.zip"]))
+
+    def test_the_menu_offers_update_anyway_only_for_a_held_release(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        begin = source[source.index("    def _begin_release_update(self"):]
+        begin = begin[:begin.index("\n    def ", 10)]
+        self.assertIn('arguments.append("--update-anyway")', begin)
+        self.assertLess(begin.index('outcome.get("status") == "held"'),
+                        begin.index("release_update_failure(outcome)"))
+        self.assertIn("update_anyway=True", begin)
+        main = (ROOT / "scripts" / "app_update.py").read_text()
+        main = main[main.index("def main("):]
+        self.assertIn("voice_check=None if args.update_anyway else "
+                      "voice_check_release", main)
 
     def test_accepting_downloads_verifies_replaces_the_app_and_opens_it(self):
         make_release(self.server, "0.6.1", NEW)

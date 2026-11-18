@@ -166,6 +166,13 @@ does (your address, and a fixed `WhisperFace-updater` user agent), run in a
 process of their own that the dictation path never loads, and can reach only
 the project's releases over HTTPS.
 
+If you have recorded the accuracy set in `~/whisper-face-evidence/accuracy/`,
+a chosen update is tried on those recordings before it takes over
+(`voice_check.py`). That adds no network request: the recordings are read in
+place, every program the check starts runs with the network denied, and what
+each version wrote is compared in memory and never saved. The receipt it
+leaves in `~/whisper-face-evidence/runs/` holds counts only.
+
 That is a testable claim, so it is tested. `tests/test_network_egress.py` runs
 on every pull request. It fails if any module on the dictation path gains the
 ability to open a socket, if a new outbound call site appears in the runtime,

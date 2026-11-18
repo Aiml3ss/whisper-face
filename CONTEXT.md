@@ -105,6 +105,14 @@ gate. Conflicting or stale candidates are quarantined rather than applied, and
 evidence against a candidate (a revert, the heard word left alone, a paste
 sent unedited) counts too.
 
+**Voice-Checked Update** — an update tried on the person's own accuracy
+recordings before it replaces what they run (`voice_check.py`): the candidate's
+speech engine and clean-up against the running version's, scored on word
+mistakes, names written right and names written that were not said. Worse
+beyond the stated tolerance holds the update until the person waits or
+updates anyway. It is not the Personal Regression Lab, which tests learned
+text mappings and knows nothing of audio.
+
 **Prosody Event** — a pause, emphasis, pitch movement, or end-of-speech signal
 derived from audio and aligned to Word Evidence.
 

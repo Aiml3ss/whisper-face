@@ -101,6 +101,7 @@ arguments:
    uv run tests/test_side_by_side_update.py
    uv run tests/test_app_update.py
    uv run tests/test_self_update.py
+   uv run tests/test_voice_check.py
    ```
 
    This list is duplicated in `docs/installer-release-process.md` and
