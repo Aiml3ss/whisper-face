@@ -1770,9 +1770,11 @@ class SpeechRuntimeTests(unittest.TestCase):
         one is still decoding it unless a speculation stood; these tests
         are about what the session does when it is needed."""
         dictate = self.mac.dictate
-        self.addCleanup(setattr, dictate, "usual_decode_ready",
-                        dictate.usual_decode_ready)
+        for name in ("usual_decode_ready", "usual_decodes"):
+            self.addCleanup(setattr, dictate, name, getattr(dictate, name))
         dictate.usual_decode_ready = lambda *_args: False
+        # Nothing of the usual path ends before the session's answer.
+        dictate.usual_decodes = lambda *_args: []
 
     def test_a_long_take_decoded_during_the_hold_finishes_no_session(self):
         # The long take ends in a pause, so a speculation of its last part
