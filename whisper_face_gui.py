@@ -1015,6 +1015,36 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.notice.demonstration_cancelled": "Demonstration draft rolled back",
         "settings.notice.demonstration_deleted": "Approved demonstration recipe deleted",
         "diagnostics.notice.support_snapshot.copied": "Transcript-free support snapshot copied",
+        # An update tried on the person's own recordings before it takes
+        # over (voice_check.py). Counts only: never a word they said.
+        "update.voice_check.ahead.one": "Before it replaces this version, it’s tried on your recording. If it hears you less well, you’ll be asked first.",
+        "update.voice_check.ahead.many": "Before it replaces this version, it’s tried on your {recordings} recordings. If it hears you less well, you’ll be asked first.",
+        "update.voice_check.held.title": "This update hears you less well",
+        "update.voice_check.held.body.one": "Before installing {update}, Whisper Face tried it on your recording. Compared with the version you have now:",
+        "update.voice_check.held.body.many": "Before installing {update}, Whisper Face tried it on your {recordings} recordings. Compared with the version you have now:",
+        "update.voice_check.held.terms_right": "Names and terms right: {before} of {total} now, {after} with the update.",
+        "update.voice_check.held.word_errors": "Word mistakes: {before} now, {after} with the update.",
+        "update.voice_check.held.false_insertions": "Names written that you didn’t say: {before} now, {after} with the update.",
+        "update.voice_check.held.unanswered": "Recordings it couldn’t finish: {after} of {recordings}.",
+        "update.voice_check.held.footer": "Nothing has changed. You can wait for a later update, or update anyway.",
+        "update.voice_check.held.wait": "Wait",
+        "update.voice_check.held.anyway": "Update Anyway",
+        "update.voice_check.passed.one": "It was tried on your recording first: names and terms right {terms_after} of {terms_total} ({terms_before} before), word mistakes {errors_after} ({errors_before} before).",
+        "update.voice_check.passed.many": "It was tried on your {recordings} recordings first: names and terms right {terms_after} of {terms_total} ({terms_before} before), word mistakes {errors_after} ({errors_before} before).",
+        "update.voice_check.not_checked": "It couldn’t be tried on your recordings first: {reason}.",
+        "update.voice_check.skipped": "You chose to update without trying it on your recordings.",
+        "update.voice_check.version": "version {version}",
+        "update.voice_check.build": "build {build}",
+        "update.voice_check.reason.not-mac": "that only works on a Mac",
+        "update.voice_check.reason.no-sandbox": "this Mac can’t keep the check offline",
+        "update.voice_check.reason.no-recogniser": "this version’s speech engine isn’t installed",
+        "update.voice_check.reason.current-did-not-start": "this version’s speech engine didn’t start",
+        "update.voice_check.reason.candidate-too-old": "the new version can’t replay recordings",
+        "update.voice_check.reason.not-built": "the new version’s speech engine couldn’t be built offline",
+        "update.voice_check.reason.candidate-did-not-start": "the new version’s speech engine didn’t start offline",
+        "update.voice_check.reason.candidate-failed": "the new version couldn’t replay them",
+        "update.voice_check.reason.unreadable": "the recordings couldn’t be read",
+        "update.voice_check.reason.failed": "the check stopped unexpectedly",
 
         # --- new look: shell
 
@@ -1299,6 +1329,95 @@ def plural_key(base: str, count: int) -> str:
     """
 
     return f"{base}.one" if count == 1 else f"{base}.many"
+
+
+# The order a held update lists what got worse in: names first, because
+# they are what the recordings exist for.
+VOICE_CHECK_WORSE_ORDER = (
+    "terms_right", "false_insertions", "word_errors", "unanswered")
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) \
+        and value >= 0 else 0
+
+
+def voice_check_update_label(*, version: str = "", build: str = "",
+                             locale: str = "en") -> str:
+    """How a held update names itself: a release's version, or a build."""
+    if version:
+        return localized_string("update.voice_check.version", locale=locale,
+                                version=version)
+    return localized_string("update.voice_check.build", locale=locale,
+                            build=str(build)[:7])
+
+
+def voice_check_ahead(recordings: int, *, locale: str = "en") -> str:
+    """The sentence an update's start adds when it will be tried first, or
+    nothing when there are no recordings to try it on."""
+    recordings = _count(recordings)
+    if not recordings:
+        return ""
+    return localized_string(plural_key("update.voice_check.ahead", recordings),
+                            locale=locale, recordings=recordings)
+
+
+def voice_check_held(outcome: Mapping[str, Any], update: str, *,
+                     locale: str = "en") -> tuple[str, str]:
+    """(title, detail) for an update held because it heard the person less
+    well: each measure that got worse, as counts. Built from the outcome's
+    numbers alone, so no word the person said can reach it."""
+    before = outcome.get("current") or {}
+    after = outcome.get("candidate") or {}
+    recordings = _count(outcome.get("recordings"))
+    lines = [localized_string(
+        plural_key("update.voice_check.held.body", recordings), locale=locale,
+        update=update, recordings=recordings)]
+    worse = set(outcome.get("worse") or ())
+    for measure in VOICE_CHECK_WORSE_ORDER:
+        if measure not in worse:
+            continue
+        lines.append("• " + localized_string(
+            f"update.voice_check.held.{measure}", locale=locale,
+            before=_count(before.get(measure)),
+            after=_count(after.get(measure)),
+            total=_count(after.get("terms_total")), recordings=recordings))
+    lines.append(localized_string("update.voice_check.held.footer",
+                                  locale=locale))
+    return (localized_string("update.voice_check.held.title", locale=locale),
+            "\n\n".join([lines[0], "\n".join(lines[1:-1]), lines[-1]]))
+
+
+def voice_check_note(outcome: Any, *, locale: str = "en") -> str:
+    """One sentence on how an update that went ahead fared on the person's
+    recordings; empty when there were none to try it on."""
+    if not isinstance(outcome, Mapping):
+        return ""
+    status = outcome.get("status")
+    if status == "passed":
+        before = outcome.get("current") or {}
+        after = outcome.get("candidate") or {}
+        recordings = _count(outcome.get("recordings"))
+        return localized_string(
+            plural_key("update.voice_check.passed", recordings),
+            locale=locale, recordings=recordings,
+            terms_before=_count(before.get("terms_right")),
+            terms_after=_count(after.get("terms_right")),
+            terms_total=_count(after.get("terms_total")),
+            errors_before=_count(before.get("word_errors")),
+            errors_after=_count(after.get("word_errors")))
+    if status == "skipped":
+        return localized_string("update.voice_check.skipped", locale=locale)
+    if status == "not-checked":
+        key = f"update.voice_check.reason.{outcome.get('reason')}"
+        if key not in STRING_CATALOGS["en"]:
+            key = "update.voice_check.reason.failed"
+        return localized_string(
+            "update.voice_check.not_checked", locale=locale,
+            reason=localized_string(key, locale=locale))
+    return ""
+
+
 FACES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
@@ -20106,6 +20225,10 @@ __all__ = [
     "setup_rows_turned_good",
     "setup_waits_on_a_row",
     "plural_key",
+    "voice_check_ahead",
+    "voice_check_held",
+    "voice_check_note",
+    "voice_check_update_label",
     "normalize_snapshot",
     "normalize_acoustic_keyword_inspection",
     "normalize_point_and_speak_preview",

@@ -2036,6 +2036,9 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("insertion_integrity.py", installer)
                 self.assertIn("personal_regression.py", installer)
                 self.assertIn("shadow_candidate_gate.py", installer)
+                # Both updaters try an update on the person's recordings
+                # with it before switching (self_update, app_update).
+                self.assertIn("voice_check.py", installer)
                 self.assertIn("cleanup_circuit_breaker.py", installer)
                 self.assertIn("delayed_cleanup_activation.py", installer)
                 self.assertIn("delayed_cleanup_merge.py", installer)

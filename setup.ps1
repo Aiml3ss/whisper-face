@@ -568,7 +568,7 @@ $Required = @(
     "whisper_face_gui.py", "whisper_face_theme.py",
     "whisper_face_characters.py", "whisper_face_render.py",
     "support_bundle.py",
-    "self_update.py",
+    "self_update.py", "voice_check.py",
     "scripts\side_by_side_update.py", "scripts\safe_update_advisor.py",
     "scripts\release_manifest.py",
     "snippets.template.json", "tones.template.json",

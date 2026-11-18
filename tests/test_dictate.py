@@ -58,6 +58,7 @@ from parrot_core import (  # noqa: E402
     parakeet_result,
     can_reuse_speculation,
     compile_cleanup,
+    finish_cleanup,
     infer_revised_insertion,
     mode_from_modifiers,
     should_start_speculation,
@@ -242,6 +243,8 @@ def load_definitions(*names, assignments=(), extra=None):
         # Pure helpers the assembly and the compiler call on every decode.
         "HELPER_WORD_SOURCE": HELPER_WORD_SOURCE,
         "combine_word_evidence_status": combine_word_evidence_status,
+        # quick_clean's finish, which voice_check.py replays too.
+        "finish_cleanup": finish_cleanup,
         # The pure readback comparisons dictate.py imports from
         # insertion_integrity, so a selected readback runs the real ones.
         **{name: getattr(insertion_integrity, name) for name in (

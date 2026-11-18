@@ -57,6 +57,9 @@ from types import SimpleNamespace
 from typing import Callable, TextIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The checkout's root, for voice_check.py, after scripts/ so a module there
+# can never be shadowed by one of the same name at the root.
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import release_manifest  # noqa: E402
 import safe_update_advisor  # noqa: E402
@@ -284,6 +287,13 @@ def _record(layout: Layout, status: str, start: str, end: str,
         os.chmod(layout.log, 0o600)
     except OSError:
         pass
+
+
+def _voice_line(checked: dict) -> str:
+    """The voice check's content-free counts, for update.log."""
+    import voice_check
+
+    return voice_check.summary_line(checked)
 
 
 def _last_reason(lines: list[str]) -> str:
@@ -589,15 +599,54 @@ def check(*, home: Path | None = None, fetch: Fetch = https_get) -> dict:
     return result
 
 
+def voice_check_release(layout: Layout, source_zip: Path, version: str,
+                        current_version: str, *, check=None) -> dict:
+    """Try a verified release on the person's recordings before its app
+    replaces this one.
+
+    With no recordings nothing is unpacked. Otherwise the release's source
+    archive, already proven to be that release, is unpacked into the
+    update's own private folder and ``voice_check.check_update`` compares it
+    with the copy this install runs.
+    """
+    import voice_check
+    import verify_macos_package
+
+    if voice_check.corpus_size(layout.home) == 0:
+        return {"status": "no-corpus"}
+    unpacked = Path(tempfile.mkdtemp(prefix="voice-check.", dir=source_zip.parent))
+    try:
+        os.chmod(unpacked, 0o700)
+        root = f"Whisper Face {version}"
+        verify_macos_package._check_zip_members(source_zip, root)
+        verify_macos_package._extract_zip(source_zip, unpacked)
+        return (check or voice_check.check_update)(
+            home=layout.home, current=layout.checkout,
+            candidate=unpacked / root, current_label=current_version,
+            candidate_label=version)
+    except (OSError, verify_macos_package.PackageError):
+        return {"status": "not-checked", "reason": "candidate-failed"}
+    finally:
+        shutil.rmtree(unpacked, ignore_errors=True)
+
+
 def install(*, version: str, revision: str, home: Path | None = None,
             fetch: Fetch = https_get, runner: Runner = subprocess.run,
             verify_app: Callable[[Path, Path, str, str], None] | None = None,
-            attach=None, policy: Path | None = None) -> dict:
+            attach=None, policy: Path | None = None,
+            voice_check=None) -> dict:
     """Download the release the person accepted, verify it, put its app
     where this one is and open it to finish the update.
 
     ``version`` and ``revision`` are what the menu offered: if the latest
     release has changed since, nothing is installed.
+
+    ``voice_check``, when given, is called as ``voice_check(layout,
+    source_zip, version, current_version)`` once the download has verified
+    and before the app is replaced (``main`` passes
+    :func:`voice_check_release` unless the person chose to update anyway).
+    A ``held`` outcome returns ``{"status": "held", ...}`` with nothing
+    replaced; any other outcome goes on and is carried in the result.
     """
     import macos_launcher_app
     import verify_macos_package
@@ -658,6 +707,21 @@ def install(*, version: str, revision: str, home: Path | None = None,
         except (verify_macos_package.PackageError,
                 macos_launcher_app.LauncherError, OSError) as exc:
             raise UpdateError(f"the new app did not verify ({exc})") from exc
+        # Verified: now, before it replaces anything, on the person's voice.
+        checked = None
+        if voice_check is not None:
+            try:
+                checked = voice_check(layout, source_zip, version,
+                                      receipt["version"])
+            except Exception:
+                checked = {"status": "not-checked", "reason": "failed"}
+            if not isinstance(checked, dict):
+                checked = {"status": "not-checked", "reason": "failed"}
+            if checked.get("status") == "held":
+                _record(layout, "held", receipt["source_revision"], revision,
+                        _voice_line(checked))
+                return {"status": "held", "version": version,
+                        "revision": revision, "voice_check": checked}
         try:
             macos_launcher_app.verify_owned_app(app)
         except macos_launcher_app.LauncherError as exc:
@@ -673,14 +737,17 @@ def install(*, version: str, revision: str, home: Path | None = None,
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
         shutil.rmtree(work, ignore_errors=True)
-    _record(layout, "downloaded", receipt["source_revision"], revision)
+    _record(layout, "downloaded", receipt["source_revision"], revision,
+            _voice_line(checked) if checked else "")
     # The new app finishes the update the way it does after a drag.
     opened = runner(["/usr/bin/open", "-n", str(app), "--args", "--update"],
                     capture_output=True, text=True, timeout=30)
+    outcome = {"status": "installed", "version": version}
+    if checked:
+        outcome["voice_check"] = checked
     if opened.returncode != 0:
-        return {"status": "installed", "version": version,
-                "note": "open Whisper Face from Applications to finish"}
-    return {"status": "installed", "version": version}
+        outcome["note"] = "open Whisper Face from Applications to finish"
+    return outcome
 
 
 # ------------------------------------------------------------------- main --
@@ -695,6 +762,8 @@ def main(argv: list[str] | None = None) -> int:
     accept = commands.add_parser("install", help="download and install the offered release")
     accept.add_argument("--version", required=True)
     accept.add_argument("--revision", required=True)
+    # The person saw a held update's counts and chose to update anyway.
+    accept.add_argument("--update-anyway", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "apply":
         return apply_update(app=Path(args.app), dry_run=args.dry_run)
@@ -702,7 +771,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(check(), sort_keys=True))
         return 0
     try:
-        outcome = install(version=args.version, revision=args.revision)
+        outcome = install(
+            version=args.version, revision=args.revision,
+            voice_check=None if args.update_anyway else voice_check_release)
     except (UpdateError, OSError) as exc:
         print(json.dumps({"status": "failed", "reason": str(exc)}, sort_keys=True))
         return 1

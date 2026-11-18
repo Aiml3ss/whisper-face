@@ -76,6 +76,61 @@ identity is the bundle identifier plus the Team ID, which stay the same from
 release to release, so the grants are expected to survive an update; that is
 unverified until a signed build exists.
 
+## Tried on your own voice first
+
+If you have recorded the accuracy set
+(`uv run scripts/capture_voice_evidence.py accuracy`, kept in
+`~/whisper-face-evidence/accuracy/`), every update you choose from **Check for
+Updates…** is tried on those recordings before it replaces what you run. With
+no recordings, updates behave exactly as described below.
+
+Where it happens: a folder or clone install tries the new revision after it
+is fetched and before `git checkout` (the revision is exported with
+`git archive` from the local object store); an app install tries the new
+release after its download has verified and before the new app replaces the
+old one (its verified source archive is unpacked into the update's private
+folder). The new version's speech engine and clean-up run on each recording,
+this version's run on the same recordings, and both are scored against what
+you said. When the two versions' speech-engine sources are identical, the
+installed engine answers for both; otherwise the new one is built offline in a
+private folder, under its own name so its compiled model cache is separate,
+and that cache is removed afterwards. Dragging a newer app over the old one by
+hand is not tried: the setup window it opens has no way to ask.
+
+The update is held when the new version is worse by more than this:
+
+| Measure | Allowed |
+|---|---|
+| Word mistakes | 2, or 0.5% of the words in the recordings, whichever is more |
+| Names and terms written right | none fewer |
+| Names written that were not said | none more |
+| Recordings it could not finish | none more |
+
+The same engine on the same recordings writes the same words (40 of 40
+identical across three runs of each engine on the owner's Mac), so the word
+allowance is not for noise; it leaves room for a clean-up change an update
+means to make that a word count cannot tell from a mishearing. Names have no
+allowance: they are what the recordings are for.
+
+A held update changes nothing. The alert says which measures got worse, in
+counts (for example "Word mistakes: 41 now, 50 with the update."), and offers
+**Wait** (the default) or **Update Anyway**, which runs the same update
+without the check. When it passes, the folder install's "up to date" alert
+adds one line with the counts. A check that cannot run (no engine installed,
+no `sandbox-exec`, a new version without `voice_check.py`, an engine that will
+not build or start offline) does not hold the update; it says why.
+
+What it may not do: everything it starts runs under `sandbox-exec` with the
+network denied and at background priority (`taskpolicy -b`); it runs only
+after you choose an update, in the updater's own process, never inside
+dictation. Recordings are read in place and never copied. What each version
+wrote is scored in memory and never written down: the receipt in
+`~/whisper-face-evidence/runs/<date>-update-check/receipt.json` (`0600`, in a
+`0700` folder) holds counts and recording names only, and `update.log` gets
+one line of counts. On the owner's 40 recordings it took about a minute when
+the engine had changed (about 30 s of that the build) and a few seconds when
+it had not.
+
 ## Check for Updates… for a folder or clone install
 
 For a folder or clone install, when you choose it, `self_update.py`:
@@ -85,7 +140,8 @@ For a folder or clone install, when you choose it, `self_update.py`:
    this check; earlier disk-image installs always report local changes);
 2. runs one `git fetch` of the checkout's tracked branch (normally `main` on
    GitHub);
-3. if that branch has moved, checks out its tip and reruns the installer;
+3. if that branch has moved, tries its tip on your recordings when you have
+   them (above), then checks it out and reruns the installer;
 4. if the installer fails, restores the last revision the installer
    provisioned cleanly, reinstalls it, and reports `rolled_back` only once
    that is verified. The reason it reports is the installer's last `!!` line,
