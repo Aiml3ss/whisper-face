@@ -2283,6 +2283,15 @@ def _word_spans(text: str, words: Sequence) -> list[tuple[int, int]] | None:
     return spans
 
 
+def _heard_key(value: str) -> str:
+    """Heard words compared for placement: case, spaces and the punctuation
+    at either end aside. The runtime reports its own words ("Prea,"); the
+    recognition's are the compiler's lexical tokens ("Prea"), with the
+    punctuation outside them, where it stays."""
+    return re.sub(r"\s+", "", re.sub(r"\A[^\w]+|[^\w]+\Z", "",
+                                     value)).casefold()
+
+
 def _pieces_were_candidates(candidate: VocabularyCandidate) -> bool:
     """Whether the detour took at least one piece and each was ranked among
     that step's candidates: the model itself offered every piece written."""
@@ -2354,8 +2363,7 @@ def apply_vocabulary_evidence(
                 and len(indices) == len(candidate.heard_word_starts)
                 and indices == list(range(indices[0], indices[-1] + 1))):
             start, end = spans[indices[0]][0], spans[indices[-1]][1]
-            if re.sub(r"\s+", "", text[start:end]).casefold() \
-                    != re.sub(r"\s+", "", candidate.heard).casefold():
+            if _heard_key(text[start:end]) != _heard_key(candidate.heard):
                 start = end = -1
         heard = text[start:end] if start >= 0 else candidate.heard
         lead, core, tail = _VOCABULARY_EDGES_RE.match(heard).groups()
@@ -2546,8 +2554,7 @@ def apply_vocabulary_decisions(
             return refuse("overlap")
         previous_end = end
         heard = text[start:end]
-        if re.sub(r"\s+", "", heard).casefold() \
-                != re.sub(r"\s+", "", decision.heard).casefold():
+        if _heard_key(heard) != _heard_key(decision.heard):
             return refuse("span")
         indices = [index for index, (left, right) in enumerate(spans)
                    if left < end and start < right]

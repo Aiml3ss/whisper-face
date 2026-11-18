@@ -1409,6 +1409,27 @@ class VocabularyPolicyTests(unittest.TestCase):
         self.assertEqual(voice_compiler.VOCABULARY_UNSURE_BELOW, 0.99)
         self.assertEqual(voice_compiler.VOCABULARY_MAX_PER_DICTATION, 2)
 
+    def test_a_heard_word_is_placed_on_the_tokens_the_compiler_keeps(self):
+        # The app's words are the compiler's lexical tokens, so the
+        # runtime's "ka." is the token "ka" with the full stop after it.
+        from voice_compiler import apply_vocabulary_decisions
+        from parrot_core import RecognitionWord
+        text = "Ask Prea ka. Then go."
+        words = [RecognitionWord(word, index * 0.4, index * 0.4 + 0.3, 0.6)
+                 for index, word in enumerate(
+                     ("Ask", "Prea", "ka", "Then", "go"))]
+        decisions = apply_vocabulary_evidence_for(
+            text, words, [self.candidate("Priyanka", [1, 2],
+                                         heard="Prea ka.")], self.terms)
+        self.assertEqual([d.reason for d in decisions], ["would-write"])
+        self.assertEqual(apply_vocabulary_decisions(
+            text, words, decisions).text, "Ask Priyanka. Then go.")
+        # Letters that differ are still not the same words.
+        decisions = apply_vocabulary_evidence_for(
+            text, words, [self.candidate("Priyanka", [1, 2],
+                                         heard="Prea kah.")], self.terms)
+        self.assertEqual([d.reason for d in decisions], ["not-placed"])
+
     def test_a_piece_the_model_did_not_offer_is_never_written(self):
         from parrot_core import VocabularyCandidate, VocabularyStep
         good = self.candidate("Priyanka", [1, 2], heard="Prea ka")
@@ -1424,6 +1445,11 @@ class VocabularyPolicyTests(unittest.TestCase):
                 decisions = self.decide("Ask Prea ka now.", [candidate])
                 self.assertEqual([(d.accepted, d.reason) for d in decisions],
                                  [(False, "not-a-candidate")])
+
+
+def apply_vocabulary_evidence_for(text, words, candidates, terms):
+    from voice_compiler import apply_vocabulary_evidence
+    return apply_vocabulary_evidence(text, words, candidates, terms)
 
 
 class VocabularyApplicationTests(unittest.TestCase):
