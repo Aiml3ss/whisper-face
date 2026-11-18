@@ -1127,6 +1127,10 @@ def validate_benchmark_result(
         raise PublicationError(
             "the result must list every number only the outside probe gives")
     for name, entry in probe.items():
+        if (isinstance(entry, Mapping)
+                and entry.get("status") == bench.OUTSIDE_PROBE
+                and name in bench.OUTSIDE_PROBE_MEASURES):
+            continue                 # checked once the takes are known
         if (not isinstance(entry, Mapping)
                 or entry.get("status") != bench.NEEDS_OUTSIDE_PROBE
                 or entry.get("value") is not None):
@@ -1143,6 +1147,13 @@ def validate_benchmark_result(
     for take in takes:
         if take.get("voice") not in corpus["speech"]["voices"]:
             raise PublicationError(f"{take['id']}: not a corpus voice")
+    for name, entry in probe.items():
+        if entry.get("status") == bench.OUTSIDE_PROBE:
+            problems = bench.outside_probe_problems(result, entry)
+            if problems:
+                raise PublicationError(
+                    f"{name} from the outside probe is refused: "
+                    + "; ".join(problems))
     expected = bench.score_takes(
         [{"id": take["id"], "hypothesis": take["runtime"]["text"]}
          for take in takes], corpus)
@@ -1283,6 +1294,15 @@ def render_benchmark_markdown(result: Mapping[str, Any]) -> str:
         lines += _latency_rows(
             f"App path, {name}: key release to pasted (fake field)",
             block["latency_ms"]["release_to_pasted_in_fake_field"])
+    measured = result["outside_probe"]["release_to_text_on_screen_ms"]
+    if measured["status"] == bench.OUTSIDE_PROBE:
+        value = measured["value"]
+        lines += _latency_rows(
+            "Outside probe: key release to first text in a real window",
+            value["release_to_first_text"])
+        lines += _latency_rows(
+            "Outside probe: key release to final text in a real window",
+            value["release_to_final_text"])
     lines += [
         "",
         f"The runtime decodes {recognition['real_time_factor']}x faster "
@@ -1290,6 +1310,23 @@ def render_benchmark_markdown(result: Mapping[str, Any]) -> str:
         "measure on the fake Mac, whose field takes a paste instantly; they "
         "leave out what a real app adds, so they are not a release-to-screen "
         "number.",
+    ]
+    if measured["status"] == bench.OUTSIDE_PROBE:
+        method = measured["probe"]["method"]
+        lines += [
+            "",
+            "*Outside probe* times are the only ones here comparable across "
+            "apps: outside_probe.py played each take "
+            f"({method['audio']}), pressed and released the app's capture "
+            "key with synthetic key events, and timed the text arriving in "
+            "its own window "
+            f"({measured['value']['takes']} takes, "
+            f"{measured['probe']['run']['repeats']} repeats each, "
+            f"{measured['value']['repeats_without_text']} repeats with no "
+            "text). Final text is the last change before the window stayed "
+            f"unchanged for {method['settle_ms']} ms.",
+        ]
+    lines += [
         "",
         "## Delivery on the fake Mac",
         "",
@@ -1316,7 +1353,8 @@ def render_benchmark_markdown(result: Mapping[str, Any]) -> str:
         "|---|---|",
     ]
     for name, entry in result["outside_probe"].items():
-        lines.append(f"| `{name}` | {entry['why']} |")
+        if entry["status"] == bench.NEEDS_OUTSIDE_PROBE:
+            lines.append(f"| `{name}` | {entry['why']} |")
     lines += ["", "## Where it went wrong", ""]
     wrong = [("Runtime alone", accuracy)] + [
         (f"App path, {name}", block["accuracy"])
