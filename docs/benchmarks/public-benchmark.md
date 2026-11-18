@@ -143,8 +143,21 @@ the seed, the passes and the exact command.
   runtime first, which is off by default; the FluidAudio helper it falls back
   to has written identical text on every clip compared so far
   (`native/ParrotSpeechRuntime/README.md`).
-- **One machine.** Latency depends on the Mac and on what else it is doing.
-  Compare latencies only between results from the same machine.
+- **One machine, one sitting.** Latency depends on the Mac and on what else
+  it is doing. Compare latencies only between results from the same
+  machine, run one after the other. Most of a short take's release time is
+  the app's fixed 50 ms wait before the paste keystroke, and how late that
+  wait wakes up moves by 5 to 10 ms between runs: the same 0.6.0 revision
+  measured a short-take p50 anywhere from 62 to 72 ms over seven runs in
+  one afternoon. A difference smaller than that between two results run
+  apart is not a difference.
+- **What the fake microphone does not cost.** Stopping the fake stream is
+  free; stopping a real one waits on the audio device (about 100 ms at the
+  median on the owner's Mac). Since the release-latency change the app no
+  longer waits for it before the paste, so the fake Mac understates what
+  that change gained. Every take also ends in 0.3 s of silence, long enough
+  for the last part to be decoded before the key-up; a person who lets go
+  mid-word waits for that decode, which the fake Mac never shows.
 - **Its makers ran it.** Every number here was produced by Whisper Face's own
   makers on their own corpus. The command and corpus are public so anyone
   can check them.
