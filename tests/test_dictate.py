@@ -13735,9 +13735,12 @@ class SpeechSessionTests(unittest.TestCase):
     SPOKEN = "Alpha beta gamma delta."
 
     def recognize(self, *, words, chunks=(), cut=0, audio=None,
-                  crosscheck=True, skip_escalation=True, answer=True):
+                  crosscheck=True, skip_escalation=True, answer=True,
+                  last_part_decoded=False):
         """session_recognition over a session whose answer has these word
-        confidences, one word a second; what it returned and the session."""
+        confidences, one word a second; what it returned and the session.
+        The last part's usual decode is still running unless
+        ``last_part_decoded``."""
         from parrot_core import HelperWord
         from voice_compiler import project_word_evidence
         tokens = self.SPOKEN.split()
@@ -13757,7 +13760,8 @@ class SpeechSessionTests(unittest.TestCase):
             cancel=lambda: session.cancelled.append(True))
         rec = SimpleNamespace(session=session, frames=object(), prompt=None)
         ns = load_definitions(
-            "session_recognition", "_parakeet_crosschecked",
+            "session_recognition", "usual_decode_ready",
+            "_parakeet_crosschecked",
             "_clean_native_processing_s", "crosscheck_agreement",
             "prepare_asr_audio",
             assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
@@ -13780,9 +13784,30 @@ class SpeechSessionTests(unittest.TestCase):
             future.set_result(Recognition(
                 "Alpha.", confidence, engine=engine))
             chunk_futs.append(SimpleNamespace(future=future))
-        recognition = ns["session_recognition"](rec, audio, cut, chunk_futs)
+        last_part = self.Future()
+        if last_part_decoded:
+            last_part.set_result(Recognition("Delta.", 0.9))
+        recognition = ns["session_recognition"](
+            rec, audio, cut, chunk_futs, SimpleNamespace(future=last_part))
         self.assertIsNone(rec.session)
         return recognition, session
+
+    def test_a_take_decoded_during_the_hold_never_finishes_its_session(self):
+        # A speculation of the last part stood and every chunk is back, so
+        # the usual path only joins; finishing the session would decode
+        # the last window at release for nothing.
+        recognition, session = self.recognize(
+            words=(0.99,) * 4, cut=16_000,
+            chunks=(("parakeet-unified", 0.9),), last_part_decoded=True)
+        self.assertIsNone(recognition)
+        self.assertEqual(session.finished, [])
+        self.assertEqual(session.cancelled, [True])
+        # A chunk still decoding, or the last part, keeps the session.
+        recognition, session = self.recognize(
+            words=(0.99,) * 4, cut=16_000,
+            chunks=(("parakeet-unified", 0.9),))
+        self.assertEqual(recognition.text, self.SPOKEN)
+        self.assertEqual(session.finished, [16_000 * 5])
 
     def test_a_sure_take_is_the_sessions_whole_decode(self):
         recognition, session = self.recognize(words=(0.95, 0.99, 0.9, 0.97))

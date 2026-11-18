@@ -14209,13 +14209,29 @@ def capture_release(rec):
     return full_audio, cut, chunk_futs, None, tail_done_at
 
 
+def usual_decode_ready(chunk_futs, pre_future) -> bool:
+    """Whether everything the usual path joins is decoded already: every
+    rolling chunk, and the last part's decode when there is one (a
+    speculation that stood, or the early decode that ran beside the tail).
+    Then assemble_raw only joins finished parts."""
+    futures = [getattr(scheduled, "future", scheduled)
+               for scheduled in chunk_futs]
+    if pre_future is not None:
+        futures.append(getattr(pre_future, "future", pre_future))
+    return all(future.done() for future in futures)
+
+
 def session_recognition(rec, full_audio: np.ndarray, cut: int,
-                        chunk_futs) -> Recognition | None:
+                        chunk_futs, pre_future=None) -> Recognition | None:
     """The take's transcript from its speech session, or None.
 
     The session's answer is the runtime's offline decode of the whole take,
-    and at release it cost only the last window. It stands for the take
-    only where the cross-check has nothing left to do:
+    and at release it cost only the last window. That window is a decode
+    at release, so the session is not finished at all when the usual path
+    is decoded already (usual_decode_ready): a take whose last part was
+    speculated during the hold is joined at once, as it was before
+    sessions. Otherwise it stands for the take only where the cross-check
+    has nothing left to do:
 
     - the take reached the runtime exactly as it would in one request (no
       gain or noise gate: prepare_asr_audio leaves it as it is);
@@ -14236,6 +14252,8 @@ def session_recognition(rec, full_audio: np.ndarray, cut: int,
     used = False
     try:
         if not session.begun or prepare_asr_audio(full_audio) is not full_audio:
+            return None
+        if usual_decode_ready(chunk_futs, pre_future):
             return None
         answer = session.finish(rec.frames, len(full_audio))
         if answer is None:
@@ -14313,7 +14331,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
         phase = "recognition"
         asr_started_at = time.perf_counter()
-        recognition = session_recognition(rec, full_audio, cut, chunk_futs)
+        recognition = session_recognition(
+            rec, full_audio, cut, chunk_futs, pre_future)
         if recognition is None:
             recognition = assemble_raw(
                 chunk_futs, pre_future, full_audio[cut:], rec.prompt,
