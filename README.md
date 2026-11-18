@@ -26,7 +26,7 @@ product is a future workstream, not a current setup promise.
 | Product promise | What Whisper Face does |
 |---|---|
 | **Setup is part of the product** | `Install.command` provisions the app, locked dependencies, models, native helper, login services, and health checks in one repeatable flow. |
-| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias Whisper's recognition but never replace a recognized word; the clean-up writes a dictionary term in its own form only where the words heard equal it but for spaces, hyphens and case. Other on-screen text can only repair a word the recognizer was unsure of and itself wrote as a name or identifier (a visible "Qwen" repairs "Gwen"); it never replaces or introduces an ordinary word, and each repair is a recorded decision. The optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, and a typed self-correction only if you turn it on), described under [Daily use](#daily-use). |
+| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias Whisper's recognition but never replace a recognized word, except where **Favor my words** writes a term the recognizer itself heard as a close second (a recorded edit); the clean-up writes a dictionary term in its own form only where the words heard equal it but for spaces, hyphens and case. Other on-screen text can only repair a word the recognizer was unsure of and itself wrote as a name or identifier (a visible "Qwen" repairs "Gwen"); it never replaces or introduces an ordinary word, and each repair is a recorded decision. The optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, and a typed self-correction only if you turn it on), described under [Daily use](#daily-use). |
 | **Fast by architecture** | Models stay warm, long speech is recognized while you talk, installed model paths resolve offline, and routine cleanup stays deterministic unless the words truly require semantic work. |
 | **Insertion is a transaction** | The target is leased and revalidated before one paste attempt; destination drift goes to a recoverable Voice Outbox instead of the wrong field. |
 | **Personal without surveillance** | Corrections become scoped, inspectable local rules and regression cases—not a cloud transcript dossier. |
@@ -135,7 +135,14 @@ are never Supporter-only features.
   protect words; they never replace a word the recognizer produced. Parakeet
   takes no prompt: when Whisper Face's own speech runtime answers, it looks
   for your dictionary terms in a second pass and reports where one could
-  have been heard, and for now that report is only counted, never written. The
+  have been heard. With **Favor my words** on (Settings → Personalize, on by
+  default), a term the recognizer itself ranked a close second over words it
+  was unsure of, and that sounds like them, is written instead: at most two
+  in a dictation, in English capture only, never in code mode or verbatim
+  apps. Each one is a recorded edit shown under Inspect Evidence, and the
+  words heard stay the dictation's raw transcript. Off, the report is only
+  counted (on Windows, which has no such report, the switch is
+  `"favor_my_words"` in `preferences.json`). The
   context itself is not written to the transcript history, but in Reply and
   Edit modes the field text or selection is what the cleanup model rewrites,
   so the result (or, in Edit without the model, the unchanged selection) is

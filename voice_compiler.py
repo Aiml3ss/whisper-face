@@ -18,6 +18,7 @@ from typing import Iterable, Protocol, Sequence
 
 from parrot_core import (
     HELPER_WORD_SOURCE,
+    VOCABULARY_CANDIDATES_PER_STEP,
     RecognitionWord,
     VocabularyCandidate,
     find_self_correction,
@@ -2167,13 +2168,15 @@ def _sentence_case(text: str, start: int, heard: str, term: str) -> str:
     return term
 
 
-# --- vocabulary evidence: the decision policy, in shadow --------------------
+# --- vocabulary evidence: the decision policy ------------------------------
 #
 # The speech runtime's term pass reports where a listed term could have been
 # emitted instead of what was heard (parrot_core.VocabularyCandidate). This
-# decides, for each report, whether the app would write the term. In shadow
-# it applies nothing: the decisions are counted and shown, and the text is
-# the recognizer's. Each threshold is a named constant beside the measurement
+# decides, for each report, whether the app would write the term; the
+# decision itself changes nothing. ``apply_vocabulary_decisions`` is what
+# writes the accepted ones, behind its own rails, when the person's "Favor
+# my words" switch is on; with it off they are counted and the text is the
+# recognizer's. Each threshold is a named constant beside the measurement
 # it came from (research-2026-11-17/names-probe, on the owner's 40
 # recordings and 60 synthetic control clips; a best-timing search, so an
 # upper bound for what the runtime's pass finds).
@@ -2202,6 +2205,11 @@ VOCABULARY_MAX_HEARD_WORDS = 3
 # A heard word's start and the report's agree to the runtime's 1 ms rounding.
 _VOCABULARY_TIME_TOLERANCE = 0.0015
 VOCABULARY_SOURCES = frozenset({"typed", "corrected"})
+# The recognizer that reports term-pass evidence hears English only
+# (dictate.PARAKEET_LANGUAGES); a decision is never applied for another.
+VOCABULARY_LANGUAGES = frozenset({"en"})
+# The clean-up edit kind an applied decision is recorded as.
+VOCABULARY_EDIT_KIND = "vocabulary_term"
 
 
 @dataclass(frozen=True)
@@ -2275,6 +2283,19 @@ def _word_spans(text: str, words: Sequence) -> list[tuple[int, int]] | None:
     return spans
 
 
+def _pieces_were_candidates(candidate: VocabularyCandidate) -> bool:
+    """Whether the detour took at least one piece and each was ranked among
+    that step's candidates: the model itself offered every piece written."""
+    steps = getattr(candidate, "steps", None) or ()
+    try:
+        return bool(steps) and all(
+            type(step.rank) is int
+            and 0 <= step.rank < VOCABULARY_CANDIDATES_PER_STEP
+            for step in steps)
+    except AttributeError:
+        return False
+
+
 def apply_vocabulary_evidence(
         text: str,
         words: Sequence,
@@ -2295,8 +2316,10 @@ def apply_vocabulary_evidence(
     holds, checked in this order, and the first that fails is its reason:
 
     - its heard words are the recognition's own words at those times
-      (``not-placed``), at most ``VOCABULARY_MAX_HEARD_WORDS`` of them
-      (``too-long``), in capture mode (``mode``);
+      (``not-placed``), and every piece the detour took was among its
+      step's candidates (``not-a-candidate``), at most
+      ``VOCABULARY_MAX_HEARD_WORDS`` heard words (``too-long``), in capture
+      mode (``mode``);
     - the term is listed, typed or proved by a correction
       (``not-listed``), and is not what the dictionary spelling rule
       already writes (``spelling-rule``);
@@ -2345,6 +2368,8 @@ def apply_vocabulary_evidence(
             if start >= 0 else heard
         if start < 0:
             reason = "not-placed"
+        elif not _pieces_were_candidates(candidate):
+            reason = "not-a-candidate"
         elif len(heard_words) > VOCABULARY_MAX_HEARD_WORDS:
             reason = "too-long"
         elif mode != "capture":
@@ -2434,3 +2459,126 @@ def vocabulary_alternative(
     return _replace_spans(text, [
         (decision.start, decision.end, decision.written or decision.term)
         for decision in decisions if decision.accepted])
+
+
+# --- vocabulary evidence, applied ------------------------------------------
+#
+# "Favor my words": the policy's accepted decisions written into the text
+# before the voice compiler and the clean-up see it. Each one is recorded as
+# a clean-up edit of its own kind, so the evidence inspector and the history
+# show it, and the words heard stay the dictation's raw transcript, which is
+# what "Replace with What You Said" puts back.
+
+
+@dataclass(frozen=True)
+class VocabularyApplication:
+    """What applying a dictation's decisions gave.
+
+    ``changes`` pairs, for each applied decision, the text it replaced with
+    what it wrote. ``refused`` names the rail that stopped the whole
+    application ("" when one ran, even with nothing accepted)."""
+    text: str
+    words: tuple
+    applied: tuple[VocabularyDecision, ...] = ()
+    changes: tuple[tuple[str, str], ...] = ()
+    refused: str = ""
+
+
+def apply_vocabulary_decisions(
+        text: str,
+        words: Sequence,
+        decisions: Iterable[VocabularyDecision],
+        *,
+        mode: str = "capture",
+        language: str = "en",
+        verbatim: bool = False,
+        limit: int = VOCABULARY_MAX_PER_DICTATION,
+) -> VocabularyApplication:
+    """Write the accepted decisions into ``text`` and its timed ``words``.
+
+    Pure. The policy (``apply_vocabulary_evidence``) already holds every
+    rule; these rails hold again here, so that nothing reaches the text
+    unless all of them do, and any one that fails applies nothing at all:
+
+    - capture mode only (``mode``), English only (``language``), and never
+      where the words must stay as said (``verbatim``: the apps the runtime
+      treats as verbatim, or a spoken "verbatim");
+    - at most ``limit`` accepted decisions (``limit``), none overlapping
+      another (``overlap``);
+    - each one's span still holds the words it was decided on, and is the
+      recognition's own whole words (``span``);
+    - what it writes is the term, kept with the heard words' punctuation
+      (``written``).
+
+    The heard words become the written words' tokens, sharing the heard
+    span's time and keeping its lowest confidence.
+    """
+    words = tuple(words or ())
+    accepted = sorted((decision for decision in decisions
+                       if decision.accepted), key=lambda item: item.start)
+
+    def refuse(reason: str) -> VocabularyApplication:
+        return VocabularyApplication(text, words, refused=reason)
+
+    if not accepted:
+        return VocabularyApplication(text, words)
+    if mode != "capture":
+        return refuse("mode")
+    if str(language or "").strip().casefold() not in VOCABULARY_LANGUAGES:
+        return refuse("language")
+    if verbatim:
+        return refuse("verbatim")
+    if len(accepted) > limit:
+        return refuse("limit")
+    spans = _word_spans(text, words) if words else None
+    if spans is None:
+        return refuse("span")
+    replacements: list[tuple[int, int, str]] = []
+    changes: list[tuple[str, str]] = []
+    merged: list[tuple[int, int, str]] = []
+    previous_end = -1
+    for decision in accepted:
+        start, end = decision.start, decision.end
+        if not (isinstance(start, int) and isinstance(end, int)
+                and 0 <= start < end <= len(text)):
+            return refuse("span")
+        if start < previous_end:
+            return refuse("overlap")
+        previous_end = end
+        heard = text[start:end]
+        if re.sub(r"\s+", "", heard).casefold() \
+                != re.sub(r"\s+", "", decision.heard).casefold():
+            return refuse("span")
+        indices = [index for index, (left, right) in enumerate(spans)
+                   if left < end and start < right]
+        if (not indices or spans[indices[0]][0] != start
+                or spans[indices[-1]][1] != end):
+            return refuse("span")
+        written = decision.written or decision.term
+        if not decision.term or decision.term not in written \
+                or "\n" in written:
+            return refuse("written")
+        replacements.append((start, end, written))
+        changes.append((heard, written))
+        merged.append((indices[0], indices[-1], written))
+    new_words: list = []
+    cursor = 0
+    for first, last, written in merged:
+        new_words.extend(words[cursor:first])
+        heard_words = words[first:last + 1]
+        tokens = _lexical_tokens(written) or [_Token(written, 0, len(written))]
+        begin = float(heard_words[0].start)
+        finish = max(begin, float(heard_words[-1].end))
+        confidence = min(float(getattr(word, "confidence", 0.5))
+                         for word in heard_words)
+        for token, (piece_start, piece_end) in zip(tokens, _divide_interval(
+                begin, finish, [max(1, len(token.text)) for token in tokens])):
+            new_words.append(RecognitionWord(
+                token.text, piece_start, piece_end, confidence,
+                getattr(heard_words[0], "timing", "native"),
+                getattr(heard_words[0], "source", "")))
+        cursor = last + 1
+    new_words.extend(words[cursor:])
+    return VocabularyApplication(
+        _replace_spans(text, replacements), tuple(new_words),
+        tuple(accepted), tuple(changes))

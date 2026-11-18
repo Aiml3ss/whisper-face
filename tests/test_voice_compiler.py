@@ -1409,6 +1409,120 @@ class VocabularyPolicyTests(unittest.TestCase):
         self.assertEqual(voice_compiler.VOCABULARY_UNSURE_BELOW, 0.99)
         self.assertEqual(voice_compiler.VOCABULARY_MAX_PER_DICTATION, 2)
 
+    def test_a_piece_the_model_did_not_offer_is_never_written(self):
+        from parrot_core import VocabularyCandidate, VocabularyStep
+        good = self.candidate("Priyanka", [1, 2], heard="Prea ka")
+        for steps in ((VocabularyStep(1, "x", 64, 0.5),),
+                      (VocabularyStep(1, "x", 0, 0.5),
+                       VocabularyStep(2, "y", -1, 0.5)),
+                      ()):
+            with self.subTest(steps=steps):
+                candidate = VocabularyCandidate(
+                    good.term, good.written, good.heard,
+                    good.heard_word_starts, good.end, good.debt,
+                    good.max_step_gap, good.heard_min_prob, steps)
+                decisions = self.decide("Ask Prea ka now.", [candidate])
+                self.assertEqual([(d.accepted, d.reason) for d in decisions],
+                                 [(False, "not-a-candidate")])
+
+
+class VocabularyApplicationTests(unittest.TestCase):
+    """"Favor my words": the accepted decisions written, behind rails."""
+
+    # The policy tests' terms, words and reports, without their tests.
+    setUp = VocabularyPolicyTests.setUp
+    words = staticmethod(VocabularyPolicyTests.words)
+    candidate = staticmethod(VocabularyPolicyTests.candidate)
+    decide = VocabularyPolicyTests.decide
+
+    def apply(self, text, candidates, **options):
+        from voice_compiler import apply_vocabulary_decisions
+        return apply_vocabulary_decisions(
+            text, self.words(text), self.decide(text, candidates), **options)
+
+    def test_an_accepted_decision_is_written_into_text_and_words(self):
+        text = "Ask Prea ka about it."
+        application = self.apply(text, [self.candidate(
+            "Priyanka", [1, 2], heard="Prea ka")])
+        self.assertEqual(application.refused, "")
+        self.assertEqual(application.text, "Ask Priyanka about it.")
+        self.assertEqual(application.changes, (("Prea ka", "Priyanka"),))
+        self.assertEqual([word.text for word in application.words],
+                         ["Ask", "Priyanka", "about", "it."])
+        written = application.words[1]
+        # The written word spans the heard words' time.
+        self.assertAlmostEqual(written.start, 0.4)
+        self.assertAlmostEqual(written.end, 1.1)
+        # Nothing accepted: nothing changes and nothing is refused.
+        same = self.apply(text, [self.candidate(
+            "Priyanka", [1, 2], heard="Prea ka", debt=9.0)])
+        self.assertEqual((same.text, same.applied, same.refused),
+                         (text, (), ""))
+
+    def test_each_rail_applies_nothing(self):
+        text = "Ask Prea ka about it."
+        found = [self.candidate("Priyanka", [1, 2], heard="Prea ka")]
+        for options, reason in (
+                ({"mode": "code"}, "mode"),
+                ({"mode": "command"}, "mode"),
+                ({"language": "de"}, "language"),
+                ({"language": ""}, "language"),
+                ({"verbatim": True}, "verbatim"),
+                ({"limit": 0}, "limit")):
+            with self.subTest(reason=reason):
+                application = self.apply(text, found, **options)
+                self.assertEqual(application.refused, reason)
+                self.assertEqual(application.text, text)
+                self.assertEqual(application.applied, ())
+                self.assertEqual(application.changes, ())
+
+    def test_never_more_than_the_limit_per_dictation(self):
+        from voice_compiler import (VOCABULARY_MAX_PER_DICTATION,
+                                    VocabularyDecision,
+                                    apply_vocabulary_decisions)
+        text = "Prea ka and Prea ka and Prea ka."
+        words = self.words(text)
+        decisions = [VocabularyDecision(
+            "Priyanka", "Prea ka", start, start + 7, 1.0, 0.8, True,
+            "would-write", "Priyanka") for start in (0, 12, 24)]
+        # Three accepted is past the limit: the whole set is refused.
+        application = apply_vocabulary_decisions(text, words, decisions)
+        self.assertEqual(application.refused, "limit")
+        self.assertEqual(application.text, text)
+        # The policy's limit, written, is exactly what is applied.
+        allowed = apply_vocabulary_decisions(
+            text, words, decisions[:VOCABULARY_MAX_PER_DICTATION])
+        self.assertEqual(len(allowed.applied), VOCABULARY_MAX_PER_DICTATION)
+        self.assertEqual(allowed.text, "Priyanka and Priyanka and Prea ka.")
+        # And the policy never accepts more than the limit.
+        many = [self.candidate("Priyanka", [index, index + 1],
+                               heard="Prea ka", debt=1.0 + index)
+                for index in (0, 3, 6)]
+        self.assertLessEqual(
+            sum(d.accepted for d in self.decide(text, many)),
+            VOCABULARY_MAX_PER_DICTATION)
+
+    def test_a_decision_that_no_longer_fits_its_text_applies_nothing(self):
+        from voice_compiler import VocabularyDecision, \
+            apply_vocabulary_decisions
+        text = "Ask Prea ka about it."
+        words = self.words(text)
+        moved = VocabularyDecision("Priyanka", "Prea ka", 3, 10, 1.0, 0.8,
+                                   True, "would-write", "Priyanka")
+        self.assertEqual(apply_vocabulary_decisions(
+            text, words, [moved]).refused, "span")
+        crossed = [VocabularyDecision(
+            "Priyanka", "Prea ka", 4, 11, 1.0, 0.8, True, "would-write",
+            "Priyanka"), VocabularyDecision(
+            "Kubernetes", "ka about", 9, 17, 1.0, 0.8, True, "would-write",
+            "Kubernetes")]
+        self.assertEqual(apply_vocabulary_decisions(
+            text, words, crossed).refused, "overlap")
+        other = VocabularyDecision("Priyanka", "Prea ka", 4, 11, 1.0, 0.8,
+                                   True, "would-write", "Someone else")
+        self.assertEqual(apply_vocabulary_decisions(
+            text, words, [other]).refused, "written")
+
 
 if __name__ == "__main__":
     unittest.main()

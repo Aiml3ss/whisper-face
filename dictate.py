@@ -404,9 +404,11 @@ from voice_compiler import (  # noqa: E402
     VoiceCompiler,
     VoiceIR,
     WordEvidence,
+    VOCABULARY_EDIT_KIND,
     VOCABULARY_REPORT_DEBT,
     analyze_prosody,
     apply_dictionary_spelling,
+    apply_vocabulary_decisions,
     apply_vocabulary_evidence,
     build_consequence_plan,
     context_firewall_receipt,
@@ -1472,11 +1474,15 @@ PIPELINE_STATE = {
     "last_confidence": 1.0,
     "last_alternatives": [],
     "last_cleanup_edits": [],
-    # The term pass in shadow: reports seen and terms the policy would
-    # have written, over this run, and the last dictation's "Alt:" text.
+    # The term pass: reports seen and terms the policy would have written,
+    # over this run, and the last dictation's "Alt:" text; then how many
+    # of them "Favor my words" wrote, over this run and in the last
+    # dictation. Counts only, never words.
     "vocab_candidates": 0,
     "vocab_shadow_accepts": 0,
     "last_vocabulary_alternative": None,
+    "vocab_applied": 0,
+    "last_vocabulary_applied": 0,
     "last_mode": "capture",
     "last_compiler_decisions": 0,
     "last_compiler_details": [],
@@ -1628,6 +1634,7 @@ PREFERENCES = {
     "recent_dictations": False,
     "self_correction": False,
     "remove_repeats": True,
+    "favor_my_words": True,
     "new_speech_runtime": False,
     "language": LANGUAGE_DEFAULT,
 }
@@ -2089,6 +2096,11 @@ def load_preferences():
     # that off. A file written before the key existed keeps the default.
     PREFERENCES["remove_repeats"] = bool(
         loaded.get("remove_repeats") is not False)
+    # A word the recognizer nearly heard as one of the user's own is written
+    # their way unless they turned that off. A file written before the key
+    # existed keeps the default, so an install that is updated has it on.
+    PREFERENCES["favor_my_words"] = bool(
+        loaded.get("favor_my_words") is not False)
     # Whisper Face's own speech runtime is asked first only for a user who
     # turned it on. Any other value, and a file written before the key
     # existed, leaves the FluidAudio helper alone in charge.
@@ -2174,6 +2186,7 @@ def save_preferences():
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
         "self_correction": bool(PREFERENCES["self_correction"]),
         "remove_repeats": bool(PREFERENCES["remove_repeats"]),
+        "favor_my_words": bool(PREFERENCES["favor_my_words"]),
         "new_speech_runtime": bool(PREFERENCES["new_speech_runtime"]),
         "language": normalize_language(PREFERENCES["language"]),
     }
@@ -2303,6 +2316,14 @@ def set_remove_repeats(enabled: bool) -> bool:
     PREFERENCES["remove_repeats"] = bool(enabled)
     save_preferences()
     return PREFERENCES["remove_repeats"]
+
+
+def set_favor_my_words(enabled: bool) -> bool:
+    """Persist the on-by-default "Favor my words": whether the term pass's
+    accepted decisions are written (on) or only counted (off)."""
+    PREFERENCES["favor_my_words"] = bool(enabled)
+    save_preferences()
+    return PREFERENCES["favor_my_words"]
 
 
 def speech_runtime_selected() -> bool:
@@ -6234,6 +6255,7 @@ def gui_settings_snapshot() -> dict:
         "corrections": corrections,
         "self_correction": bool(PREFERENCES["self_correction"]),
         "remove_repeats": bool(PREFERENCES["remove_repeats"]),
+        "favor_my_words": bool(PREFERENCES["favor_my_words"]),
     }
 
 
@@ -6495,6 +6517,7 @@ def runtime_status_snapshot() -> dict:
         "vocab_candidates": PIPELINE_STATE.get("vocab_candidates", 0),
         "vocab_shadow_accepts": PIPELINE_STATE.get(
             "vocab_shadow_accepts", 0),
+        "vocab_applied": PIPELINE_STATE.get("vocab_applied", 0),
         "last_proof_edits_accepted": PIPELINE_STATE[
             "last_proof_edits_accepted"],
         "last_proof_edits_rejected": PIPELINE_STATE[
@@ -9230,6 +9253,11 @@ def compiler_personal_priors(bundle: str) -> tuple[PersonalPrior, ...]:
         for mapping in regression.active(app=bundle or None))
 
 
+# Why a "Favor my words" change was made, as the evidence inspector says it.
+VOCABULARY_EDIT_REASON = (
+    "In your vocabulary, and a close second to what the recognizer heard")
+
+
 def record_vocabulary_shadow(recognition: Recognition, mode: str) -> tuple:
     """Run the term-pass policy in shadow: count what it would write, keep
     the text it would give as the last alternative, and change nothing."""
@@ -9247,6 +9275,41 @@ def record_vocabulary_shadow(recognition: Recognition, mode: str) -> tuple:
         PIPELINE_STATE["last_vocabulary_alternative"] = \
             vocabulary_alternative(recognition.text, decisions)
     return decisions
+
+
+def apply_favored_words(recognition: Recognition, mode: str,
+                        language: str, bundle: str) -> list:
+    """"Favor my words": write the term pass's accepted decisions into this
+    dictation's recognition, before the voice compiler and the clean-up see
+    it, and return each change as a ``VOCABULARY_EDIT_KIND`` clean-up edit.
+
+    The policy runs exactly as in shadow first (``record_vocabulary_shadow``)
+    and, with the switch off, that is all that happens. With it on,
+    ``voice_compiler.apply_vocabulary_decisions`` writes the accepted ones
+    behind its rails: capture mode, English, not a verbatim app or a spoken
+    "verbatim", at most the policy's limit, each on the recognition's own
+    words. Nothing is applied without the runtime's report (the FluidAudio
+    helper and Whisper send none). The caller keeps the words as heard, which
+    "Replace with What You Said" puts back. Counts only are kept."""
+    PIPELINE_STATE["last_vocabulary_applied"] = 0
+    decisions = record_vocabulary_shadow(recognition, mode)
+    if not PREFERENCES.get("favor_my_words") or not any(
+            decision.accepted for decision in decisions):
+        return []
+    application = apply_vocabulary_decisions(
+        recognition.text, recognition.words, decisions,
+        mode=mode, language=language,
+        verbatim=(is_verbatim_app(bundle)
+                  or extract_tone_override(recognition.text)[1]
+                  == "verbatim"))
+    if not application.applied:
+        return []
+    recognition.text = application.text
+    recognition.words = application.words
+    PIPELINE_STATE["vocab_applied"] += len(application.applied)
+    PIPELINE_STATE["last_vocabulary_applied"] = len(application.applied)
+    return [CleanupEdit(VOCABULARY_EDIT_KIND, heard, written)
+            for heard, written in application.changes]
 
 
 def compile_voice_evidence(recognition: Recognition,
@@ -13624,8 +13687,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         bundle = rec.bundle_at_press or frontmost_bundle()
+        # What was heard stays the raw transcript: the history's "raw",
+        # what commands are matched on, and what "Replace with What You
+        # Said" puts back. "Favor my words" then writes the user's own
+        # terms into the recognition the compiler and clean-up start from.
         recognized_raw = raw
-        record_vocabulary_shadow(recognition, rec.mode)
+        favored_edits = apply_favored_words(
+            recognition, rec.mode, rec.language, bundle)
         # A new usable result supersedes the previous result's replay audio.
         # This is content-free and does not inspect the current utterance.
         clear_retained_consequence_spans()
@@ -13929,7 +13997,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             text = quick_clean(
                 compiled, verbatim=verbatim, continuing=continuing,
                 language=rec.language)
-        cleanup_edits = plan.edits + semantic_edits
+        cleanup_edits = favored_edits + plan.edits + semantic_edits
         PIPELINE_STATE["last_cleanup_edits"] = [
             edit.kind for edit in cleanup_edits]
         PIPELINE_STATE["last_proof_edits_accepted"] = sum(
@@ -14134,7 +14202,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         PIPELINE_STATE["last_result_evidence"] = {
             "alternatives": list(PIPELINE_STATE["last_alternatives"])[:3],
             "protected_anchors": list(compiler_result.anchors)[:64],
+            # The user's own words written by "Favor my words" lead the
+            # edits, each with why; then the clean-up model's proof edits.
             "proof_edits": [{
+                "kind": edit.kind,
+                "before": edit.before,
+                "after": edit.after,
+                "accepted": True,
+                "reason": VOCABULARY_EDIT_REASON,
+            } for edit in favored_edits] + [{
                 "kind": edit.kind,
                 "before": edit.before,
                 "after": edit.after,
@@ -14265,6 +14341,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "proof_edits_rejected": sum(
                 1 for edit in proof_edits if not edit.accepted),
             "proof_reconstruction_match": proof_reconstruction_match,
+            # "Favor my words": the term pass's reports for this dictation
+            # and how many of the user's terms were written. Counts only.
+            "vocabulary_reported": len(
+                getattr(recognition, "vocabulary_evidence", ()) or ()),
+            "vocabulary_applied": len(favored_edits),
             "insertion_state": (
                 integrity_receipt.state.value
                 if integrity_receipt is not None else "legacy"),
@@ -15060,6 +15141,7 @@ def main():
             set_recent_dictations=set_recent_dictations_enabled,
             set_self_correction=set_self_correction,
             set_remove_repeats=set_remove_repeats,
+            set_favor_my_words=set_favor_my_words,
             set_new_speech_runtime=set_new_speech_runtime,
             recent_dictations=recent_dictation_metadata,
             reveal_recent_dictation=reveal_recent_dictation,

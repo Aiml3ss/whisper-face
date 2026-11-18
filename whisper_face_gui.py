@@ -678,6 +678,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.recent.label": "Recent dictations",
         "settings.accessibility.remove_repeats.label": "Repeated words",
         "settings.accessibility.remove_repeats.help": "On by default. A phrase said twice by accident is typed once: “I have nothing I have nothing going on” types “I have nothing going on”. Anything said three times, like “no way no way no way”, stays as you said it.",
+        "settings.accessibility.favor_words.label": "Favor my words",
+        "settings.accessibility.favor_words.help": "On by default. Where the recognizer nearly heard a name or term from your vocabulary, Whisper Face writes yours instead: at most two in a dictation, in English, and never in code mode or in apps kept word for word. Each change is listed under Inspect Evidence and can be undone.",
         "settings.accessibility.self_correction.label": "“Actually” corrections",
         "settings.accessibility.self_correction.help": "Off by default. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm”: between two numbers, days, months or times, only the second is kept. A sentence contrasting two things, like “I thought it was Tuesday, actually Wednesday”, changes too.",
         "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",
@@ -757,6 +759,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.personalize.vocabulary.exclusions.one": "1 exclusion",
         "settings.personalize.vocabulary.exclusions.many": "{count} exclusions",
         "settings.personalize.vocabulary.empty": "Teach me the names I keep getting wrong",
+        "settings.personalize.favor_words": "Favor my words",
+        "settings.personalize.favor_words.on": "On. Writes a vocabulary word where it nearly heard one. Each change can be\u00a0undone.",
+        "settings.personalize.favor_words.off": "Off. When on, it writes a vocabulary word where it nearly heard\u00a0one.",
         "settings.personalize.corrections": "Learned corrections",
         "settings.personalize.corrections.empty": "Fix the same word a few times and I’ll remember it",
         "settings.personalize.keywords": "Pronunciation keywords",
@@ -939,6 +944,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.remove_repeats.update_failed": "Could not change Repeated words: {error}. It stayed exactly as it was — try the switch again.",
         "operation.speech_runtime.update_failed": "Could not change New speech runtime: {error}. It stayed exactly as it was — try the switch again.",
         "operation.self_correction.update_failed": "Could not change “Actually” corrections: {error}. It stayed exactly as it was — try the switch again.",
+        "operation.favor_words.update_failed": "Could not change Favor my words: {error}. It stayed exactly as it was — try the switch again.",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}. It stayed exactly as it was — try the switch again.",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}. It stayed exactly as it was — try the switch again.",
         "operation.relisten.update_failed": "Could not update Selective Re-listen: {error}. It stayed exactly as it was — try the switch again.",
@@ -1325,6 +1331,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.flight.label",
             "settings.accessibility.acoustic.label",
             "settings.accessibility.remove_repeats.label",
+            "settings.accessibility.favor_words.label",
             "settings.accessibility.self_correction.label",
             "settings.accessibility.voice_objects.label",
             "settings.accessibility.voice_objects.chooser",
@@ -1396,6 +1403,7 @@ class GUIActions:
     set_recent_dictations: Callable[[bool], bool] = lambda _enabled: False
     set_self_correction: Callable[[bool], bool] = lambda _enabled: False
     set_remove_repeats: Callable[[bool], bool] = lambda _enabled: True
+    set_favor_my_words: Callable[[bool], bool] = lambda _enabled: True
     set_new_speech_runtime: Callable[[bool], bool] = lambda _enabled: False
     recent_dictations: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()
     reveal_recent_dictation: Callable[[str], str | None] = (
@@ -1789,6 +1797,7 @@ class UnifiedSettings:
     corrections: tuple[CorrectionSetting, ...] = field(default_factory=tuple)
     self_correction: bool = False
     remove_repeats: bool = True
+    favor_my_words: bool = True
 
 
 def tone_for_app_index(
@@ -2724,6 +2733,7 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
         corrections=tuple(corrections),
         self_correction=source.get("self_correction") is True,
         remove_repeats=source.get("remove_repeats") is not False,
+        favor_my_words=source.get("favor_my_words") is not False,
     )
 
 
@@ -4777,6 +4787,21 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state, notice=self.localized(
                     "operation.remove_repeats.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def set_favor_my_words(self, enabled: bool) -> GUIState:
+        try:
+            stored = self.actions.set_favor_my_words(bool(enabled)) is True
+            self.state = replace(
+                self.state, settings=replace(
+                    self.state.settings, favor_my_words=stored),
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.favor_words.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -10565,6 +10590,9 @@ if APPKIT_AVAILABLE:
                 ("tones", "settings.personalize.tones", "editTone:"),
                 ("snippets", "settings.personalize.snippets", "editSnippets:"),
                 ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
+                # Under the list it acts on: whether the list's words are
+                # written where the recognizer nearly heard them.
+                ("favor_words", "settings.personalize.favor_words", None),
                 ("corrections", "settings.personalize.corrections", "reviewCorrections:"),
                 ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
             )
@@ -10589,6 +10617,22 @@ if APPKIT_AVAILABLE:
                     personalize_key_views.append(popup)
                     self.dynamic["settings_language_detail"] = detail
                     self.dynamic["settings_language_popup"] = popup
+                    continue
+                if key == "favor_words":
+                    # A switch: what it does is its caption.
+                    favor_switch = self._switch(
+                        NSMakeRect(0, 0, 40, 22), "favorMyWordsChanged:",
+                        label=self._l(
+                            "settings.accessibility.favor_words.label"),
+                        help_text=self._l(
+                            "settings.accessibility.favor_words.help"))
+                    row, _title, detail = self._settings_row(
+                        self._l(title_key), caption="",
+                        accessories=(favor_switch,))
+                    row_views.append(row)
+                    personalize_key_views.append(favor_switch)
+                    self.dynamic["favor_words_toggle"] = favor_switch
+                    self.dynamic["favor_words_detail"] = detail
                     continue
                 action_key = (
                     "settings.action.review" if key == "corrections" else
@@ -11641,6 +11685,21 @@ if APPKIT_AVAILABLE:
             sync_accessibility(
                 self.dynamic["settings_language_popup"], language_name,
                 label=self._l("settings.accessibility.language.label"))
+            favor_words = settings.favor_my_words
+            self.dynamic["favor_words_toggle"].setState_(
+                NSControlStateValueOn if favor_words
+                else NSControlStateValueOff)
+            set_accessible_text(
+                self.dynamic["favor_words_detail"],
+                self._l("settings.personalize.favor_words.on"
+                        if favor_words
+                        else "settings.personalize.favor_words.off"),
+                label=self._l("settings.accessibility.favor_words.label"))
+            sync_accessibility(
+                self.dynamic["favor_words_toggle"],
+                self._l("settings.state.enabled") if favor_words
+                else self._l("settings.state.disabled"),
+                label=self._l("settings.accessibility.favor_words.label"))
             self.dynamic["settings_tones_button"].setEnabled_(
                 bool(settings.app_tones))
             self.dynamic["settings_snippets_button"].setEnabled_(True)
@@ -13438,6 +13497,11 @@ if APPKIT_AVAILABLE:
             self.view_model.set_remove_repeats(enabled)
             self.render()
 
+        def favorMyWordsChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_favor_my_words(enabled)
+            self.render()
+
         def recentDictationsChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_recent_dictations(enabled)
@@ -14049,6 +14113,11 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         private_settings["remove_repeats"] = bool(enabled)
         return bool(enabled)
 
+    def set_favor_my_words(enabled: bool) -> bool:
+        calls.append(("favor_my_words", enabled))
+        private_settings["favor_my_words"] = bool(enabled)
+        return bool(enabled)
+
     def set_new_speech_runtime(enabled: bool) -> bool:
         calls.append(("new_speech_runtime", enabled))
         runtime["new_speech_runtime"] = bool(enabled)
@@ -14067,6 +14136,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         set_recent_dictations=set_recent_dictations,
         set_self_correction=set_self_correction,
         set_remove_repeats=set_remove_repeats,
+        set_favor_my_words=set_favor_my_words,
         set_new_speech_runtime=set_new_speech_runtime,
         # Two entries share one metadata row, as two short dictations into
         # the same app within a minute do.
@@ -16168,6 +16238,39 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         require(model.state.settings.remove_repeats
                 and private_settings["remove_repeats"] is True,
                 "the repeated words switch turns the repair back on")
+        # Favor my words sits under Vocabulary on Personalize. The smoke's
+        # settings file predates the key, as an updated install's does: on.
+        favor_toggle = controller.dynamic["favor_words_toggle"]
+        require(
+            accessible_value(favor_toggle, "accessibilityLabel")
+            == localized_string("settings.accessibility.favor_words.label")
+            and favor_toggle in controller.dynamic[
+                "settings_key_views"]["Personalize"],
+            "the favor my words switch is labelled and reachable by keyboard")
+        require(
+            "favor_my_words" not in private_settings
+            and int(favor_toggle.state()) == int(NSControlStateValueOn)
+            and str(controller.dynamic["favor_words_detail"]
+                    .stringValue()) == localized_string(
+                        "settings.personalize.favor_words.on"),
+            "favor my words starts on and says so")
+        favor_toggle.setState_(NSControlStateValueOff)
+        controller.favorMyWordsChanged_(favor_toggle)
+        require(
+            ("favor_my_words", False) in calls
+            and not model.state.settings.favor_my_words
+            and int(favor_toggle.state()) == int(NSControlStateValueOff)
+            and str(controller.dynamic["favor_words_detail"]
+                    .stringValue()) == localized_string(
+                        "settings.personalize.favor_words.off")
+            and accessible_value(favor_toggle, "accessibilityValue") ==
+            localized_string("settings.state.disabled"),
+            "the favor my words switch turns it off")
+        favor_toggle.setState_(NSControlStateValueOn)
+        controller.favorMyWordsChanged_(favor_toggle)
+        require(model.state.settings.favor_my_words
+                and private_settings["favor_my_words"] is True,
+                "the favor my words switch turns it back on")
         # New speech runtime: off for a new install, labelled, reachable by
         # keyboard on Advanced, and its caption names which program answered
         # the last dictation once the runtime says so.
@@ -17065,8 +17168,10 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             whole without scrolling, and the three settings panes show
             every group without scrolling at all. ``may_scroll`` names the
             panes let off that last rule here: Personalize, whose face
-            grid fills its group, and only at the window minimum while a
-            two-line notice has taken the foot of the page.
+            grid fills its group, and only while a notice has taken the
+            foot of the page (at the window minimum under a two-line one,
+            and at the default size, where the grid is taller, under one
+            line since "Favor my words" joined its rows).
             """
             documents = controller.dynamic["page_documents"]
             scrolls = controller.dynamic["page_scrolls"]
@@ -17518,7 +17623,8 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         root_view.layoutSubtreeIfNeeded()
         controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
         root_view.layoutSubtreeIfNeeded()
-        check_grouped_pages("the default size under a notice")
+        check_grouped_pages("the default size under a notice",
+                            may_scroll=("Personalize",))
         model.state = replace(fitted_state, notice="", notice_level="info")
         controller.render()
         root_view.layoutSubtreeIfNeeded()

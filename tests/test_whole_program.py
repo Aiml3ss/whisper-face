@@ -453,6 +453,32 @@ class FreshInstallDictationTests(unittest.TestCase):
         self.assertEqual(typed(spoken),
                          "Of course I can. I have nothing going on")
 
+    def test_the_favor_my_words_switch_reaches_the_runtime_and_the_file(self):
+        mac = booted()
+        dictate = mac.dictate
+        # A fresh install starts from the shipped template, which says on;
+        # an updated install's file has no key and is read as on.
+        self.assertIs(json.loads(
+            (ROOT / "preferences.template.json").read_text())[
+                "favor_my_words"], True)
+        self.assertIs(dictate.PREFERENCES["favor_my_words"], True)
+        self.assertIs(dictate.gui_settings_snapshot()["favor_my_words"], True)
+        actions = dictate.STATUS["bar"].gui.view_model.actions
+        try:
+            self.assertIs(actions.set_favor_my_words(False), False)
+            self.assertIs(dictate.PREFERENCES["favor_my_words"], False)
+            self.assertIs(json.loads(
+                dictate.PREFERENCES_FILE.read_text())["favor_my_words"],
+                False)
+            self.assertIs(actions.settings_snapshot()["favor_my_words"],
+                          False)
+        finally:
+            self.assertIs(actions.set_favor_my_words(True), True)
+        self.assertIs(json.loads(
+            dictate.PREFERENCES_FILE.read_text())["favor_my_words"], True)
+        # Counted, never words, in the runtime's status.
+        self.assertIn("vocab_applied", dictate.runtime_status_snapshot())
+
     def test_the_repeat_repair_does_not_run_again_on_the_model_text(self):
         # The optional cleanup model may change punctuation alone, and the
         # voice compiler accepts that because the words stay the same. A

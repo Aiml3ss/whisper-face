@@ -19,8 +19,11 @@ its transcript: a place where one of the user's own terms could have been
 emitted instead of the words heard, with the heard words, the summed logit
 gap the term's path paid ("debt"), and each piece it took with its rank among
 the model's candidates at that step. It is evidence, never text: the runtime
-changes nothing, and the voice compiler's policy decides, in shadow for now,
-whether the term would be written.
+changes nothing, and the voice compiler's policy decides whether the term
+would be written. **Favor my words**, a saved preference on by default,
+writes the accepted ones (`apply_vocabulary_decisions`) before the voice
+compiler and the clean-up, as `vocabulary_term` clean-up edits; off, they are
+only counted.
 
 **Dictionary Spelling** — the clean-up's deterministic rule that writes a
 dictionary term in its own form where the words heard equal it ignoring only

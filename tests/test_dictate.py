@@ -145,6 +145,8 @@ BASELINE_DEFINITIONS = (
     "vocabulary_version",
     "vocabulary_bias_state",
     "record_vocabulary_shadow",
+    # "Favor my words": what writes the policy's accepted decisions.
+    "apply_favored_words",
     "normalize_language",
     "join_recognized_parts",
     "current_language",
@@ -185,6 +187,8 @@ BASELINE_ASSIGNMENTS = (
     "PARAKEET_RUNTIME_START_ALLOWANCE",
     # The window a check by position waits for the cursor to move.
     "POSITION_CHECK_TIMEOUT",
+    # Why a "Favor my words" change was made, in the evidence inspector.
+    "VOCABULARY_EDIT_REASON",
 )
 
 try:  # pragma: no cover - depends on the runner
@@ -257,7 +261,8 @@ def load_definitions(*names, assignments=(), extra=None):
         # The term pass: its list, its control frame and the shadow policy.
         **{name: getattr(voice_compiler, name) for name in (
             "VOCABULARY_REPORT_DEBT", "apply_vocabulary_evidence",
-            "vocabulary_alternative", "vocabulary_terms")},
+            "vocabulary_alternative", "vocabulary_terms",
+            "VOCABULARY_EDIT_KIND", "apply_vocabulary_decisions")},
         **{name: getattr(parrot_core, name) for name in (
             "helper_takes_vocabulary", "shift_vocabulary_evidence",
             "vocabulary_control_frame")},
@@ -3053,6 +3058,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "recent_dictations": False,
                 "self_correction": False,
                 "remove_repeats": True,
+                "favor_my_words": True,
                 "new_speech_runtime": False,
                 "language": "en",
             })
@@ -3174,6 +3180,56 @@ class FacePreferenceTests(unittest.TestCase):
                 encoding="utf-8"))["self_correction"], False)
             self.assertEqual(ns["quick_clean"](spoken), spoken)
             self.assertEqual(ns["phone_clean"](spoken), spoken)
+
+    def test_favor_my_words_is_on_unless_the_file_says_false(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme", "set_favor_my_words",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                },
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                },
+            )
+            self.assertIs(ns["PREFERENCES"]["favor_my_words"], True)
+            # An install updated from before the key existed, and every
+            # value that is not the JSON literal false, has it on.
+            for stored in ({}, {"remove_repeats": False},
+                           {"favor_my_words": "false"},
+                           {"favor_my_words": 0},
+                           {"favor_my_words": None},
+                           {"favor_my_words": True}):
+                with self.subTest(stored=stored):
+                    ns["PREFERENCES"]["favor_my_words"] = False
+                    preferences.write_text(
+                        json.dumps(stored), encoding="utf-8")
+                    ns["load_preferences"]()
+                    self.assertIs(ns["PREFERENCES"]["favor_my_words"], True)
+            preferences.write_text(
+                json.dumps({"favor_my_words": False}), encoding="utf-8")
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["favor_my_words"], False)
+            self.assertIs(ns["set_favor_my_words"](True), True)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["favor_my_words"], True)
+            self.assertIs(ns["set_favor_my_words"](False), False)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["favor_my_words"], False)
+            ns["PREFERENCES"]["favor_my_words"] = True
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["favor_my_words"], False)
 
     def test_remove_repeats_is_on_unless_the_file_says_false(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -11481,13 +11537,14 @@ class ReleasePlanTests(unittest.TestCase):
 
     def _release(self, mode, language, spoken, selected="Hallo zusammen",
                  field=None, recognition=None, rewrite=None,
-                 model_installed=False):
+                 model_installed=False, overrides=None):
         """Drive finish_and_process from a decoded take to its insertion.
 
         ``field`` is the text already before the cursor. ``recognition``
         replaces the default confident decode of ``spoken``. ``rewrite``
         stands in for the cleanup model call, on an install where the model
-        is or is not on disk.
+        is or is not on disk. ``overrides`` replaces names in the selected
+        code's namespace.
         """
         pasted = []
         problems = []
@@ -11603,8 +11660,103 @@ class ReleasePlanTests(unittest.TestCase):
         if rewrite is not None:
             ns["llm_clean_with_edits"] = rewrite
             ns["cleanup_model_installed"] = lambda: model_installed
+        ns.update(overrides or {})
         ns["finish_and_process"](recorder, SimpleNamespace(), {})
         return pasted, problems
+
+    def _favored(self, *, favor=True, mode="capture", language="en",
+                 verbatim=False, evidence=True, rank=1, spoken=None,
+                 heard=("Prea", "ka")):
+        """A take whose term pass found "Priyanka" over ``heard``, released
+        through the real pipeline with the compiler and clean-up reading
+        the recognition they are given. What was pasted, the words commands
+        were matched on, and the pipeline's state."""
+        from voice_compiler import VocabularyTerm
+        from parrot_core import VocabularyCandidate, VocabularyStep
+        words = ("Ask", *heard, "about", "it")
+        spoken = spoken or " ".join(words) + "."
+        timed = tuple(RecognitionWord(word, 0.4 * index, 0.4 * index + 0.3,
+                                      0.6, "native", HELPER_WORD_SOURCE)
+                      for index, word in enumerate(words))
+        candidate = VocabularyCandidate(
+            "Priyanka", "Priyanka", " ".join(heard),
+            tuple(0.4 * index for index in range(1, 1 + len(heard))),
+            0.4 * len(heard) + 0.3, 1.5, 1.0, 0.6,
+            (VocabularyStep(1, "\u2581Pri", rank, 1.0),))
+        recognition = Recognition(
+            spoken, confidence=0.93, engine="parakeet-unified",
+            audio_duration=2.0, words=timed,
+            word_evidence_status="native",
+            vocabulary_evidence=(candidate,) if evidence else ())
+        state = {"vocab_candidates": 0, "vocab_shadow_accepts": 0,
+                 "vocab_applied": 0, "last_vocabulary_applied": 0,
+                 "last_vocabulary_alternative": None}
+        matched = []
+
+        def compile_voice_evidence(recognition, *_args, **_kwargs):
+            return (SimpleNamespace(context=SimpleNamespace(candidates=())),
+                    SimpleNamespace(text=recognition.text, confidence=0.93,
+                                    decisions=(), anchors=(),
+                                    stable_prefix=""))
+
+        pasted, _problems = self._release(
+            mode, language, spoken, recognition=recognition,
+            overrides={
+                "PREFERENCES": {**BASELINE_VALUES["PREFERENCES"],
+                                "favor_my_words": favor},
+                "PIPELINE_STATE": state,
+                "GLOSS": {"lock": threading.Lock(),
+                          "vocabulary_terms": (VocabularyTerm("Priyanka"),),
+                          "vocabulary_version": 1},
+                "compile_voice_evidence": compile_voice_evidence,
+                "is_verbatim_app": lambda _bundle: verbatim,
+                "queue_voice_object_command":
+                    lambda text, *_args: matched.append(text) and False,
+                "compile_code_dictation": lambda text, *_args:
+                    SimpleNamespace(text=text, edits=[],
+                                    needs_semantic_cleanup=False),
+            })
+        return pasted, matched, state
+
+    def test_favor_my_words_writes_the_term_and_keeps_what_was_heard(self):
+        pasted, matched, state = self._favored()
+        self.assertEqual(pasted, ["Ask Priyanka about it."])
+        # Commands, the history's raw and "Replace with What You Said" get
+        # the words as heard.
+        self.assertEqual(matched, ["Ask Prea ka about it."])
+        # A recorded edit of its own kind, ahead of the clean-up's.
+        self.assertEqual(state["last_cleanup_edits"][0], "vocabulary_term")
+        self.assertEqual((state["vocab_shadow_accepts"],
+                          state["vocab_applied"],
+                          state["last_vocabulary_applied"]), (1, 1, 1))
+
+    def test_favor_my_words_off_is_the_shadow_as_before(self):
+        pasted, _matched, state = self._favored(favor=False)
+        self.assertEqual(pasted, ["Ask Prea ka about it."])
+        self.assertEqual(state["last_vocabulary_alternative"],
+                         "Ask Priyanka about it.")
+        self.assertEqual((state["vocab_shadow_accepts"],
+                          state["vocab_applied"]), (1, 0))
+        self.assertNotIn("vocabulary_term", state["last_cleanup_edits"])
+
+    def test_favor_my_words_rails_write_nothing(self):
+        for name, options in (
+                ("code mode", {"mode": "code"}),
+                ("verbatim app", {"verbatim": True}),
+                ("spoken verbatim", {
+                    "spoken": "Verbatim mode, Ask Prea ka about it."}),
+                ("another language", {"language": "de"}),
+                ("no report: the FluidAudio helper or Whisper",
+                 {"evidence": False}),
+                ("a piece the model did not offer", {"rank": 64}),
+        ):
+            with self.subTest(name):
+                pasted, _matched, state = self._favored(**options)
+                self.assertEqual(len(pasted), 1)
+                self.assertNotIn("Priyanka", pasted[0])
+                self.assertEqual(state["vocab_applied"], 0)
+                self.assertNotIn("vocabulary_term",
+                                 state.get("last_cleanup_edits", ()))
 
     def test_rewrite_modes_never_paste_the_instruction_without_the_model(self):
         # The cleanup model is English-only. In another language Edit used
