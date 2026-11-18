@@ -35,6 +35,8 @@ import tempfile
 import threading
 import math
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 import types
 import unittest
 from unittest import mock
@@ -13670,6 +13672,8 @@ class SpeechSessionTests(unittest.TestCase):
         self.ns = load_definitions(
             "SpeechSession", "CapturedAudio",
             extra={"np": np, "SPEECH_SESSION_POOL": None,
+                   "time": time, "FIRST_COMPLETED": FIRST_COMPLETED,
+                   "wait_for_futures": wait_for_futures,
                    "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
                    "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
                    "CAPTURE_BLOCK_SECONDS": 8, "SAMPLE_RATE": 16_000,
@@ -13710,6 +13714,31 @@ class SpeechSessionTests(unittest.TestCase):
         # new audio (plus the first, and the rest at release), never per
         # audio block.
         self.assertLessEqual(len(client.appended), 50_000 // 8_000 + 2)
+
+    def test_the_usual_path_ending_first_is_not_kept_waiting(self):
+        import threading
+        client = self.Client(answer=("text", 0.01))
+        hold = threading.Event()
+        finish_session = client.finish_session
+        client.finish_session = lambda token, expected: (
+            hold.wait(5.0), finish_session(token, expected))[1]
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        session.pool = ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(session.pool.shutdown, wait=True)
+        self.addCleanup(hold.set)
+        usual = self.Future()
+        threading.Timer(0.05, usual.set_result, ("done",)).start()
+        # The usual path's last decode ends while the runtime is still
+        # finishing the session: nothing waits for the session's answer.
+        self.assertIsNone(session.finish(frames, len(audio), unless=[usual]))
+        hold.set()
+        # Without anything to race, the answer is waited for as before.
+        client = self.Client(answer=("text", 0.01))
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        session.pool = ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(session.pool.shutdown, wait=True)
+        self.assertEqual(session.finish(frames, len(audio), unless=[]),
+                         ("text", 0.01))
 
     def test_a_session_that_did_not_begin_sends_nothing(self):
         client = self.Client(begin=False, answer=("text", 0.01))
@@ -13754,13 +13783,13 @@ class SpeechSessionTests(unittest.TestCase):
                  if audio is None else audio)
         session = SimpleNamespace(
             begun=True, finished=[], cancelled=[],
-            finish=lambda frames, expected: (
+            finish=lambda frames, expected, unless=(): (
                 session.finished.append(expected) or (
                     result if answer else None)),
             cancel=lambda: session.cancelled.append(True))
         rec = SimpleNamespace(session=session, frames=object(), prompt=None)
         ns = load_definitions(
-            "session_recognition", "usual_decode_ready",
+            "session_recognition", "usual_decode_ready", "usual_decodes",
             "_parakeet_crosschecked",
             "_clean_native_processing_s", "crosscheck_agreement",
             "prepare_asr_audio",

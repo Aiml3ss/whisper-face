@@ -232,7 +232,8 @@ import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from pathlib import Path
 
 import numpy as np
@@ -6184,15 +6185,32 @@ class SpeechSession:
         if token is not None:
             self.client.cancel_session(token)
 
-    def finish(self, frames, expected: int):
+    def finish(self, frames, expected: int, unless=()):
         """At release, once capture has stopped: the runtime's answer for
-        the whole take of ``expected`` samples in ``frames``, or None."""
+        the whole take of ``expected`` samples in ``frames``, or None.
+
+        ``unless`` are the usual path's decodes still running: once every
+        one of them is done before the answer, the usual path is ready and
+        this returns None at once; the finish then ends unread on the pool.
+        """
         if not self.begun:
             return None
         try:
-            return self.pool.submit(self._finish, frames, expected).result(
-                timeout=PARAKEET_MAX_REQUEST_TIMEOUT
-                + PARAKEET_MIN_REQUEST_TIMEOUT)
+            answer = self.pool.submit(self._finish, frames, expected)
+            deadline = time.monotonic() + (
+                PARAKEET_MAX_REQUEST_TIMEOUT + PARAKEET_MIN_REQUEST_TIMEOUT)
+            unless = list(unless)
+            others = [future for future in unless if not future.done()]
+            while others and not answer.done():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                wait_for_futures([answer, *others], timeout=left,
+                                 return_when=FIRST_COMPLETED)
+                others = [future for future in others if not future.done()]
+            if unless and not others and not answer.done():
+                return None
+            return answer.result(timeout=max(0.0, deadline - time.monotonic()))
         except Exception as error:
             print(f"! speech session unavailable: {type(error).__name__}")
             return None
@@ -14209,16 +14227,22 @@ def capture_release(rec):
     return full_audio, cut, chunk_futs, None, tail_done_at
 
 
-def usual_decode_ready(chunk_futs, pre_future) -> bool:
-    """Whether everything the usual path joins is decoded already: every
-    rolling chunk, and the last part's decode when there is one (a
-    speculation that stood, or the early decode that ran beside the tail).
-    Then assemble_raw only joins finished parts."""
+def usual_decodes(chunk_futs, pre_future) -> list:
+    """The decodes the usual path joins: every rolling chunk, and the last
+    part's when there is one (a speculation that stood, the early decode
+    that ran beside the tail, or the remainder's)."""
     futures = [getattr(scheduled, "future", scheduled)
                for scheduled in chunk_futs]
     if pre_future is not None:
         futures.append(getattr(pre_future, "future", pre_future))
-    return all(future.done() for future in futures)
+    return futures
+
+
+def usual_decode_ready(chunk_futs, pre_future) -> bool:
+    """Whether everything the usual path joins is decoded already, so that
+    assemble_raw only joins finished parts."""
+    return all(future.done()
+               for future in usual_decodes(chunk_futs, pre_future))
 
 
 def session_recognition(rec, full_audio: np.ndarray, cut: int,
@@ -14230,8 +14254,10 @@ def session_recognition(rec, full_audio: np.ndarray, cut: int,
     at release, so the session is not finished at all when the usual path
     is decoded already (usual_decode_ready): a take whose last part was
     speculated during the hold is joined at once, as it was before
-    sessions. Otherwise it stands for the take only where the cross-check
-    has nothing left to do:
+    sessions. Nor is its answer waited for once the usual path's decodes
+    all end first, which they do when the runtime was already decoding
+    the last part as the key went up. Otherwise it stands for the take
+    only where the cross-check has nothing left to do:
 
     - the take reached the runtime exactly as it would in one request (no
       gain or noise gate: prepare_asr_audio leaves it as it is);
@@ -14255,7 +14281,9 @@ def session_recognition(rec, full_audio: np.ndarray, cut: int,
             return None
         if usual_decode_ready(chunk_futs, pre_future):
             return None
-        answer = session.finish(rec.frames, len(full_audio))
+        answer = session.finish(
+            rec.frames, len(full_audio),
+            unless=usual_decodes(chunk_futs, pre_future))
         if answer is None:
             return None
         recognition = _parakeet_crosschecked(
