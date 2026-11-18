@@ -555,6 +555,9 @@ class CopyTests(unittest.TestCase):
     def test_every_reason_and_status_reads_plainly(self):
         for reason in voice_check.REASON_CODES:
             with self.subTest(reason=reason):
+                # Each reason has its own words, not the catch-all's.
+                self.assertIn(f"update.voice_check.reason.{reason}",
+                              whisper_face_gui.STRING_CATALOGS["en"])
                 note = whisper_face_gui.voice_check_note(
                     {"status": "not-checked", "reason": reason})
                 self.assertTrue(note.startswith("It couldn’t be tried"))
