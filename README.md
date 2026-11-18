@@ -406,7 +406,8 @@ are never Supporter-only features.
   appear only once they have something to show. Undo and Insert Again live
   there and on the undo key, not in the window. **Replace with What You Said**
   sits under Undo and puts the recogniser's raw words where the cleaned-up
-  text stands, through the same checks, single attempt and readback as Undo;
+  text stands (a term **Favor my words** wrote included), through the same
+  checks, single attempt and readback as Undo;
   where Undo is not offered it is not either, it is dimmed when clean-up
   changed nothing, and when it declines it says why and leaves the field
   untouched. Once it has run, Undo takes the raw words away in turn. Tones, learned corrections, mode reference, and logs live in

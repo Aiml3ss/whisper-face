@@ -167,8 +167,8 @@ Qwen3.5-4B, and has no Parakeet.
   in a dictation, English capture only, never in code mode or verbatim apps,
   never over a digit, a negation, an address or one ordinary word. Each one is
   a `vocabulary_term` clean-up edit shown under Inspect Evidence, the words
-  heard stay the raw transcript, and the transcript history counts how many
-  were written. The preference `favor_my_words` (on by default; the switch
+  heard stay the raw transcript (which Replace with What You Said puts back),
+  and the transcript history counts how many were written. The preference `favor_my_words` (on by default; the switch
   under Settings → Personalize) turns it off, leaving the report only
   counted.
 - **Bounded context.** App names, window titles, and dictionary terms bias

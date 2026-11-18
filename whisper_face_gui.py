@@ -680,7 +680,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.remove_repeats.label": "Repeated words",
         "settings.accessibility.remove_repeats.help": "On by default. A phrase said twice by accident is typed once: “I have nothing I have nothing going on” types “I have nothing going on”. Anything said three times, like “no way no way no way”, stays as you said it.",
         "settings.accessibility.favor_words.label": "Favor my words",
-        "settings.accessibility.favor_words.help": "On by default. Where the recognizer nearly heard a name or term from your vocabulary, Whisper Face writes yours instead: at most two in a dictation, in English, and never in code mode or in apps kept word for word. Each change is listed under Inspect Evidence and can be undone.",
+        "settings.accessibility.favor_words.help": "On by default. Where the recognizer nearly heard a name or term from your vocabulary, Whisper Face writes yours instead: at most two in a dictation, in English, and never in code mode or in apps kept word for word. Each change is listed under Inspect Evidence, and Replace with What You Said in the menu bar puts back what was heard.",
         "settings.accessibility.self_correction.label": "“Actually” corrections",
         "settings.accessibility.self_correction.help": "Off by default. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm”: between two numbers, days, months or times, only the second is kept. A sentence contrasting two things, like “I thought it was Tuesday, actually Wednesday”, changes too.",
         "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",

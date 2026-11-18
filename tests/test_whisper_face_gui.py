@@ -3487,7 +3487,7 @@ class ControlSettingsViewModelTests(unittest.TestCase):
             "settings.personalize.favor_words.on"])
         self.assertIn("undone", catalog[
             "settings.personalize.favor_words.on"].replace("\u00a0", " "))
-        self.assertIn("can be undone", catalog[
+        self.assertIn("Replace with What You Said in the menu bar puts back", catalog[
             "settings.accessibility.favor_words.help"])
         # Every catalog the window carries says it.
         for locale, strings in STRING_CATALOGS.items():

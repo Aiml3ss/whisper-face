@@ -12253,6 +12253,21 @@ class ReleasePlanTests(unittest.TestCase):
                           state["vocab_applied"],
                           state["last_vocabulary_applied"]), (1, 1, 1))
 
+    def test_what_you_said_is_the_words_heard_before_favor_my_words(self):
+        # "Replace with What You Said" offers the raw transcript, taken
+        # before "Favor my words" writes into the recognition, so it puts
+        # the heard words back over a term the switch wrote.
+        source = ast.get_source_segment(
+            (ROOT / "dictate.py").read_text(encoding="utf-8"), next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "finish_and_process"))
+        heard = source.index("recognized_raw = raw\n")
+        favored = source.index("favored_edits = apply_favored_words(")
+        self.assertLess(heard, favored)
+        self.assertEqual(source.count("recognized_raw = "), 1)
+        self.assertIn('said=recognized_raw if rec.mode == "capture"', source)
+
     def test_favor_my_words_off_is_the_shadow_as_before(self):
         pasted, _matched, state = self._favored(favor=False)
         self.assertEqual(pasted, ["Ask Prea ka about it."])
