@@ -1025,13 +1025,16 @@ def _percentile(values: Sequence[float], point: float) -> float | None:
 def score_vocabulary_clip(plain: dict, biased: dict, reference: str,
                           case_terms: Sequence[str], terms, version: int,
                           dictionary: Sequence[str]) -> dict:
-    """One clip's outcome: the shadow policy's decisions on the biased
-    process's report, and what they and the spelling rule would write."""
+    """One clip's outcome: the policy's decisions on the biased process's
+    report, then the text "Favor my words" delivers from them, written by
+    the app's own path (``apply_vocabulary_decisions``, English capture)
+    and the spelling rule with the report, against the same spelling rule
+    on the words heard (the switch off)."""
     sys.path.insert(0, str(HERE))
     from parrot_core import parse_helper_words, parse_vocabulary_report
     from voice_compiler import (apply_dictionary_spelling,
-                                apply_vocabulary_evidence,
-                                vocabulary_alternative)
+                                apply_vocabulary_decisions,
+                                apply_vocabulary_evidence)
     text = str(biased.get("text", "")).strip()
     identical = all(plain.get(key) == biased.get(key)
                     for key in ("ok", "text", "words", "avg_confidence"))
@@ -1039,10 +1042,11 @@ def score_vocabulary_clip(plain: dict, biased: dict, reference: str,
     candidates = parse_vocabulary_report(biased.get("bias"), version)
     decisions = apply_vocabulary_evidence(
         text, words, candidates or (), terms) if words else ()
-    accepted = [decision for decision in decisions if decision.accepted]
-    before = apply_dictionary_spelling(text, dictionary)[0]
+    application = apply_vocabulary_decisions(text, words, decisions)
+    accepted = list(application.applied)
+    before = apply_dictionary_spelling(text, dictionary, candidates or ())[0]
     after = apply_dictionary_spelling(
-        vocabulary_alternative(text, decisions), dictionary)[0]
+        application.text, dictionary, candidates or ())[0]
     reference_words = _vocabulary_words(reference)
     false_insertions = sum(
         not vocabulary_term_present(reference, decision.term)
@@ -1069,6 +1073,7 @@ def score_vocabulary_clip(plain: dict, biased: dict, reference: str,
              "reason": decision.reason, "debt": decision.debt,
              "similarity": round(decision.similarity, 3)}
             for decision in decisions],
+        "applied": len(accepted),
         "false_insertions": false_insertions,
         "correct_words_changed": changed_correct,
     }
@@ -1187,6 +1192,8 @@ def vocabulary_main(argv: Sequence[str]) -> int:
         "term_occurrences": occurrences,
         "terms_right_with_spelling_rule": right_before,
         "terms_right_with_shadow_policy_applied": right_after,
+        # What "Favor my words" wrote: the same count, by the app's path.
+        "applied": sum(record["applied"] for record in records),
         "would_fix": fixed,
         "would_break": broken,
         "would_write": sum(1 for record in records

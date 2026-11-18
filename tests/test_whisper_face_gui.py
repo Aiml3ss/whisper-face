@@ -556,6 +556,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.flight.update_failed",
                 "operation.self_correction.update_failed",
                 "operation.remove_repeats.update_failed",
+                "operation.favor_words.update_failed",
                 "operation.speech_runtime.update_failed",
                 "operation.acoustic.update_failed",
                 "operation.relisten.update_failed",
@@ -3434,6 +3435,71 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         self.assertEqual(state.notice_level, "error")
         self.assertIn("Repeated words", state.notice)
 
+    def test_favor_my_words_is_on_unless_settings_say_off(self):
+        # A runtime from before the switch, and every value that is not the
+        # JSON literal false, reads as on.
+        self.assertTrue(GUIActions().set_favor_my_words(True))
+        self.assertTrue(normalize_settings({}).favor_my_words)
+        self.assertTrue(
+            normalize_settings({"favor_my_words": "no"}).favor_my_words)
+        self.assertFalse(
+            normalize_settings({"favor_my_words": False}).favor_my_words)
+
+    def test_the_favor_my_words_switch_shows_what_the_runtime_stored(self):
+        stored = {"favor_my_words": True}
+
+        def set_favor_my_words(enabled):
+            self.calls.append(enabled)
+            stored["favor_my_words"] = enabled
+            return enabled
+
+        model = self.model(
+            settings_snapshot=lambda: dict(stored),
+            set_favor_my_words=set_favor_my_words)
+        self.assertTrue(model.select_section("Settings").settings
+                        .favor_my_words)
+        state = model.set_favor_my_words(False)
+        self.assertEqual(self.calls, [False])
+        self.assertFalse(state.settings.favor_my_words)
+        self.assertFalse(model.refresh().settings.favor_my_words)
+        self.assertTrue(model.set_favor_my_words(True)
+                        .settings.favor_my_words)
+        # A refusal shows what was stored.
+        refused = self.model(set_favor_my_words=lambda _enabled: True)
+        self.assertTrue(
+            refused.set_favor_my_words(False).settings.favor_my_words)
+
+    def test_a_raising_favor_my_words_switch_reports_and_stays_on(self):
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("private detail")
+
+        model = self.model(set_favor_my_words=explode)
+        state = model.set_favor_my_words(False)
+        self.assertTrue(state.settings.favor_my_words)
+        self.assertEqual(state.notice_level, "error")
+        self.assertIn("Favor my words", state.notice)
+
+    def test_favor_my_words_says_what_it_does_and_that_it_can_be_undone(self):
+        catalog = STRING_CATALOGS["en"]
+        self.assertEqual(catalog["settings.personalize.favor_words"],
+                         "Favor my words")
+        self.assertIn("vocabulary", catalog[
+            "settings.personalize.favor_words.on"])
+        self.assertIn("undone", catalog[
+            "settings.personalize.favor_words.on"].replace("\u00a0", " "))
+        self.assertIn("can be undone", catalog[
+            "settings.accessibility.favor_words.help"])
+        # Every catalog the window carries says it.
+        for locale, strings in STRING_CATALOGS.items():
+            for key in ("settings.personalize.favor_words",
+                        "settings.personalize.favor_words.on",
+                        "settings.personalize.favor_words.off",
+                        "settings.accessibility.favor_words.label",
+                        "settings.accessibility.favor_words.help",
+                        "operation.favor_words.update_failed"):
+                with self.subTest(locale=locale, key=key):
+                    self.assertTrue(strings.get(key))
+
     def test_the_new_speech_runtime_is_off_unless_the_runtime_says_on(self):
         self.assertFalse(GUIActions().set_new_speech_runtime(True))
         self.assertFalse(normalize_snapshot({}).new_speech_runtime)
@@ -4368,6 +4434,8 @@ class SettingsPagesContractTests(unittest.TestCase):
                 "settings.controls.self_correction.on",
                 "settings.controls.remove_repeats.off",
                 "settings.controls.remove_repeats.on",
+                "settings.personalize.favor_words.off",
+                "settings.personalize.favor_words.on",
                 "pages.models.advisory",
                 "pages.models.advisory.evidence",
                 "pages.models.advisory.unavailable"):

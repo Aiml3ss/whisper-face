@@ -669,7 +669,7 @@ class VocabularyReceiptTests(unittest.TestCase):
             self.assertEqual(benchmark_asr.read_dictionary_terms(path),
                              ["GitHub", "Qwen"])
 
-    def test_a_clip_is_scored_from_the_shadow_policy(self):
+    def test_a_clip_is_scored_from_what_the_app_writes(self):
         from voice_compiler import VocabularyTerm
         words = [{"word": "Ask", "start": 0.0, "end": 0.3, "confidence": 0.9},
                  {"word": "Prea", "start": 0.4, "end": 0.7,
@@ -691,6 +691,8 @@ class VocabularyReceiptTests(unittest.TestCase):
         self.assertTrue(fixed["identical_text_and_words"])
         self.assertEqual(fixed["terms_right_before"], [])
         self.assertEqual(fixed["terms_right_after"], ["Priyanka"])
+        # Written by the app's own applying path.
+        self.assertEqual(fixed["applied"], 1)
         self.assertEqual(fixed["false_insertions"], 0)
         # The same detour where the speaker never said the term.
         false = benchmark_asr.score_vocabulary_clip(

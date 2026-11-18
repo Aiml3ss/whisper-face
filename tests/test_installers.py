@@ -2354,6 +2354,10 @@ class InstallerContractTests(unittest.TestCase):
         # The restart repair ships on; an older preferences file without the
         # key is read as on by the runtime, so neither installer rewrites it.
         self.assertIn('"remove_repeats": true', template)
+        # "Favor my words" ships on, and so does an install updated from
+        # before the key: the runtime reads a missing key as on, so neither
+        # installer rewrites an existing preferences file to add it.
+        self.assertIn('"favor_my_words": true', template)
         # Whisper Face's own speech runtime ships switched off; a file from
         # before the key existed is read as off, so neither installer
         # rewrites an existing preferences file to add it.

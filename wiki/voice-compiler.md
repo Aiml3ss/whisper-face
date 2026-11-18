@@ -76,16 +76,21 @@ metrics. It never touches I/O, the clipboard, or an application
   "push it to GitHub", and "co-pilot" becomes "Copilot". Only spaces,
   hyphens and case may differ. A case change alone never touches an
   ordinary word, so "Mark" listed leaves "mark the date" alone.
-- Vocabulary evidence (`apply_vocabulary_evidence`, in shadow): the speech
+- Vocabulary evidence (`apply_vocabulary_evidence`): the speech
   runtime's term pass reports that "Ask Prea ka about it." could have been
   "Ask Priyanka about it." for a debt of 2. The policy would write it only
   if the term was typed or proved by a correction, the debt is within 5,
   the heard words sound like the term (letter sound key, 0.7) or are an
   alias, the normal pass was unsure of them, they hold no digit, negation,
   address or lone common word, and it is one of at most two per
-  dictation. Today it only counts (`vocab_candidates`,
-  `vocab_shadow_accepts`) and keeps the text it would give as the last
-  alternative; the transcript is unchanged (November 2026).
+  dictation. It counts (`vocab_candidates`, `vocab_shadow_accepts`) and
+  keeps the text it would give as the last alternative. With "Favor my
+  words" on (the default), `apply_vocabulary_decisions` writes the accepted
+  ones into the recognition before compilation, behind its own rails
+  (capture, English, not verbatim, at most two, each on the recognition's
+  own words), records each as a `vocabulary_term` clean-up edit, and counts
+  it (`vocab_applied`). The words heard stay the raw transcript
+  (November 2026).
 
 ## Related Concepts
 
