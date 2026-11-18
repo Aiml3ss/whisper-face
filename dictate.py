@@ -10087,7 +10087,8 @@ def apply_learned_fixes(text: str, bundle: str = "") -> str:
     return regression.apply(text, app=bundle or None)
 
 
-def apply_vocabulary_casing(text: str, edits: list | None = None) -> str:
+def apply_vocabulary_casing(text: str, edits: list | None = None,
+                            evidence=()) -> str:
     """Write each term the user typed into the dictionary in its own form
     where the words heard equal it, ignoring only spaces, hyphens and case
     ("github" and "git hub" -> "GitHub"). Whole words only, so "github"
@@ -10095,7 +10096,9 @@ def apply_vocabulary_casing(text: str, edits: list | None = None) -> str:
     ``voice_compiler.apply_dictionary_spelling``'s: a change of case alone
     never touches an ordinary word ("Mark" listed leaves "mark") and only
     raises letters, so a capital the recognizer placed stays; a join needs
-    two heard words. Each change is recorded in ``edits``, when given, as a
+    two heard words, and a join of ordinary words ("tail scale") needs the
+    term pass's report for this dictation (``evidence``) to have found the
+    term over them. Each change is recorded in ``edits``, when given, as a
     ``dictionary_spelling`` clean-up edit."""
     if not text:
         return text
@@ -10103,7 +10106,8 @@ def apply_vocabulary_casing(text: str, edits: list | None = None) -> str:
         vocabulary = dict(GLOSS.get("vocabulary") or {})
     if not vocabulary:
         return text
-    spelled, changed = apply_dictionary_spelling(text, vocabulary.values())
+    spelled, changed = apply_dictionary_spelling(
+        text, vocabulary.values(), evidence or ())
     if changed and edits is not None:
         edits.append(CleanupEdit("dictionary_spelling", text, spelled))
     return spelled
@@ -13458,7 +13462,9 @@ def phone_clean(raw: str, recognition: Recognition | None = None) -> str:
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim, language=language)
-    return apply_vocabulary_casing(text)   # user's canonical term casing
+    # The user's dictionary terms in their own form.
+    return apply_vocabulary_casing(
+        text, None, getattr(recognition, "vocabulary_evidence", ()))
 
 
 def source_metadata() -> dict[str, str]:
@@ -15173,7 +15179,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             text = strip_casual_period(text, rec.language)
         # The user's dictionary terms in their own form.
         vocabulary_edits: list[CleanupEdit] = []
-        text = apply_vocabulary_casing(text, vocabulary_edits)
+        text = apply_vocabulary_casing(
+            text, vocabulary_edits,
+            getattr(recognition, "vocabulary_evidence", ()))
         PIPELINE_STATE["last_cleanup_edits"].extend(
             edit.kind for edit in vocabulary_edits)
         if PIPELINE_STATE["last_alternatives"]:

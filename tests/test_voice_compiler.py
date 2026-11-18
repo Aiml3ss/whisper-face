@@ -1186,7 +1186,7 @@ class DictionarySpellingTests(unittest.TestCase):
 
     TERMS = ("GitHub", "iPhone", "kubectl", "Whisper Face", "Copilot",
              "Wi-Fi", "Priyanka", "Qwen", "Mark", "Grace", "US", "Notable",
-             "voice_compiler.py")
+             "voice_compiler.py", "Tailscale", "Chidinma")
 
     def spell(self, text):
         return apply_dictionary_spelling(text, self.TERMS)[0]
@@ -1197,7 +1197,6 @@ class DictionarySpellingTests(unittest.TestCase):
                 ("push it to Git-Hub", "push it to GitHub"),
                 ("push it to github", "push it to GitHub"),
                 ("my iphone died", "my iPhone died"),
-                ("my i phone died", "my iPhone died"),
                 ("run kube ctl now", "run kubectl now"),
                 ("Kube ctl is installed.", "Kubectl is installed."),
                 ("open whisperface", "open Whisper Face"),
@@ -1210,6 +1209,8 @@ class DictionarySpellingTests(unittest.TestCase):
                 ("call priya nka", "call Priyanka"),
                 ("try qwen.", "try Qwen."),
                 ("(git hub)", "(GitHub)"),
+                # No part of the join is an ordinary word.
+                ("Chi Din Ma approved it.", "Chidinma approved it."),
         ):
             with self.subTest(heard=heard):
                 self.assertEqual(self.spell(heard), written)
@@ -1231,6 +1232,11 @@ class DictionarySpellingTests(unittest.TestCase):
                 "edit Voice_compiler.py",
                 # Already the term's own form.
                 "GitHub and iPhone and Mark",
+                # The near miss: ordinary words that happen to spell a term
+                # when joined. Without the term pass finding the term
+                # there, they are what was said.
+                "The fish has a shiny tail scale.",
+                "I phone her every day.",
         ):
             with self.subTest(heard=heard):
                 self.assertEqual(self.spell(heard), heard)
@@ -1244,6 +1250,38 @@ class DictionarySpellingTests(unittest.TestCase):
         self.assertEqual(apply_dictionary_spelling(
             "log in to sales force", ("Salesforce",))[0],
             "log in to Salesforce")
+
+    @staticmethod
+    def candidate(term, heard, debt=2.0):
+        from parrot_core import VocabularyCandidate, VocabularyStep
+        return VocabularyCandidate(
+            term, term, heard, (1.0, 1.4), 1.7, debt, 1.0, 0.4,
+            (VocabularyStep(1, "x", 0, 0.5),))
+
+    def test_a_join_over_an_ordinary_word_needs_the_term_pass(self):
+        said = "Connect to the server over tail scale."
+        # Alone, the words are left as heard.
+        self.assertEqual(self.spell(said), said)
+        # The term pass found the term over those same words, within its
+        # debt budget: it is written.
+        found = [self.candidate("Tailscale", "tail scale.")]
+        self.assertEqual(
+            apply_dictionary_spelling(said, self.TERMS, found)[0],
+            "Connect to the server over Tailscale.")
+        # Over budget, for another term, or over other words: no support.
+        from voice_compiler import VOCABULARY_DEBT_BUDGET
+        for evidence in (
+                [self.candidate("Tailscale", "tail scale",
+                                VOCABULARY_DEBT_BUDGET + 0.1)],
+                [self.candidate("Priyanka", "tail scale")],
+                [self.candidate("Tailscale", "scale")]):
+            with self.subTest(evidence=evidence[0].term):
+                self.assertEqual(apply_dictionary_spelling(
+                    said, self.TERMS, evidence)[0], said)
+        # "i phone" takes in the word "I" too.
+        self.assertEqual(apply_dictionary_spelling(
+            "my i phone died", self.TERMS,
+            [self.candidate("iPhone", "i phone")])[0], "my iPhone died")
 
     def test_reports_what_it_replaced(self):
         self.assertEqual(

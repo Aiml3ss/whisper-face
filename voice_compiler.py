@@ -2029,11 +2029,15 @@ def _ordinary_term(term: str) -> bool:
 
 
 def apply_dictionary_spelling(
-        text: str, terms: Iterable[str]) -> tuple[str, list[str]]:
+        text: str, terms: Iterable[str],
+        evidence: Iterable[VocabularyCandidate] = ()) \
+        -> tuple[str, list[str]]:
     """Write each dictionary term in its own form where it was heard.
 
     Returns the text and, for each change, the heard words it replaced.
-    The guards, all of them deliberate:
+    ``evidence`` is the term pass's report for this dictation
+    (``Recognition.vocabulary_evidence``), when there is one. The guards,
+    all of them deliberate:
 
     - A change of letter case alone is made only for a term that is not an
       ordinary word, and never to a heard word that is one: "Mark" listed
@@ -2043,6 +2047,13 @@ def apply_dictionary_spelling(
     - Joining words needs at least two heard words ("git hub", "co-pilot");
       no join or split writes an ordinary word, or starts from one heard
       word that is ordinary, and none takes away a negation ("not able").
+    - A join that takes in an ordinary word ("tail scale" for "Tailscale")
+      is the near miss itself: someone saying "a shiny tail scale" said
+      those words. It is written only where the term pass found the term
+      over those same words within its debt budget
+      (``_supported_joins``); otherwise the words stay as heard, for the
+      term pass to decide. Parts that are none of them ordinary words
+      ("Chi Din Ma" for "Chidinma", "git hub") join as before.
     - Only spaces may separate the heard words: a comma, a full stop or a
       line break between them means they were not said as one term.
     - A word touching ``@``, ``/``, ``:`` or ``_`` belongs to an address,
@@ -2061,6 +2072,7 @@ def apply_dictionary_spelling(
             by_key[key] = term
     if not text or not by_key:
         return text, []
+    supported = _supported_joins(evidence)
     words = list(_SPELLING_WORD_RE.finditer(text))
     replacements: list[tuple[int, int, str]] = []
     changed: list[str] = []
@@ -2085,7 +2097,7 @@ def apply_dictionary_spelling(
             term = by_key.get(_spelling_key(heard))
             if term is None:
                 continue
-            written = _spelling_for(text, start, heard, term)
+            written = _spelling_for(text, start, heard, term, supported)
             if written is not None and written != heard:
                 replacements.append((start, end, written))
                 changed.append(heard)
@@ -2095,7 +2107,27 @@ def apply_dictionary_spelling(
     return _replace_spans(text, replacements), changed
 
 
-def _spelling_for(text: str, start: int, heard: str, term: str) -> str | None:
+def _evidence_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", value.casefold())
+
+
+def _supported_joins(
+        evidence: Iterable[VocabularyCandidate]) -> frozenset:
+    """The (term, heard words) pairs the term pass found within budget,
+    each compared on its letters and digits alone."""
+    supported = set()
+    for candidate in evidence or ():
+        try:
+            if float(candidate.debt) <= VOCABULARY_DEBT_BUDGET:
+                supported.add((_evidence_key(candidate.term),
+                               _evidence_key(candidate.heard)))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return frozenset(supported)
+
+
+def _spelling_for(text: str, start: int, heard: str, term: str,
+                  supported: frozenset = frozenset()) -> str | None:
     """The form to write for ``heard``, or None when a guard refuses."""
     heard_words = [word for word in re.split(r"[\s-]+", heard) if word]
     term_words = [word for word in re.split(r"[\s-]+", term) if word]
@@ -2118,6 +2150,10 @@ def _spelling_for(text: str, start: int, heard: str, term: str) -> str | None:
     if len(heard_words) == 1 and is_ordinary_word(heard_words[0]):
         return None
     if any(is_negation(word) for word in heard_words):
+        return None
+    if (len(heard_words) > 1
+            and any(is_ordinary_word(word) for word in heard_words)
+            and (_evidence_key(term), _evidence_key(heard)) not in supported):
         return None
     return _sentence_case(text, start, heard, term)
 
