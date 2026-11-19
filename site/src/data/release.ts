@@ -1,22 +1,24 @@
 // The current downloadable build. Update every value below when cutting a
 // release; every download link on the site reads from here.
 export const RELEASE = {
-  version: '0.6.1',
-  tag: 'v0.6.1',
+  version: '0.7.0',
+  tag: 'v0.7.0',
   /** Apple Silicon disk image: the drag-install app and a link to Applications. */
-  dmg: 'https://github.com/Aiml3ss/whisper-face/releases/download/v0.6.1/WhisperFace-0.6.1-macOS-arm64.dmg',
-  size: '33.6 MB',
-  notes: 'https://github.com/Aiml3ss/whisper-face/releases/tag/v0.6.1',
+  dmg: 'https://github.com/Aiml3ss/whisper-face/releases/download/v0.7.0/WhisperFace-0.7.0-macOS-arm64.dmg',
+  // PLACEHOLDER: replace with the published disk image's size before deploying.
+  size: 'SIZE-PENDING',
+  notes: 'https://github.com/Aiml3ss/whisper-face/releases/tag/v0.7.0',
   /** Windows 10/11 x64 source bundle; unzip and run Install.cmd. */
   windows:
-    'https://github.com/Aiml3ss/whisper-face/releases/download/v0.6.1/WhisperFace-0.6.1-windows-x64.zip',
-  windowsSize: '16.6 MB',
+    'https://github.com/Aiml3ss/whisper-face/releases/download/v0.7.0/WhisperFace-0.7.0-windows-x64.zip',
+  // PLACEHOLDER: replace with the published Windows zip's size before deploying.
+  windowsSize: 'SIZE-PENDING',
   /** Checksums for the Mac assets. This file does not list the Windows zip. */
   checksums:
-    'https://github.com/Aiml3ss/whisper-face/releases/download/v0.6.1/SHA256SUMS',
+    'https://github.com/Aiml3ss/whisper-face/releases/download/v0.7.0/SHA256SUMS',
   /** The Windows zip's own checksum file. */
   windowsChecksums:
-    'https://github.com/Aiml3ss/whisper-face/releases/download/v0.6.1/SHA256SUMS-windows',
+    'https://github.com/Aiml3ss/whisper-face/releases/download/v0.7.0/SHA256SUMS-windows',
   /**
    * Ad-hoc signed, not notarized: the project is not yet enrolled in the Apple
    * Developer Program, so macOS will not vouch for the developer. Flip this to
