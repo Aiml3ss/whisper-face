@@ -130,6 +130,15 @@
    "notes": "Only the ci_warm_path profile is reachable from a clone. The product_quality, warm_path_stage, and startup_readiness profiles all need private runtime logs produced by actually dictating on an installed machine."
   },
   {
+   "path": "benchmarks/replay_text_and_route_baseline.json",
+   "case_key": "cases",
+   "cases": 197,
+   "content": "recorded-typed-text-and-routes",
+   "requirement": "reference-data",
+   "command": "uv run tests/test_whole_program.py",
+   "notes": "Not a corpus of its own: what origin/main typed, and the consequence route it chose, for every sentence of default_path_sentences.json and recognizer_transcripts.json, dictated through the real dictate.py on the fake Mac. tests/test_whole_program.py requires the same from a protocol 1 and a protocol 2 helper while the helper word-evidence switches are off. Like the corpora it is recorded from, it needs a macOS host but no audio, model or network. A case is added when one is added to either corpus; an existing one changes only with a deliberate change in what is typed or routed."
+  },
+  {
    "path": "benchmarks/reproducibility.json",
    "case_key": null,
    "cases": null,
