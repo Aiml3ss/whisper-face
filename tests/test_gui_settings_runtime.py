@@ -894,7 +894,8 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
         models = next(
             step for step in state.onboarding_steps if step.key == "models")
         self.assertFalse(models.complete)
-        self.assertEqual(models.status, "Warming up")
+        # Said the way a person would: the model is loading.
+        self.assertEqual(models.status, "Loading")
 
     def test_full_install_is_all_green(self):
         from model_wallet import CURRENT_PROVIDER_PROFILES
