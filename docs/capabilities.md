@@ -20,7 +20,7 @@ Last reviewed: **14 November 2026**, against the source that includes the
 November 2026 audit fixes. v0.5.0 is the first published build with them;
 v0.4.0 and earlier behave differently in places (they install Ollama by
 default, for example). v0.6.0 is the first whose Mac download is the
-drag-install app.
+drag-install app; v0.6.1 adds moving an existing folder install into the app.
 
 **What a default install contains.** On a Mac: Parakeet Unified (English) and
 Whisper Tiny. Whisper large-v3-turbo and the Qwen3.5-4B cleanup model (with
