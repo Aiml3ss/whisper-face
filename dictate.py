@@ -517,7 +517,8 @@ from voice_objects import (  # noqa: E402
 import self_update  # noqa: E402
 
 if IS_MACOS:
-    from whisper_face_gui import GUIActions, create_gui  # noqa: E402
+    from whisper_face_gui import (  # noqa: E402
+        GUIActions, create_gui, localized_string, plural_key)
 
 
 def open_mac_system_settings(pane: str | None = None) -> None:
@@ -2458,6 +2459,107 @@ def voice_inbox_menu_title(status) -> str:
     return "Voice Inbox" if count == 0 else f"Voice Inbox — {count} queued"
 
 
+# The updaters' error codes, as self_update.py and scripts/app_update.py
+# write them for update.log and the tests, and the window catalog's words a
+# person reads for each. The codes never reach an alert.
+UPDATE_CHECK_REASON_KEYS = {
+    "not a git checkout": "update.reason.not_updatable",
+    "could not read git status": "update.reason.unreadable",
+    "local changes present": "update.reason.changed_files",
+    "no tracked upstream branch": "update.reason.no_source",
+    "could not compare with upstream": "update.reason.unreadable",
+    "could not parse commit count": "update.reason.unreadable",
+    "git is not installed": "update.reason.no_tools",
+    "git operation timed out": "update.reason.timed_out",
+}
+# The release updater's reasons are sentences; each is known by how it
+# starts (or, for a file name first, how it ends).
+RELEASE_REASON_KEYS = (
+    ("couldn't reach the published releases", "update.reason.offline"),
+    ("the latest release changed since", "update.reason.release_changed"),
+    ("open whisper face from applications to finish",
+     "update.reason.finish_first"),
+    ("whisper face can't replace itself", "update.reason.cannot_replace"),
+    ("the app being replaced is not", "update.reason.not_whisper_face"),
+    ("the latest release is not on this app's", "update.reason.other_channel"),
+    ("the download ", "update.reason.unverified"),
+    ("the new app ", "update.reason.unverified"),
+    ("the published update manifest", "update.reason.release_unusable"),
+    ("the latest release does not carry", "update.reason.release_unusable"),
+    ("refused a download", "update.reason.release_unusable"),
+    ("a release file is larger", "update.reason.release_unusable"),
+    ("this whisper face ", "update.reason.release_conflict"),
+    ("this copy was not set up", "update.reason.setup_unreadable"),
+    ("the install receipt", "update.reason.setup_unreadable"),
+    ("the copy of whisper face this install runs",
+     "update.reason.setup_unreadable"),
+    ("the receipt binds", "update.reason.setup_unreadable"),
+    ("the whisper face app's info.plist", "update.reason.setup_unreadable"),
+    ("that is not the whisper face app", "update.reason.setup_unreadable"),
+    ("that whisper face app was not built", "update.reason.setup_unreadable"),
+    ("could not read ", "update.reason.setup_unreadable"),
+)
+
+
+def update_check_reason_key(error) -> str:
+    """The catalog key for a git update check's error code."""
+    error = str(error or "").strip()
+    if error in UPDATE_CHECK_REASON_KEYS:
+        return UPDATE_CHECK_REASON_KEYS[error]
+    if error.startswith("could not fetch from "):
+        return "update.reason.offline"
+    if error == self_update.APP_MANAGED_MESSAGE:
+        return "update.reason.app_managed"
+    return "update.reason.unknown"
+
+
+def release_reason_key(reason) -> str:
+    """The catalog key for the release updater's reason."""
+    folded = str(reason or "").strip().casefold().replace("\u2019", "'")
+    if not folded:
+        return "update.reason.no_answer"
+    for start, key in RELEASE_REASON_KEYS:
+        if folded.startswith(start):
+            return key
+    if folded.endswith(" is not an object"):
+        return "update.reason.setup_unreadable"
+    if folded.replace("-", "").isalpha():
+        # An update rule's own code (same-version-revision-conflict, ...).
+        return "update.reason.release_conflict"
+    return "update.reason.unknown"
+
+
+def update_check_alert(report) -> tuple[str, str] | None:
+    """What Check for Updates… says to a git install that has nothing to
+    offer, as (message, detail), or None when an update is offered."""
+    report = report if isinstance(report, dict) else {}
+    error = report.get("error")
+    if error == "checkout has commits upstream does not":
+        if report.get("ahead"):
+            return (localized_string("update.newer_build.title"),
+                    localized_string("update.newer_build.body"))
+        return (localized_string("update.own_build.title"),
+                localized_string("update.own_build.body"))
+    if error:
+        return (localized_string("update.check_failed.title"),
+                localized_string(update_check_reason_key(error)))
+    if not report.get("available"):
+        return localized_string("update.up_to_date.title"), ""
+    return None
+
+
+def update_offer_detail(report) -> str:
+    """The offer of a git update: the builds and how many changes."""
+    report = report if isinstance(report, dict) else {}
+    behind = report.get("behind", 0)
+    behind = behind if isinstance(behind, int) and not isinstance(
+        behind, bool) else 0
+    return localized_string(
+        plural_key("update.available.body", behind),
+        current=str(report.get("current") or "")[:7],
+        latest=str(report.get("latest") or "")[:7], count=behind)
+
+
 def release_update_alert(release) -> tuple[str, str, bool]:
     """What Check for Updates… says to a drag install, from the release
     updater's answer: (message, detail, whether to offer the download).
@@ -2471,21 +2573,27 @@ def release_update_alert(release) -> tuple[str, str, bool]:
     revision = str(release.get("revision") or "")
     if decision == "upgrade" and version and revision:
         size = release.get("size")
-        megabytes = (f"about {max(1, round(size / 1_000_000))} MB"
-                     if isinstance(size, int) and not isinstance(size, bool)
-                     and size > 0 else "the new version")
+        megabytes = (
+            localized_string("update.release.size",
+                             megabytes=max(1, round(size / 1_000_000)))
+            if isinstance(size, int) and not isinstance(size, bool)
+            and size > 0 else localized_string("update.release.size.unknown"))
         current = str(release.get("current_version") or "")
-        detail = (f"You have {current}. " if current else "") + (
-            f"Download {megabytes} and install it? Whisper Face finishes the "
-            "update in its own window and keeps your settings, dictionary, "
-            "history and models. If anything goes wrong, this version keeps "
-            "working.")
-        return f"Whisper Face {version} is available.", detail, True
+        detail = localized_string("update.release.available.body",
+                                  size=megabytes)
+        if current:
+            detail = localized_string(
+                "update.release.you_have", current=current) + " " + detail
+        return (localized_string("update.release.available.title",
+                                 version=version), detail, True)
     if decision == "up-to-date":
-        return "Whisper Face is up to date.", "", False
-    reason = str(release.get("reason") or "").strip()
-    return ("Couldn't check for updates.",
-            reason or "The release updater did not answer.", False)
+        if release.get("reason") == "installed-is-newer":
+            return (localized_string("update.newer_build.title"),
+                    localized_string("update.newer_build.body"), False)
+        return localized_string("update.up_to_date.title"), "", False
+    return (localized_string("update.check_failed.title"),
+            localized_string(release_reason_key(release.get("reason"))),
+            False)
 
 
 def release_update_failure(outcome) -> str | None:
@@ -2494,9 +2602,35 @@ def release_update_failure(outcome) -> str | None:
     outcome = outcome if isinstance(outcome, dict) else {}
     if outcome.get("status") == "installed":
         return None
-    reason = str(outcome.get("reason") or "").strip()
-    return ((reason + "\n\n") if reason else "") + (
-        "Nothing was changed; this version keeps working.")
+    unchanged = localized_string("update.install_failed.unchanged")
+    if not str(outcome.get("reason") or "").strip():
+        return unchanged
+    return (localized_string(release_reason_key(outcome.get("reason")))
+            + "\n\n" + unchanged)
+
+
+def update_result_alert(outcome) -> tuple[str, str]:
+    """What the menu says once a git update has run, from its result."""
+    outcome = outcome if isinstance(outcome, dict) else {}
+    status = outcome.get("status")
+    if status == "applied":
+        revision = str(outcome.get("to") or "")[:7]
+        return (localized_string("update.up_to_date.title"),
+                localized_string("update.applied.body", build=revision)
+                if revision else "")
+    if status == "rolled_back":
+        return (localized_string("update.rolled_back.title"),
+                localized_string("update.rolled_back.body"))
+    if status == "rollback_failed":
+        # The one state that must never be dressed up: the new build failed
+        # AND restoring the old one could not be verified.
+        return (localized_string("update.rollback_failed.title"),
+                localized_string("update.rollback_failed.body"))
+    if outcome.get("error") == self_update.APP_MANAGED_MESSAGE:
+        return (localized_string("update.apply_failed.title"),
+                localized_string("update.reason.app_managed"))
+    return (localized_string("update.apply_failed.title"),
+            localized_string("update.apply_failed.body"))
 
 
 def voice_outbox_menu_title(count, needs_home=None) -> str:
@@ -4424,13 +4558,16 @@ class StatusBar(NSObject):
                 timeout=1800)
             detail = release_update_failure(outcome)
             if detail is not None:
+                print(f"update install: {outcome.get('status')} "
+                      f"{outcome.get('reason') or ''}".rstrip(), flush=True)
                 AppHelper.callAfter(
-                    self._update_alert, "Couldn't install the update.", detail)
+                    self._update_alert,
+                    localized_string("update.install_failed.title"), detail)
         threading.Thread(target=worker, daemon=True).start()
         self._update_alert(
-            f"Downloading Whisper Face {version}…",
-            "Its update window opens when the download is ready and "
-            "checked. You can keep working until then.")
+            localized_string("update.release.downloading.title",
+                             version=version),
+            localized_string("update.release.downloading.body"))
 
     def _present_update_check(self, report):
         try:
@@ -4439,6 +4576,9 @@ class StatusBar(NSObject):
                 # Set up by the drag-install app: updates are published
                 # releases, offered here and installed only on a click.
                 release = report.get("release") or {}
+                if release.get("reason"):
+                    print(f"update check: {release.get('decision')} "
+                          f"{release.get('reason')}", flush=True)
                 message, detail, offer = release_update_alert(release)
                 if not offer:
                     self._update_alert(message, detail)
@@ -4447,30 +4587,27 @@ class StatusBar(NSObject):
                 self._brand_update_alert(alert)
                 alert.setMessageText_(message)
                 alert.setInformativeText_(detail)
-                alert.addButtonWithTitle_("Download and Install")
-                alert.addButtonWithTitle_("Later")
+                alert.addButtonWithTitle_(
+                    localized_string("update.action.download"))
+                alert.addButtonWithTitle_(localized_string("update.later"))
                 if alert.runModal() == NSAlertFirstButtonReturn:
                     self._begin_release_update(
                         str(release["version"]), str(release["revision"]))
                 return
             if error:
-                self._update_alert(
-                    "Couldn't check for updates.", str(error))
+                # The code goes to the log; the person reads plain words.
+                print(f"update check: {error}", flush=True)
+            answer = update_check_alert(report)
+            if answer is not None:
+                self._update_alert(*answer)
                 return
-            if not report.get("available"):
-                self._update_alert("Whisper Face is up to date.", "")
-                return
-            behind = int(report.get("behind", 0) or 0)
-            noun = "commit" if behind == 1 else "commits"
             alert = NSAlert.alloc().init()
             self._brand_update_alert(alert)
-            alert.setMessageText_("An update is available.")
-            alert.setInformativeText_(
-                f"Build {str(report.get('current') or '')[:7]} → "
-                f"{str(report.get('latest') or '')[:7]}\n"
-                f"{behind} new {noun} available. Update now?")
-            alert.addButtonWithTitle_("Update")
-            alert.addButtonWithTitle_("Later")
+            alert.setMessageText_(localized_string("update.available.title"))
+            alert.setInformativeText_(update_offer_detail(report))
+            alert.addButtonWithTitle_(
+                localized_string("update.action.update"))
+            alert.addButtonWithTitle_(localized_string("update.later"))
             if alert.runModal() == NSAlertFirstButtonReturn:
                 self._begin_update(str(report.get("latest") or ""))
         except Exception as e:
@@ -4479,8 +4616,8 @@ class StatusBar(NSObject):
     def _begin_update(self, target_rev):
         if not target_rev:
             self._update_alert(
-                "Couldn't start the update.",
-                "No target revision was found.")
+                localized_string("update.start_failed.title"),
+                localized_string("update.start_failed.no_target"))
             return
 
         try:
@@ -4517,17 +4654,20 @@ class StatusBar(NSObject):
             submitted = subprocess.run(
                 command, capture_output=True, text=True, timeout=15)
             if submitted.returncode != 0:
+                print("update start: the detached updater could not be "
+                      "launched", flush=True)
                 self._update_alert(
-                    "Couldn't start the update.",
-                    "The detached updater could not be launched.")
+                    localized_string("update.start_failed.title"),
+                    localized_string("update.start_failed.launch"))
                 return
             self._update_alert(
-                "Updating Whisper Face…",
-                "The update is running safely in the background. "
-                "Whisper Face will restart and report the result.")
+                localized_string("update.running.title"),
+                localized_string("update.running.body"))
         except Exception as e:
+            print(f"update start: {type(e).__name__}", flush=True)
             self._update_alert(
-                "Couldn't start the update.", type(e).__name__)
+                localized_string("update.start_failed.title"),
+                localized_string("update.start_failed.launch"))
 
     def _consume_update_result(self):
         result_path = (
@@ -4560,43 +4700,10 @@ class StatusBar(NSObject):
             print(f"! could not consume update result: {e}")
 
     def _present_update_result(self, outcome):
+        # The outcome's error is already a line of update.log (see
+        # _consume_update_result); the alert says what it means.
         try:
-            status = outcome.get("status")
-            if status == "applied":
-                revision = str(outcome.get("to") or "")[:7]
-                self._update_alert(
-                    "Whisper Face is up to date.",
-                    f"Now running build {revision}." if revision else "")
-            elif status == "rolled_back":
-                # Say why. A bare "it failed" gave nobody -- user or
-                # maintainer -- anything to act on, so the same failure kept
-                # recurring undiagnosed.
-                detail = (
-                    "The installer failed on the new version, so Whisper Face "
-                    "restored your previous version. Nothing was kept.")
-                reason = str(outcome.get("error") or "").strip()
-                if reason:
-                    detail = f"{detail}\n\n{reason}"
-                self._update_alert("Update failed — rolled back.", detail)
-            elif status == "rollback_failed":
-                # The one state that must never be dressed up: the new build
-                # failed AND restoring the old one could not be verified.
-                # Saying "rolled back" here would leave someone relying on an
-                # app that may not be running at all.
-                detail = (
-                    "The installer failed on the new version, and restoring "
-                    "your previous version also failed, so Whisper Face may "
-                    "not be working right now. Run Install.command from the "
-                    "checkout to repair it.")
-                reason = str(outcome.get("error") or "").strip()
-                if reason:
-                    detail = f"{detail}\n\n{reason}"
-                self._update_alert(
-                    "Update failed — and recovery failed.", detail)
-            else:
-                error = outcome.get("error") or "unknown error"
-                self._update_alert(
-                    "Couldn't apply the update.", str(error))
+            self._update_alert(*update_result_alert(outcome))
         except Exception as e:
             print(f"! update result UI failed: {e}")
 
@@ -4616,7 +4723,7 @@ class StatusBar(NSObject):
             alert.setMessageText_(message)
             if informative:
                 alert.setInformativeText_(informative)
-            alert.addButtonWithTitle_("OK")
+            alert.addButtonWithTitle_(localized_string("update.ok"))
             alert.runModal()
         except Exception as e:
             print(f"! could not show alert: {e}")

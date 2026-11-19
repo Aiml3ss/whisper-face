@@ -60,7 +60,8 @@ DEFAULT_INSTALL_RECEIPT = (
     Path.home() / "Library" / "Application Support" / "Whisper Face" /
     "launcher-install.json")
 
-# What a person reads when they ask an app-managed copy for an update.
+# The code an app-managed copy answers with. The menu never shows it: it asks
+# the release updater instead, and its own catalog words say the same.
 APP_MANAGED_MESSAGE = (
     "This copy of Whisper Face was set up by the Whisper Face app, so its "
     "updates come as a new download of the app, not from here.")
@@ -202,8 +203,11 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
 
     Returns ``{"available", "current", "latest", "behind", "error"}``. Fails
     closed: any git/network failure, a non-repo, or a dirty working tree returns
-    ``available=False`` with a human-readable ``error`` and never raises. The
-    only network access is the single ``git fetch``.
+    ``available=False`` with an ``error`` code and never raises. The code is
+    for logs and tests; the menu (dictate.py, ``update_check_alert``) turns it
+    into the window catalog's plain words. A checkout that upstream cannot
+    fast-forward also carries ``ahead``: whether it is simply newer. The only
+    network access is the single ``git fetch``.
 
     ``current`` is the older of the checkout's HEAD and the revision the
     installer last provisioned, because the build in use can be no newer than
@@ -274,6 +278,9 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
         # is no safe fast-forward here, so say so instead of offering one.
         if latest != head and not _is_ancestor(runner, checkout, head, latest):
             result["error"] = "checkout has commits upstream does not"
+            # Simply ahead (a newer build than the release) or diverged
+            # (a build of its own): the menu says which, in plain words.
+            result["ahead"] = _is_ancestor(runner, checkout, latest, head)
             return result
 
         # The build in use is no newer than either what git has checked out or
