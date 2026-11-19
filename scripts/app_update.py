@@ -200,7 +200,7 @@ def installed(layout: Layout) -> dict:
         bound = Path(receipt["checkout"]).resolve()
         managed = layout.checkout.resolve()
     except OSError as exc:
-        raise UpdateError("the install's checkout cannot be found") from exc
+        raise UpdateError("the copy of Whisper Face this install runs cannot be found") from exc
     if bound != managed:
         raise UpdateError("the receipt binds a copy outside the app's own folder")
     return receipt

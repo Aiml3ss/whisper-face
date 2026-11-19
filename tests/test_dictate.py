@@ -2287,18 +2287,68 @@ class RecognitionMenuTitleTests(unittest.TestCase):
         })
 
 
+# Git's own words, which no update message a person reads may use. The
+# updaters keep them in their error codes, for update.log and these tests.
+RAW_GIT_WORDS = re.compile(
+    r"\b(checkout|checked out|upstream|commits?|HEAD|refs?|fast-forward(ed|s)?"
+    r"|rev-parse|revision|merge-base|git)\b", re.IGNORECASE)
+UPDATE_MESSAGE_FUNCTIONS = (
+    "update_check_reason_key", "release_reason_key", "update_check_alert",
+    "update_offer_detail", "release_update_alert", "release_update_failure",
+    "update_result_alert")
+
+
+def update_messages():
+    """The menu's update-message functions, wired to the real catalog."""
+    import self_update
+    from whisper_face_gui import localized_string, plural_key
+    return load_definitions(
+        *UPDATE_MESSAGE_FUNCTIONS,
+        assignments=("UPDATE_CHECK_REASON_KEYS", "RELEASE_REASON_KEYS"),
+        extra={"localized_string": localized_string,
+               "plural_key": plural_key, "self_update": self_update})
+
+
+def _source_strings(path, callee):
+    """Every error a module can raise or record, with each placeholder
+    filled by a sample: ``result["error"] = ...`` when ``callee`` is None,
+    else the first argument of each call to ``callee``."""
+    def render(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            return "".join(
+                part.value if isinstance(part, ast.Constant) else "sample"
+                for part in node.values)
+        return None
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    found = []
+    for node in ast.walk(tree):
+        if callee is None and isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Subscript)
+                and isinstance(target.slice, ast.Constant)
+                and target.slice.value == "error"
+                for target in node.targets):
+            found.append(render(node.value))
+        elif callee is not None and isinstance(node, ast.Call) \
+                and isinstance(node.func, ast.Name) \
+                and node.func.id == callee and node.args:
+            found.append(render(node.args[0]))
+    return [text for text in found if text]
+
+
 class ReleaseUpdateMenuTests(unittest.TestCase):
     """What Check for Updates… says to a copy the drag-install app set up."""
 
     def test_only_a_newer_release_is_offered_and_with_what_it_will_do(self):
-        alert = load_definitions("release_update_alert")["release_update_alert"]
+        alert = update_messages()["release_update_alert"]
         message, detail, offer = alert({
             "decision": "upgrade", "version": "0.6.1", "revision": "b" * 40,
             "size": 24_600_000, "current_version": "0.6.0"})
         self.assertTrue(offer)
         self.assertEqual(message, "Whisper Face 0.6.1 is available.")
         self.assertIn("You have 0.6.0.", detail)
-        self.assertIn("about 25 MB", detail)
+        self.assertIn("about 25\u00a0MB", detail)
         self.assertIn("keeps your settings, dictionary, history and models",
                       detail)
         self.assertIn("this version keeps working", detail)
@@ -2308,22 +2358,158 @@ class ReleaseUpdateMenuTests(unittest.TestCase):
                          ("Whisper Face is up to date.", "", False))
         message, detail, offer = alert({
             "decision": "refuse",
-            "reason": "couldn't reach the published releases"})
+            "reason": "couldn't reach the published releases; check that "
+                      "this Mac is online"})
         self.assertFalse(offer)
-        self.assertEqual(message, "Couldn't check for updates.")
-        self.assertIn("couldn't reach", detail)
+        self.assertEqual(message, "Couldn\u2019t check for updates.")
+        self.assertIn("Check that this Mac is online", detail)
         self.assertFalse(alert(None)[2])
-        self.assertIn("did not answer", alert({})[1])
+        self.assertIn("didn\u2019t answer", alert({})[1])
+
+    def test_an_install_newer_than_the_release_is_told_so(self):
+        alert = update_messages()["release_update_alert"]
+        message, detail, offer = alert({
+            "decision": "up-to-date", "reason": "installed-is-newer"})
+        self.assertFalse(offer)
+        self.assertIn("newer build", detail)
+        self.assertIn("once a newer release is published", detail)
 
     def test_a_failed_install_says_nothing_changed(self):
-        failure = load_definitions(
-            "release_update_failure")["release_update_failure"]
+        failure = update_messages()["release_update_failure"]
         self.assertIsNone(failure({"status": "installed", "version": "0.6.1"}))
         detail = failure({"status": "failed",
-                          "reason": "the download did not verify"})
-        self.assertTrue(detail.startswith("the download did not verify"))
+                          "reason": "the download did not verify (digest)"})
+        self.assertTrue(detail.startswith(
+            "The download didn\u2019t pass Whisper Face\u2019s safety checks"))
+        self.assertNotIn("digest", detail)
         self.assertIn("Nothing was changed", detail)
         self.assertIn("Nothing was changed", failure({}))
+
+
+class UpdateMessagesSpeakPlainlyTests(unittest.TestCase):
+    """Every update message a person reads comes from the window's catalog
+    and says what is true in plain words, never in git's."""
+
+    def test_a_build_ahead_of_the_release_is_not_an_error(self):
+        # The owner's case: a test build ahead of the published release.
+        check = update_messages()["update_check_alert"]
+        message, detail = check({
+            "available": False, "error": "checkout has commits upstream does not",
+            "ahead": True})
+        self.assertNotIn("Couldn", message)
+        self.assertIn("newer build of Whisper Face than the latest release",
+                      detail)
+        self.assertIn("nothing to update to", detail)
+        self.assertIn("update normally once a newer release is published",
+                      detail)
+        message, detail = check({
+            "available": False, "error": "checkout has commits upstream does not",
+            "ahead": False})
+        self.assertIn("own build", message)
+
+    def test_every_update_message_avoids_git_words(self):
+        import self_update
+        from whisper_face_gui import STRING_CATALOGS
+        messages = update_messages()
+        shown = []
+        # Every catalog string the update alerts use, in every language.
+        for locale, catalog in STRING_CATALOGS.items():
+            keys = [key for key in catalog if key.startswith("update.")]
+            self.assertGreaterEqual(len(keys), 40, locale)
+            shown += [catalog[key] for key in keys]
+        # Every error self_update can report, and every reason the release
+        # updater can give, as the menu renders it.
+        git_errors = _source_strings(ROOT / "self_update.py", None)
+        self.assertIn("checkout has commits upstream does not", git_errors)
+        self.assertGreaterEqual(len(git_errors), 8)
+        release_reasons = _source_strings(
+            ROOT / "scripts" / "app_update.py", "UpdateError")
+        self.assertGreaterEqual(len(release_reasons), 30)
+        app_update_source = (ROOT / "scripts" / "app_update.py").read_text(
+            encoding="utf-8")
+        refusals = ast.literal_eval(app_update_source[
+            app_update_source.index("REFUSALS = {") + len("REFUSALS = "):
+            app_update_source.index("}\n", app_update_source.index(
+                "REFUSALS = {")) + 1])
+        release_reasons += list(refusals) + list(refusals.values())
+        for error in git_errors + [
+                "git is not installed", "git operation timed out",
+                "git error (OSError)", "TimeoutExpired",
+                self_update.APP_MANAGED_MESSAGE]:
+            for ahead in (True, False):
+                report = {"available": False, "error": error, "ahead": ahead}
+                shown += list(messages["update_check_alert"](report))
+            shown += list(messages["update_result_alert"](
+                {"status": "failed", "error": error}))
+        for reason in release_reasons:
+            shown += list(messages["release_update_alert"](
+                {"decision": "refuse", "reason": reason})[:2])
+            shown.append(messages["release_update_failure"](
+                {"status": "failed", "reason": reason}))
+            # A reason the menu can meet has its own words, not the
+            # catch-all. Moving a folder install (its folder, its login
+            # service) is the setup window's, which never asks the menu.
+            if "folder" not in reason and "login service" not in reason:
+                self.assertNotEqual(messages["release_reason_key"](reason),
+                                    "update.reason.unknown", reason)
+        for error in git_errors:
+            # apply_update's own errors (a switch or a recovery that failed)
+            # reach a person only through update_result_alert, by status.
+            if error != "checkout has commits upstream does not" \
+                    and "recovery also failed" not in error \
+                    and not error.startswith("could not checkout "):
+                self.assertNotEqual(
+                    messages["update_check_reason_key"](error),
+                    "update.reason.unknown", error)
+        for status in ("applied", "rolled_back", "rollback_failed", "failed"):
+            shown += list(messages["update_result_alert"](
+                {"status": status, "from": "a" * 40, "to": "b" * 40,
+                 "error": "Install.command failed (exit 1): fatal: bad ref"}))
+        for behind in (1, 3):
+            shown.append(messages["update_offer_detail"](
+                {"available": True, "behind": behind, "current": "a" * 40,
+                 "latest": "b" * 40}))
+        shown.append(messages["release_update_alert"]({
+            "decision": "upgrade", "version": "0.6.1", "revision": "b" * 40,
+            "size": 1, "current_version": "0.6.0"})[1])
+        for text in shown:
+            with self.subTest(text=text):
+                self.assertIsNone(RAW_GIT_WORDS.search(text), text)
+
+    def test_the_menu_shows_no_update_words_of_its_own(self):
+        # Every alert the menu's update check raises takes its words from the
+        # catalog (directly or through the functions above), never from a
+        # string literal in the menu's code.
+        status_bar = next(
+            node for node in TREE.body if isinstance(node, ast.ClassDef)
+            and any(isinstance(item, ast.FunctionDef)
+                    and item.name == "checkForUpdates_" for item in node.body))
+        methods = {item.name: item for item in status_bar.body
+                   if isinstance(item, ast.FunctionDef)}
+        names = ("checkForUpdates_", "_begin_release_update",
+                 "_present_update_check", "_begin_update",
+                 "_present_update_result", "_update_alert")
+        shown = 0
+        for name in names:
+            for node in ast.walk(methods[name]):
+                if not isinstance(node, ast.Call):
+                    continue
+                attribute = getattr(node.func, "attr", None)
+                arguments = list(node.args)
+                if attribute == "callAfter" and arguments and getattr(
+                        arguments[0], "attr", None) == "_update_alert":
+                    arguments = arguments[1:]
+                elif attribute not in {"_update_alert", "setMessageText_",
+                                       "setInformativeText_",
+                                       "addButtonWithTitle_"}:
+                    continue
+                for argument in arguments:
+                    shown += 1
+                    with self.subTest(method=name, line=node.lineno):
+                        self.assertFalse(
+                            isinstance(argument, (ast.Constant, ast.JoinedStr)),
+                            ast.unparse(node))
+        self.assertGreaterEqual(shown, 15)
 
 
 class VoiceInboxMenuTests(unittest.TestCase):

@@ -388,8 +388,21 @@ class InstalledRevisionTests(unittest.TestCase):
             install_receipt=self.receipt({"source_revision": INSTALLED}))
         self.assertFalse(report["available"])
         self.assertEqual(report["error"], "checkout has commits upstream does not")
+        self.assertFalse(report["ahead"])
         self.assertFalse(any(c[3:5] == ("rev-list", "--count")
                              for c in runner.calls))
+
+    def test_a_checkout_simply_ahead_of_upstream_says_it_is_newer(self):
+        # A test build ahead of the published release: refused exactly as
+        # before, with the same code, and marked as newer so the menu can
+        # say so instead of calling it an error.
+        runner = FakeRunner(head=CURRENT, upstream=LATEST,
+                            ancestry={(LATEST, CURRENT)})
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner, install_receipt=NO_RECEIPT)
+        self.assertFalse(report["available"])
+        self.assertEqual(report["error"], "checkout has commits upstream does not")
+        self.assertTrue(report["ahead"])
 
     def test_a_dirty_tree_still_refuses_before_the_network(self):
         runner = FakeRunner(head=LATEST, upstream=LATEST,
@@ -699,9 +712,9 @@ class AppManagedTests(unittest.TestCase):
         # The answer for a drag install comes first, from published
         # releases, and is offered only behind a click.
         self.assertLess(present.index('report.get("app_managed")'),
-                        present.index("Couldn't check for updates."))
+                        present.index("update_check_alert(report)"))
         self.assertIn("release_update_alert(release)", present)
-        self.assertIn('"Download and Install"', present)
+        self.assertIn('localized_string("update.action.download")', present)
         self.assertLess(present.index("alert.runModal()"),
                         present.index("self._begin_release_update("))
         check = source[source.index("    def checkForUpdates_(self, sender):"):]
