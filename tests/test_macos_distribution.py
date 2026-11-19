@@ -1148,6 +1148,10 @@ def fake_program(directory, name, body):
     return str(path)
 
 
+@unittest.skipIf(
+    os.name == "nt",
+    "fake security and codesign are bash scripts; launcher signing is macOS only",
+)
 class LocalLauncherSigningTests(unittest.TestCase):
     """A folder install signs the launcher it builds with a Developer ID of
     the pinned team when the keychain holds one, so macOS keeps the launcher's
