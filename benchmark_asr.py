@@ -35,6 +35,11 @@ cased WER, trailing-punctuation precision/recall/F1, and a capitalization
 match rate.  Against references that carry no formatting (LibriSpeech is
 uppercase and unpunctuated) that block is reported as unavailable instead of
 misleading zeros.  Normalized WER stays the primary metric either way.
+
+``--vocabulary`` is a separate run: the speech runtime's term pass and the
+shadow policy measured on recordings with references, written as a receipt
+of fixes, false insertions, correct words changed and added time (see the
+comment above ``vocabulary_main``).
 """
 
 from __future__ import annotations
@@ -878,7 +883,347 @@ def print_report(summaries: Sequence[dict]) -> None:
                   f"{_formatting_report_line(summary['formatting_scoring'])}")
 
 
+# --- --vocabulary: the term pass, measured ---------------------------------
+#
+#     python3 benchmark_asr.py --vocabulary \
+#       --runtime .models/swift-build-runtime/release/parrot-speech-runtime \
+#       --models SCRATCH/models/parakeet-unified-en-0.6b \
+#       --cases ~/whisper-face-evidence/accuracy \
+#       --dictionary ~/.config/.../dictionary.txt \
+#       [--manifest controls.jsonl ...] --output RECEIPT.json
+#
+# Each clip is decoded by two runtime processes, interleaved: one with no
+# terms, one sent the scoped term list (voice_compiler.vocabulary_terms).
+# Their text and words must be identical; the second one's term-pass report
+# goes through the shadow policy (voice_compiler.apply_vocabulary_evidence)
+# and the clean-up's spelling rule. The receipt counts fixes, false
+# insertions, correct words changed and added time. --cases is a folder with
+# cases.json (id, audio, kind, terms; the reference in <id>.txt) as
+# scripts/capture_voice_evidence.py writes it; --manifest is JSONL of
+# {"id", "audio", "text"} with no listed term in it (controls). Audio is
+# read in place; the receipt holds counts, ids and terms, never transcripts.
+
+VOCABULARY_SANDBOX_PROFILE = "(version 1)(allow default)(deny network*)"
+
+
+def _vocabulary_words(text: str) -> list[str]:
+    import re
+    words = []
+    for word in text.split():
+        word = re.sub(r"['\u2019]s\W*$", "", word.casefold())
+        word = re.sub(r"[^0-9a-z]", "", word)
+        if word:
+            words.append(word)
+    return words
+
+
+def vocabulary_term_present(text: str, term: str) -> bool:
+    """Whether ``term``'s words appear in order in ``text``, ignoring case,
+    punctuation and a possessive (a hyphenated term may also be spoken
+    as separate words)."""
+    heard = _vocabulary_words(text)
+    variants = [_vocabulary_words(term)]
+    if "-" in term:
+        variants.append(_vocabulary_words(term.replace("-", " ")))
+    for wanted in variants:
+        if wanted and any(heard[i:i + len(wanted)] == wanted
+                          for i in range(len(heard) - len(wanted) + 1)):
+            return True
+    return False
+
+
+def read_dictionary_terms(path: Path) -> list[str]:
+    """The typed terms of a dictionary.txt: lines above the auto-learned
+    marker, without comments and bans."""
+    terms = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("# --- auto-learned"):
+            break
+        if line and not line.startswith(("#", "-")):
+            terms.append(line)
+    return terms
+
+
+def read_pcm16_wav(path: Path) -> bytes:
+    """16 kHz mono 16-bit WAV as little-endian float32 bytes."""
+    import array
+    import wave
+    with wave.open(str(path), "rb") as handle:
+        if (handle.getframerate(), handle.getnchannels(),
+                handle.getsampwidth()) != (16_000, 1, 2):
+            raise ValueError(f"{path.name}: not 16 kHz mono 16-bit")
+        pcm = array.array("h", handle.readframes(handle.getnframes()))
+    if sys.byteorder != "little":
+        pcm.byteswap()
+    return array.array("f", (value / 32768 for value in pcm)).tobytes()
+
+
+class VocabularyRuntime:
+    """One parrot-speech-runtime process in protocol 2, network denied."""
+
+    def __init__(self, binary: Path, models: Path):
+        argv = [str(binary), "--server", "--protocol", "2",
+                "--models", str(models)]
+        if Path("/usr/bin/sandbox-exec").is_file():
+            argv = ["/usr/bin/sandbox-exec", "-p",
+                    VOCABULARY_SANDBOX_PROFILE, *argv]
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith("FLUID_")}
+        self.process = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, bufsize=0, env=env)
+        self.buffer = bytearray()
+        self.ready = json.loads(self.line())
+        if not self.ready.get("ready"):
+            self.close()
+            raise SystemExit("the runtime did not report ready")
+
+    def line(self, timeout: float = 300.0) -> bytes:
+        output = self.process.stdout.fileno()
+        deadline = time.monotonic() + timeout
+        while b"\n" not in self.buffer:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([output], [], [], left)[0]:
+                raise SystemExit("the runtime did not answer in time")
+            chunk = os.read(output, 65536)
+            if not chunk:
+                raise SystemExit("the runtime exited")
+            self.buffer.extend(chunk)
+        end = self.buffer.index(b"\n")
+        line = bytes(self.buffer[:end])
+        del self.buffer[:end + 1]
+        return line
+
+    def send(self, frame: bytes) -> dict:
+        self.process.stdin.write(frame)
+        return json.loads(self.line())
+
+    def decode(self, audio: bytes) -> tuple[dict, bytes, float]:
+        started = time.perf_counter()
+        self.process.stdin.write(struct.pack("<Q", len(audio) // 4) + audio)
+        raw = self.line()
+        return json.loads(raw), raw, time.perf_counter() - started
+
+    def close(self) -> None:
+        try:
+            self.process.stdin.close()
+            self.process.wait(timeout=30)
+        except Exception:
+            self.process.kill()
+            self.process.wait()
+
+
+def _percentile(values: Sequence[float], point: float) -> float | None:
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    return round(ordered[min(len(ordered) - 1,
+                             int(round((len(ordered) - 1) * point)))], 3)
+
+
+def score_vocabulary_clip(plain: dict, biased: dict, reference: str,
+                          case_terms: Sequence[str], terms, version: int,
+                          dictionary: Sequence[str]) -> dict:
+    """One clip's outcome: the policy's decisions on the biased process's
+    report, then the text "Favor my words" delivers from them, written by
+    the app's own path (``apply_vocabulary_decisions``, English capture)
+    and the spelling rule with the report, against the same spelling rule
+    on the words heard (the switch off)."""
+    sys.path.insert(0, str(HERE))
+    from parrot_core import parse_helper_words, parse_vocabulary_report
+    from voice_compiler import (apply_dictionary_spelling,
+                                apply_vocabulary_decisions,
+                                apply_vocabulary_evidence)
+    text = str(biased.get("text", "")).strip()
+    identical = all(plain.get(key) == biased.get(key)
+                    for key in ("ok", "text", "words", "avg_confidence"))
+    words = parse_helper_words(biased.get("words"), 10 * 60) or ()
+    candidates = parse_vocabulary_report(biased.get("bias"), version)
+    decisions = apply_vocabulary_evidence(
+        text, words, candidates or (), terms) if words else ()
+    application = apply_vocabulary_decisions(text, words, decisions)
+    accepted = list(application.applied)
+    before = apply_dictionary_spelling(text, dictionary, candidates or ())[0]
+    after = apply_dictionary_spelling(
+        application.text, dictionary, candidates or ())[0]
+    reference_words = _vocabulary_words(reference)
+    false_insertions = sum(
+        not vocabulary_term_present(reference, decision.term)
+        for decision in accepted)
+    changed_correct = 0
+    for decision in accepted:
+        term_words = set(_vocabulary_words(decision.term))
+        changed_correct += sum(
+            word in reference_words and word not in term_words
+            for word in _vocabulary_words(decision.heard))
+    return {
+        "identical_text_and_words": identical,
+        "report_valid": candidates is not None,
+        "detours": len(candidates or ()),
+        "added_ms": (biased.get("bias") or {}).get("added_ms"),
+        "joint_calls": (biased.get("bias") or {}).get("joint_calls"),
+        "stopped": bool((biased.get("bias") or {}).get("stopped")),
+        "terms_right_before": [term for term in case_terms
+                               if vocabulary_term_present(before, term)],
+        "terms_right_after": [term for term in case_terms
+                              if vocabulary_term_present(after, term)],
+        "decisions": [
+            {"term": decision.term, "accepted": decision.accepted,
+             "reason": decision.reason, "debt": decision.debt,
+             "similarity": round(decision.similarity, 3)}
+            for decision in decisions],
+        "applied": len(accepted),
+        "false_insertions": false_insertions,
+        "correct_words_changed": changed_correct,
+    }
+
+
+def vocabulary_main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(prog="benchmark_asr.py --vocabulary")
+    parser.add_argument("--vocabulary", action="store_true", required=True)
+    parser.add_argument("--runtime", type=Path, required=True)
+    parser.add_argument("--models", type=Path, required=True)
+    parser.add_argument("--cases", type=Path)
+    parser.add_argument("--dictionary", type=Path)
+    parser.add_argument("--manifest", type=Path, action="append", default=[])
+    parser.add_argument("--max-debt", type=float)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    sys.path.insert(0, str(HERE))
+    from parrot_core import vocabulary_control_frame
+    from voice_compiler import VOCABULARY_REPORT_DEBT, vocabulary_terms
+
+    clips = []
+    typed = read_dictionary_terms(args.dictionary) if args.dictionary else []
+    if args.cases:
+        cases = json.loads((args.cases / "cases.json").read_text())["cases"]
+        for case in cases:
+            for term in case.get("terms") or ():
+                if term not in typed:
+                    typed.append(term)
+            clips.append({
+                "id": case["id"], "kind": case.get("kind", "case"),
+                "audio": args.cases / case["audio"],
+                "reference": (args.cases / f"{case['id']}.txt").read_text(
+                    encoding="utf-8").strip(),
+                "terms": list(case.get("terms") or ())})
+    for manifest in args.manifest:
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entry = json.loads(line)
+                clips.append({
+                    "id": f"{manifest.stem}:{entry['id']}", "kind": "control",
+                    "audio": (manifest.parent / entry["audio"]),
+                    "reference": entry["text"], "terms": []})
+    terms = vocabulary_terms(typed)
+    max_debt = VOCABULARY_REPORT_DEBT if args.max_debt is None \
+        else args.max_debt
+    version = int(hashlib.sha256(json.dumps(
+        [term.text for term in terms]).encode()).hexdigest()[:12], 16)
+
+    plain = VocabularyRuntime(args.runtime, args.models)
+    biased = VocabularyRuntime(args.runtime, args.models)
+    reply = biased.send(vocabulary_control_frame(
+        [(term.text, term.source) for term in terms], version, max_debt))
+    if not reply.get("ok") or "vocabulary" not in (
+            biased.ready.get("capabilities") or ()):
+        raise SystemExit(f"the runtime refused the term list: {reply}")
+    records, paired = [], []
+    try:
+        warm = read_pcm16_wav(clips[0]["audio"]) if clips else b""
+        for _ in range(3):
+            plain.decode(warm)
+            biased.decode(warm)
+        for index, clip in enumerate(clips):
+            audio = read_pcm16_wav(clip["audio"])
+            first, second = (plain, biased) if index % 2 else (biased, plain)
+            answers = {id(first): first.decode(audio),
+                       id(second): second.decode(audio)}
+            plain_answer, biased_answer = answers[id(plain)], answers[id(biased)]
+            record = score_vocabulary_clip(
+                plain_answer[0], biased_answer[0], clip["reference"],
+                clip["terms"], terms, version, typed)
+            record.update(id=clip["id"], kind=clip["kind"], terms=clip["terms"])
+            paired.append(1000 * (float(biased_answer[0].get(
+                "processing_s", 0)) - float(plain_answer[0].get(
+                    "processing_s", 0))))
+            records.append(record)
+    finally:
+        plain.close()
+        biased.close()
+
+    def total(kind, key):
+        return sum(record[key] for record in records
+                   if kind is None or record["kind"] == kind)
+    term_records = [record for record in records if record["terms"]]
+    occurrences = sum(len(record["terms"]) for record in term_records)
+    right_before = sum(len(record["terms_right_before"])
+                       for record in term_records)
+    right_after = sum(len(record["terms_right_after"])
+                      for record in term_records)
+    fixed = sum(len(set(record["terms_right_after"])
+                    - set(record["terms_right_before"]))
+                for record in term_records)
+    broken = sum(len(set(record["terms_right_before"])
+                     - set(record["terms_right_after"]))
+                 for record in term_records)
+    added = [float(record["added_ms"]) for record in records
+             if record["added_ms"] is not None]
+    reasons = Counter(decision["reason"] for record in records
+                      for decision in record["decisions"])
+    receipt = {
+        "schema_version": 1,
+        "kind": "vocabulary-shadow-receipt",
+        "invocation": shlex.join(["benchmark_asr.py", *argv]),
+        "hardware": {"machine": platform.machine(),
+                     "macos": platform.mac_ver()[0]},
+        "runtime_sha256": hashlib.sha256(
+            args.runtime.read_bytes()).hexdigest(),
+        "terms_listed": len(typed),
+        "terms_sent": len(terms),
+        "terms_runtime_kept": reply.get("terms"),
+        "max_debt_reported": max_debt,
+        "clips": len(records),
+        "clips_by_kind": dict(Counter(record["kind"] for record in records)),
+        "text_and_words_identical_with_terms": sum(
+            record["identical_text_and_words"] for record in records),
+        "reports_valid": sum(record["report_valid"] for record in records),
+        "term_occurrences": occurrences,
+        "terms_right_with_spelling_rule": right_before,
+        "terms_right_with_shadow_policy_applied": right_after,
+        # What "Favor my words" wrote: the same count, by the app's path.
+        "applied": sum(record["applied"] for record in records),
+        "would_fix": fixed,
+        "would_break": broken,
+        "would_write": sum(1 for record in records
+                           for decision in record["decisions"]
+                           if decision["accepted"]),
+        "false_insertions": total(None, "false_insertions"),
+        "false_insertions_by_kind": {
+            kind: total(kind, "false_insertions")
+            for kind in sorted({record["kind"] for record in records})},
+        "correct_words_changed": total(None, "correct_words_changed"),
+        "decision_reasons": dict(reasons),
+        "added_ms_term_pass": {"p50": _percentile(added, .5),
+                               "p95": _percentile(added, .95),
+                               "max": _percentile(added, 1.0)},
+        "added_ms_paired_processing": {"p50": _percentile(paired, .5),
+                                       "p95": _percentile(paired, .95)},
+        "stopped_at_call_limit": sum(record["stopped"] for record in records),
+        "records": records,
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(receipt, indent=1) + "\n",
+                           encoding="utf-8")
+    print(json.dumps({key: value for key, value in receipt.items()
+                      if key != "records"}, indent=1))
+    return 0
+
+
 def main() -> int:
+    if "--vocabulary" in sys.argv[1:]:
+        return vocabulary_main(sys.argv[1:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument(

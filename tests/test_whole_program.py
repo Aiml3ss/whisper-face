@@ -196,10 +196,10 @@ class BootTests(unittest.TestCase):
         # beside it but, with its switch off as shipped, never started.
         self.assertEqual(Path(helper[0][0]).name, fake_platform.HELPER_NAME)
         self.assertTrue(mac.dictate.PARAKEET_RUNTIME_HELPER.is_file())
-        # Protocol 2 is asked for, and the models folder Python verified is
+        # Protocol 3 is asked for, and the models folder Python verified is
         # named; a protocol 1 helper reads only "--server".
         self.assertEqual(helper[0][1:], [
-            "--server", "--protocol", "2",
+            "--server", "--protocol", "3",
             "--models", str(mac.dictate.PARAKEET_MODEL_DIR)])
         # Every other process the runtime asks for, by program. A new entry
         # here is a new thing the app runs on the user's Mac.
@@ -452,6 +452,32 @@ class FreshInstallDictationTests(unittest.TestCase):
             dictate.PREFERENCES_FILE.read_text())["remove_repeats"], True)
         self.assertEqual(typed(spoken),
                          "Of course I can. I have nothing going on")
+
+    def test_the_favor_my_words_switch_reaches_the_runtime_and_the_file(self):
+        mac = booted()
+        dictate = mac.dictate
+        # A fresh install starts from the shipped template, which says on;
+        # an updated install's file has no key and is read as on.
+        self.assertIs(json.loads(
+            (ROOT / "preferences.template.json").read_text())[
+                "favor_my_words"], True)
+        self.assertIs(dictate.PREFERENCES["favor_my_words"], True)
+        self.assertIs(dictate.gui_settings_snapshot()["favor_my_words"], True)
+        actions = dictate.STATUS["bar"].gui.view_model.actions
+        try:
+            self.assertIs(actions.set_favor_my_words(False), False)
+            self.assertIs(dictate.PREFERENCES["favor_my_words"], False)
+            self.assertIs(json.loads(
+                dictate.PREFERENCES_FILE.read_text())["favor_my_words"],
+                False)
+            self.assertIs(actions.settings_snapshot()["favor_my_words"],
+                          False)
+        finally:
+            self.assertIs(actions.set_favor_my_words(True), True)
+        self.assertIs(json.loads(
+            dictate.PREFERENCES_FILE.read_text())["favor_my_words"], True)
+        # Counted, never words, in the runtime's status.
+        self.assertIn("vocab_applied", dictate.runtime_status_snapshot())
 
     def test_the_repeat_repair_does_not_run_again_on_the_model_text(self):
         # The optional cleanup model may change punctuation alone, and the
@@ -1008,7 +1034,7 @@ class HelperWordEvidenceTests(unittest.TestCase):
         booted()
         self.assertEqual(
             SHIPPED_SWITCHES,
-            {"prosody": False, "routing": False, "protocol": 2})
+            {"prosody": False, "routing": False, "protocol": 3})
 
     def test_every_replayed_sentence_types_and_routes_as_origin_main(self):
         mac = booted()
@@ -1041,7 +1067,7 @@ class HelperWordEvidenceTests(unittest.TestCase):
                 self.assertEqual(v2["status"], "native")
                 self.assertGreater(v2["words"], 0)
         spawned = mac.desktop.helper_spawns[-1][1:]
-        self.assertEqual(spawned[:3], ["--server", "--protocol", "2"])
+        self.assertEqual(spawned[:3], ["--server", "--protocol", "3"])
 
     def test_malformed_words_are_dropped_and_the_text_is_kept(self):
         mac = booted()
@@ -1175,6 +1201,164 @@ class HelperWordEvidenceTests(unittest.TestCase):
                 "review")
         finally:
             mac.desktop.word_confidence = 0.95
+
+
+class ReleasePathTests(unittest.TestCase):
+    """From key release to the paste: what decodes, when, and its timing.
+
+    The fake helper writes the same sentence for any audio, so these tests
+    read which audio it was sent (Desktop.parakeet_requests, in samples)
+    and in what order, never seconds measured here.
+    """
+
+    SPOKEN = "Ship the release notes before the review starts."
+    RATE = 16_000
+
+    def setUp(self):
+        self.mac = booted()
+        self.desktop = self.mac.desktop
+
+    def patch_tail(self, during_tail):
+        """Run ``during_tail(rec)`` at the start of the tail wait."""
+        dictate = self.mac.dictate
+        original = dictate.wait_for_tail_silence
+
+        def tail(rec, **kwargs):
+            during_tail(rec)
+            return original(rec, **kwargs)
+
+        dictate.wait_for_tail_silence = tail
+        self.addCleanup(setattr, dictate, "wait_for_tail_silence", original)
+
+    def wait_for_request(self, asked: int) -> int:
+        """Poll, up to a generous deadline, for a helper request."""
+        deadline = time.monotonic() + 10.0
+        while (len(self.desktop.parakeet_requests) <= asked
+               and time.monotonic() < deadline):
+            time.sleep(0.005)
+        return len(self.desktop.parakeet_requests) - asked
+
+    def test_a_take_within_one_window_is_decoded_whole(self):
+        # 4.5 s of speech, a 0.8 s pause, then 1.5 s more: under the rolling
+        # plan the pause cut a chunk, and the release decoded the rest.
+        audio = np.concatenate([
+            fake_platform.speech_audio(4.5, 0.8, seed=11),
+            fake_platform.speech_audio(1.5, 0.3, seed=12)])
+        asked = len(self.desktop.parakeet_requests)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio).text
+        self.assertEqual(typed, self.SPOKEN)
+        requests = self.desktop.parakeet_requests[asked:]
+        self.assertTrue(requests)
+        # The decode that was kept covered the whole take: every sample up
+        # to its last pause, with no chunk boundary inside it.
+        self.assertGreaterEqual(max(requests), len(audio) - 0.3 * self.RATE)
+
+    def test_a_take_past_one_window_still_cuts_rolling_chunks(self):
+        audio = np.concatenate([
+            fake_platform.speech_audio(15.5, 0.8, seed=13),
+            fake_platform.speech_audio(1.5, 0.3, seed=14)])
+        asked = len(self.desktop.parakeet_requests)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio, timeout=20.0).text
+        self.assertTrue(typed.startswith(self.SPOKEN))
+        requests = self.desktop.parakeet_requests[asked:]
+        # A chunk ended at the pause after 15.5 s, and the release decoded
+        # only what followed it.
+        self.assertLess(min(requests), 3 * self.RATE)
+        self.assertGreater(max(requests), 15 * self.RATE)
+
+    # Released 100 ms after the speech stopped, which the 512-sample blocks
+    # count as 84 ms of quiet: under the 120 ms that ends a take at once,
+    # over the half of it an early decode needs.
+    ENDING = 0.1
+
+    def test_speech_at_release_decodes_while_the_tail_is_captured(self):
+        # The release waits for a quiet tail; the decode of what was heard
+        # starts before that wait.
+        asked = len(self.desktop.parakeet_requests)
+        seen = {}
+        self.patch_tail(lambda _rec: seen.setdefault(
+            "during_tail", self.wait_for_request(asked)))
+        audio = fake_platform.speech_audio(2.0, self.ENDING, seed=15)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio).text
+        self.assertEqual(typed, self.SPOKEN)
+        self.assertEqual(seen, {"during_tail": 1})
+        # The tail added nothing, so that decode is the one kept.
+        self.assertEqual(
+            self.desktop.parakeet_requests[asked:], [len(audio)])
+
+    def test_a_word_ending_at_the_key_up_is_decoded_after_the_tail(self):
+        asked = len(self.desktop.parakeet_requests)
+        seen = {}
+        self.patch_tail(lambda _rec: seen.setdefault(
+            "during_tail", len(self.desktop.parakeet_requests) - asked))
+        audio = fake_platform.speech_audio(2.0, 0.0, seed=18)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio).text
+        self.assertEqual(typed, self.SPOKEN)
+        self.assertEqual(seen, {"during_tail": 0})
+        self.assertEqual(
+            self.desktop.parakeet_requests[asked:], [len(audio)])
+
+    def test_speech_in_the_tail_decodes_the_whole_remainder_again(self):
+        asked = len(self.desktop.parakeet_requests)
+        more = fake_platform.speech_audio(0.5, 0.2, seed=16)
+
+        def keep_talking(_rec):
+            self.wait_for_request(asked)
+            self.desktop.speak(more)
+
+        self.patch_tail(keep_talking)
+        audio = fake_platform.speech_audio(2.0, self.ENDING, seed=17)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio).text
+        self.assertEqual(typed, self.SPOKEN)
+        early, final = self.desktop.parakeet_requests[asked:]
+        self.assertEqual(early, len(audio))
+        self.assertEqual(final, len(audio) + len(more))
+
+    def test_the_paste_does_not_wait_for_the_microphone_to_stop(self):
+        released = threading.Event()
+        self.addCleanup(released.set)
+        stopped = []
+
+        def slow_stop(stream):
+            def stop():
+                released.wait(10.0)
+                stream.active = False
+                stopped.append(stream)
+            return stop
+
+        for stream in self.desktop.streams:
+            stream.stop = slow_stop(stream)
+            self.addCleanup(stream.__dict__.pop, "stop", None)
+        typed = self.mac.dictate_sentence(self.SPOKEN, field=TextField()).text
+        self.assertEqual(typed, self.SPOKEN)
+        # Pasted while the stream was still stopping.
+        self.assertEqual(stopped, [])
+        released.set()
+        self.assertTrue(self.mac.wait_until(lambda: stopped, 10.0))
+
+    def test_the_record_and_trace_time_every_stage_to_the_paste(self):
+        self.mac.dictate_sentence(self.SPOKEN, field=TextField())
+        stages = transcript_records()[-1]["metrics"]["release_path_ms"]
+        fields = self.mac.dictate.PERFORMANCE_TRACE_SCHEMAS["release_path"]
+        self.assertEqual(set(stages), set(fields))
+        contiguous = fields[:fields.index("release_to_paste_ms")]
+        self.assertAlmostEqual(
+            sum(stages[field] for field in contiguous),
+            stages["release_to_paste_ms"], delta=0.01)
+        self.assertGreater(stages["release_to_paste_ms"], 0.0)
+        self.assertAlmostEqual(stages["audio_ms"], 1500.0, delta=1.0)
+        traces = [
+            json.loads(line.removeprefix("[trace] "))
+            for line in self.mac.log.getvalue().splitlines()
+            if line.startswith("[trace] ") and '"release_path"' in line]
+        self.assertTrue(traces)
+        self.assertEqual(set(traces[-1]) - {"event", "schema_version"},
+                         set(fields))
 
 
 class SpeechRuntimeTests(unittest.TestCase):
@@ -1599,6 +1783,106 @@ class SpeechRuntimeTests(unittest.TestCase):
         self.assertIn("[asr] Parakeet helper is loading; Whisper answers "
                       "until it is ready", log)
         self.assertNotIn("Parakeet helper did not start", log)
+
+    # 15.5 s of speech, a pause that cuts a rolling chunk, then 1.5 s more:
+    # past one 14.96 s window, so the take is streamed to the runtime.
+    def long_take(self):
+        return np.concatenate([
+            fake_platform.speech_audio(15.5, 0.8, seed=21),
+            fake_platform.speech_audio(1.5, 0.3, seed=22)])
+
+    def last_part_still_decoding(self):
+        """At release the fake decodes the last part at once, where a real
+        one is still decoding it unless a speculation stood; these tests
+        are about what the session does when it is needed."""
+        dictate = self.mac.dictate
+        for name in ("usual_decode_ready", "usual_decodes"):
+            self.addCleanup(setattr, dictate, name, getattr(dictate, name))
+        dictate.usual_decode_ready = lambda *_args: False
+        # Nothing of the usual path ends before the session's answer.
+        dictate.usual_decodes = lambda *_args: []
+
+    def test_a_long_take_decoded_during_the_hold_finishes_no_session(self):
+        # The long take ends in a pause, so a speculation of its last part
+        # stood before the key-up: the usual path is decoded already, and
+        # finishing the session would only decode the last window again.
+        desktop = self.mac.desktop
+        self.switch_on()
+        audio = self.long_take()
+        sessions = len(desktop.runtime_sessions)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio, timeout=20.0).text
+        self.assertEqual(desktop.runtime_sessions[sessions:], [])
+        # The fake hears the sentence once in each decoded part.
+        self.assertEqual(typed, f"{self.SPOKEN} {self.SPOKEN}")
+
+    def test_a_long_take_is_decoded_whole_by_its_session(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        self.last_part_still_decoding()
+        self.assertEqual(self.mac.dictate.OWN_PARAKEET.protocol, 3)
+        audio = self.long_take()
+        sessions = len(desktop.runtime_sessions)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=audio, timeout=20.0).text
+        # One decode of the whole take: the session's, which the runtime
+        # answers as its offline decode of the recording (the fake hears the
+        # sentence once in any audio). Joined chunks would have typed it
+        # once per chunk.
+        self.assertEqual(typed, self.SPOKEN)
+        self.assertEqual(desktop.runtime_sessions[sessions:], [len(audio)])
+        # The rolling chunk was still cut and checked during the hold.
+        self.assertTrue(desktop.runtime_requests)
+
+    def test_an_unsure_ending_takes_the_chunked_path(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        self.last_part_still_decoding()
+        audio = self.long_take()
+        sessions = len(desktop.runtime_sessions)
+        desktop.word_confidence = 0.5
+        try:
+            typed = self.mac.dictate_sentence(
+                self.SPOKEN, field=TextField(), audio=audio,
+                timeout=20.0).text
+        finally:
+            desktop.word_confidence = 0.95
+        # The session answered, but a word after the last cut is under the
+        # line: the take is decoded exactly as without a session, the rolling
+        # chunk and the remainder joined.
+        self.assertEqual(desktop.runtime_sessions[sessions:], [len(audio)])
+        self.assertEqual(typed, f"{self.SPOKEN} {self.SPOKEN}")
+
+    def test_a_short_take_never_opens_a_session(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        sessions = len(desktop.runtime_sessions)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(desktop.runtime_sessions[sessions:], [])
+
+    def test_a_failed_session_falls_back_to_the_chunked_path(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        self.last_part_still_decoding()
+        desktop.runtime_failure = "session"
+        try:
+            typed = self.mac.dictate_sentence(
+                self.SPOKEN, field=TextField(), audio=self.long_take(),
+                timeout=20.0).text
+        finally:
+            desktop.runtime_failure = None
+        self.assertEqual(typed, f"{self.SPOKEN} {self.SPOKEN}")
+        self.assertIn("! Speech runtime session failed; the take is decoded "
+                      "the usual way", self.mac.log.getvalue())
+
+    def test_with_the_runtime_off_a_long_take_is_chunked_as_before(self):
+        desktop = self.mac.desktop
+        sessions = len(desktop.runtime_sessions)
+        typed = self.mac.dictate_sentence(
+            self.SPOKEN, field=TextField(), audio=self.long_take(),
+            timeout=20.0).text
+        self.assertEqual(typed, f"{self.SPOKEN} {self.SPOKEN}")
+        self.assertEqual(desktop.runtime_sessions[sessions:], [])
 
     def test_when_both_fail_whisper_types_as_it_always_has(self):
         desktop = self.mac.desktop

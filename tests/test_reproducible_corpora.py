@@ -88,7 +88,7 @@ class ReproducibilityManifestTests(unittest.TestCase):
         self.assertEqual(len(declared), len(set(declared)))
 
         on_disk = {
-            str(path.relative_to(ROOT))
+            path.relative_to(ROOT).as_posix()
             for path in BENCHMARKS.glob("*.json")
         }
         self.assertEqual(

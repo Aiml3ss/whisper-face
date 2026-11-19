@@ -119,6 +119,61 @@ changing anything, run the unpacked copy's
 `scripts/app_update.py adopt-folder --app "/Applications/Whisper Face.app" --dry-run`
 with the app's own `uv`.
 
+## Tried on your own voice first
+
+If you have recorded the accuracy set
+(`uv run scripts/capture_voice_evidence.py accuracy`, kept in
+`~/whisper-face-evidence/accuracy/`), every update you choose from **Check for
+Updates…** is tried on those recordings before it replaces what you run. With
+no recordings, updates behave exactly as described below.
+
+Where it happens: a folder or clone install tries the new revision after it
+is fetched and before `git checkout` (the revision is exported with
+`git archive` from the local object store); an app install tries the new
+release after its download has verified and before the new app replaces the
+old one (its verified source archive is unpacked into the update's private
+folder). The new version's speech engine and clean-up run on each recording,
+this version's run on the same recordings, and both are scored against what
+you said. When the two versions' speech-engine sources are identical, the
+installed engine answers for both; otherwise the new one is built offline in a
+private folder, under its own name so its compiled model cache is separate,
+and that cache is removed afterwards. Dragging a newer app over the old one by
+hand is not tried: the setup window it opens has no way to ask.
+
+The update is held when the new version is worse by more than this:
+
+| Measure | Allowed |
+|---|---|
+| Word mistakes | 2, or 0.5% of the words in the recordings, whichever is more |
+| Names and terms written right | none fewer |
+| Names written that were not said | none more |
+| Recordings it could not finish | none more |
+
+The same engine on the same recordings writes the same words (40 of 40
+identical across three runs of each engine on the owner's Mac), so the word
+allowance is not for noise; it leaves room for a clean-up change an update
+means to make that a word count cannot tell from a mishearing. Names have no
+allowance: they are what the recordings are for.
+
+A held update changes nothing. The alert says which measures got worse, in
+counts (for example "Word mistakes: 41 now, 50 with the update."), and offers
+**Wait** (the default) or **Update Anyway**, which runs the same update
+without the check. When it passes, the folder install's "up to date" alert
+adds one line with the counts. A check that cannot run (no engine installed,
+no `sandbox-exec`, a new version without `voice_check.py`, an engine that will
+not build or start offline) does not hold the update; it says why.
+
+What it may not do: everything it starts runs under `sandbox-exec` with the
+network denied and at background priority (`taskpolicy -b`); it runs only
+after you choose an update, in the updater's own process, never inside
+dictation. Recordings are read in place and never copied. What each version
+wrote is scored in memory and never written down: the receipt in
+`~/whisper-face-evidence/runs/<date>-update-check/receipt.json` (`0600`, in a
+`0700` folder) holds counts and recording names only, and `update.log` gets
+one line of counts. On the owner's 40 recordings it took about a minute when
+the engine had changed (about 30 s of that the build) and a few seconds when
+it had not.
+
 ## Check for Updates… for a folder or clone install
 
 For a folder or clone install, when you choose it, `self_update.py`:
@@ -128,7 +183,8 @@ For a folder or clone install, when you choose it, `self_update.py`:
    this check; earlier disk-image installs always report local changes);
 2. runs one `git fetch` of the checkout's tracked branch (normally `main` on
    GitHub);
-3. if that branch has moved, checks out its tip and reruns the installer;
+3. if that branch has moved, tries its tip on your recordings when you have
+   them (above), then checks it out and reruns the installer;
 4. if the installer fails, restores the last revision the installer
    provisioned cleanly, reinstalls it, and reports `rolled_back` only once
    that is verified. The reason it reports is the installer's last `!!` line,
@@ -154,7 +210,7 @@ a fresh `git clone` would. Rollback restores code, not private state. See the
    `acoustic_keyword_memory.json`, `acoustic_keyword_activation.json`,
    `acoustic_calibration_activation.json`, `relisten_activation.json`,
    `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`,
-   `learned.json`,
+   `delivery_journal.json`, `learned.json`,
    `voice_inbox.json`, `demonstrations.json`, `dictate.log`, and
    `install.log`. A `--server-only` install also has `phone_token.txt`, the
    bearer token its endpoint checks.
@@ -342,7 +398,7 @@ What each tier covers:
 |---|---|---|
 | Software (with `--yes`) | `launchctl bootout` of `com.berg.dictate` and `com.berg.ollama`, both LaunchAgent plists, `~/Applications/Whisper Face.app`, the `Application Support/Whisper Face` receipts, `.models/bin`, `.models/swift-build`, `.models/swift-build-runtime`, `~/Library/Caches/parrot-speech-runtime`, `.dictate.lock` | the `Whisper Face` scheduled task and its legacy `Whispering Parrot` name, `.windows/launch.ps1`, `.windows/launch.sha256`, the `.windows` directory, `.dictate.lock` |
 | Models (`--remove-models`) | the Parakeet Unified Core ML model, both pinned `mlx-community/whisper-*` snapshots in the Hugging Face cache, and `ollama rm qwen3.5:4b` | the `.models` faster-Whisper cache and `ollama rm qwen3.5:4b` |
-| Personal (`--remove-personal-data`) | `snippets.json`, `tones.json`, `preferences.json`, `acoustic_keyword_memory.json`, `acoustic_keyword_activation.json`, `acoustic_calibration_activation.json`, `relisten_activation.json`, `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`, `learned.json`, `voice_inbox.json`, `demonstrations.json`, `phone_token.txt`, `dictate.log`, `ollama.log`, `install.log` | the same, plus `ollama-error.log` |
+| Personal (`--remove-personal-data`) | `snippets.json`, `tones.json`, `preferences.json`, `acoustic_keyword_memory.json`, `acoustic_keyword_activation.json`, `acoustic_calibration_activation.json`, `relisten_activation.json`, `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`, `delivery_journal.json`, `learned.json`, `voice_inbox.json`, `demonstrations.json`, `phone_token.txt`, `dictate.log`, `ollama.log`, `install.log` | the same, plus `ollama-error.log` |
 
 The personal tier is exactly the backup list at the top of this document, and
 for the same reason: no download restores those files. They are kept unless

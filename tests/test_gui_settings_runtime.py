@@ -736,6 +736,8 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
                     "recent_dictations": False},
                 "INSERTION_COORDINATOR": outbox or SimpleNamespace(
                     recoverable=lambda: []),
+                "ReceiptReason": __import__(
+                    "insertion_integrity").ReceiptReason,
                 "acoustic_keyword_memory_status_snapshot": lambda: {},
                 "acoustic_calibration_status_snapshot": lambda: {},
                 "acoustic_time_machine_status_snapshot": lambda: {
@@ -969,6 +971,11 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
         coordinator = InsertionCoordinator()
         for index, outcome in enumerate(outcomes):
             utterance = f"take-{index}"
+            if outcome == "interrupted":
+                # Recovered from the delivery journal at start-up: the app
+                # stopped before this dictation's delivery was recorded.
+                coordinator.keep(utterance, "Ship it", paste_attempted=True)
+                continue
             if outcome == "went-quiet":
                 # A field the runtime read, which answered nothing once
                 # the paste was sent: not an app that hides its text.
@@ -1064,6 +1071,8 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
             ("not-pasted", "Not pasted — destination changed"),
             ("conflict", "Paste may have landed — verify before reusing"),
             ("went-quiet", "Paste may have landed — verify before reusing"),
+            ("interrupted",
+             "Kept when Whisper Face stopped — check before reusing"),
         ):
             with self.subTest(outcome=outcome):
                 # Its place in the queue does not matter: buried under

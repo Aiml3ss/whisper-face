@@ -9,7 +9,7 @@ machine without maintaining a second copy of the application.
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
 `process_verifier.py`, `prewarmed_verifier.py`,
 `whisper_verifier_adapter.py`, `relisten_activation.py`,
-`insertion_integrity.py`, `personal_regression.py`,
+`insertion_integrity.py`, `personal_regression.py`, `voice_check.py`,
 `shadow_candidate_gate.py`, `cleanup_circuit_breaker.py`,
 `delayed_cleanup_activation.py`, `delayed_cleanup_merge.py`,
 `macos_delayed_cleanup_destination.py`,
@@ -67,6 +67,7 @@ uv run tests/test_benchmark_cleanup_proof_recovery.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_benchmark_macos_asr_warm_path.py
 uv run tests/test_performance_lab.py
+uv run tests/test_release_latency_probe.py
 uv run tests/test_dictate.py
 uv run tests/test_whole_program.py
 uv run tests/test_gui_settings_runtime.py
@@ -104,6 +105,8 @@ uv run tests/test_risky_action_confirmation.py
 uv run tests/test_demonstration_drafts.py
 uv run tests/test_competitor_benchmark.py
 uv run tests/test_public_scorecard.py
+uv run tests/test_benchmark_public.py
+uv run tests/test_reproducible_corpora.py
 uv run tests/test_quality_gate.py
 uv run quality_gate.py
 uv run tests/test_personal_regression.py
@@ -112,6 +115,7 @@ uv run tests/test_whisper_face_gui.py
 uv run tests/test_whisper_face_characters.py
 uv run --locked --script dictate.py --native-gui-smoke-test
 uv run tests/test_network_egress.py
+uv run tests/test_outside_probe.py
 uv run tests/test_supply_chain_integrity.py
 uv run tests/test_installers.py
 uv run tests/test_repository_governance.py
@@ -121,6 +125,7 @@ uv run tests/test_safe_update_advisor.py
 uv run tests/test_side_by_side_update.py
 uv run tests/test_app_update.py
 uv run tests/test_self_update.py
+uv run tests/test_voice_check.py
 ```
 
 ## Where the gate list lives, and why it is duplicated
@@ -206,7 +211,6 @@ rather than quietly landing outside the gate.
 | `tests/test_capture_lifecycle_evidence.py` | Covers `scripts/capture_lifecycle_evidence.py`. |
 | `tests/test_capture_voice_evidence.py` | Covers `scripts/capture_voice_evidence.py`. |
 | `tests/test_benchmark_latency_rig.py` | Covers `benchmark_latency_rig.py`. |
-| `tests/test_reproducible_corpora.py` | Checks published documentation claims, not shipping behaviour. |
 
 The four guided evidence-capture sessions and the latency rig are maintainer
 tooling. No installer provisions them, no service runs them, and nothing in a
@@ -216,15 +220,14 @@ and observations that the benchmark gates then consume. Run them when you change
 print an approval command but may never run one, import an activation module,
 or write a receipt.
 
-`tests/test_reproducible_corpora.py` is excluded on the same principle: it
-asserts that `benchmarks/reproducibility.json`, the published ASR bakeoff
-table, and `docs/benchmarks/reproducible-corpora.md` still agree with the
-repository. Nothing a user installs changes when it fails. It is nonetheless a
-good candidate for promotion into the gate list, because it is what stops a
-published number from drifting away from `benchmarks/model_scorecard.json`;
-promoting it requires the matching edit in all three gate lists, including
-`.github/workflows/macos-release.yml`. Run it whenever you touch
-`benchmarks/`.
+`tests/test_reproducible_corpora.py` was excluded once, as a check of
+published claims rather than of shipping behaviour, and is now in the gate
+list: `benchmarks/replay_text_and_route_baseline.json` went undeclared in
+`benchmarks/reproducibility.json` from the day it was added until someone ran
+the test by hand. It asserts that the manifest, the published ASR bakeoff
+table and `docs/benchmarks/reproducible-corpora.md` still agree with the
+repository, needs only a clone, and runs in milliseconds, so the gate is where
+it stops a published number drifting from `benchmarks/model_scorecard.json`.
 
 ## Live platform verification
 

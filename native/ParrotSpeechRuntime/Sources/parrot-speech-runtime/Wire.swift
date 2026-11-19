@@ -10,13 +10,38 @@ enum Wire {
     static let maximumSamples = sampleRate * 10 * 60
     /// The newest protocol this runtime speaks. Without `--protocol N` it
     /// answers exactly as protocol 1 does.
-    static let supportedProtocol = 2
+    static let supportedProtocol = 3
+
+    /// Protocol 3 sessions. A request header is a little-endian UInt64: a
+    /// batch request's is the sample count, which is never above
+    /// `maximumSamples`, so its top byte is 0. A session operation puts its
+    /// code in the top byte and a count in the rest. Below protocol 3 such
+    /// a header is only an invalid sample count, as it always was.
+    enum Operation: UInt64 {
+        case batch = 0
+        /// Start a session (count 0), dropping any unfinished one. No answer.
+        case begin = 1
+        /// `count` samples follow, added to the session. No answer.
+        case append = 2
+        /// Count 0. Answers as a batch request does for the session's
+        /// recording, plus `samples`, and ends the session.
+        case finish = 3
+        /// Count 0. Drops the session. No answer.
+        case cancel = 4
+    }
+
+    static let operationShift: UInt64 = 56
+    static let countMask: UInt64 = (1 << 56) - 1
     /// Reported as `engine` in a protocol 2 status line.
     static let engine = "parrot-speech-runtime-1"
     static let model = "parakeet-unified"
     /// The pinned model's folder name under FluidAudio's default models
     /// folder, which is where Python puts it (`PARAKEET_MODEL_DIR`).
     static let modelFolderName = "parakeet-unified-en-0.6b"
+    /// The top bit of a request header marks a control frame (protocol 2):
+    /// the rest is the length of a JSON object that follows.
+    static let controlFlag: UInt64 = 1 << 63
+    static let maximumControlBytes: UInt64 = 256 * 1024
     static let usage =
         "usage: parrot-speech-runtime [--server|--preload|--verify] [--protocol N] [--models DIR]\n"
 

@@ -43,10 +43,14 @@ unreleased commits under that app's name.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
+import shutil
 import subprocess
-from pathlib import Path
+import tarfile
+import tempfile
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 DEFAULT_REMOTE = "origin"
@@ -60,7 +64,8 @@ DEFAULT_INSTALL_RECEIPT = (
     Path.home() / "Library" / "Application Support" / "Whisper Face" /
     "launcher-install.json")
 
-# What a person reads when they ask an app-managed copy for an update.
+# The code an app-managed copy answers with. The menu never shows it: it asks
+# the release updater instead, and its own catalog words say the same.
 APP_MANAGED_MESSAGE = (
     "This copy of Whisper Face was set up by the Whisper Face app, so its "
     "updates come as a new download of the app, not from here.")
@@ -202,8 +207,11 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
 
     Returns ``{"available", "current", "latest", "behind", "error"}``. Fails
     closed: any git/network failure, a non-repo, or a dirty working tree returns
-    ``available=False`` with a human-readable ``error`` and never raises. The
-    only network access is the single ``git fetch``.
+    ``available=False`` with an ``error`` code and never raises. The code is
+    for logs and tests; the menu (dictate.py, ``update_check_alert``) turns it
+    into the window catalog's plain words. A checkout that upstream cannot
+    fast-forward also carries ``ahead``: whether it is simply newer. The only
+    network access is the single ``git fetch``.
 
     ``current`` is the older of the checkout's HEAD and the revision the
     installer last provisioned, because the build in use can be no newer than
@@ -274,6 +282,9 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
         # is no safe fast-forward here, so say so instead of offering one.
         if latest != head and not _is_ancestor(runner, checkout, head, latest):
             result["error"] = "checkout has commits upstream does not"
+            # Simply ahead (a newer build than the release) or diverged
+            # (a build of its own): the menu says which, in plain words.
+            result["ahead"] = _is_ancestor(runner, checkout, latest, head)
             return result
 
         # The build in use is no newer than either what git has checked out or
@@ -346,9 +357,60 @@ def _installer_error(result: "subprocess.CompletedProcess",
     return summary
 
 
+def _safe_members(archive: tarfile.TarFile):
+    """The regular files and folders of a ``git archive``, inside its root."""
+    for member in archive.getmembers():
+        path = PurePosixPath(member.name)
+        if path.is_absolute() or ".." in path.parts:
+            continue
+        if member.isfile() or member.isdir():
+            yield member
+
+
+def voice_check_candidate(checkout, target_rev: str, *, runner: Runner,
+                          home=None, check=None) -> dict:
+    """Try ``target_rev`` on the person's recordings before switching to it.
+
+    With no recordings nothing runs, not even git. Otherwise the revision is
+    exported from the local object store with ``git archive`` (no network)
+    into a private scratch folder and ``voice_check.check_update`` compares
+    it with the running checkout. Returns that function's outcome.
+    """
+    import voice_check
+
+    home = Path.home() if home is None else Path(home)
+    if voice_check.corpus_size(home) == 0:
+        return {"status": "no-corpus"}
+    checkout = Path(checkout)
+    scratch = Path(tempfile.mkdtemp(prefix="whisper-face-update-candidate."))
+    try:
+        os.chmod(scratch, 0o700)
+        exported = runner(["git", "-C", str(checkout), "archive",
+                           "--format=tar", target_rev],
+                          capture_output=True, timeout=_GIT_TIMEOUT * 8)
+        if exported.returncode != 0 or not exported.stdout:
+            return {"status": "not-checked", "reason": "candidate-failed"}
+        candidate = scratch / "candidate"
+        candidate.mkdir(mode=0o700)
+        with tarfile.open(fileobj=io.BytesIO(exported.stdout)) as archive:
+            members = list(_safe_members(archive))
+            if hasattr(tarfile, "data_filter"):
+                archive.extractall(candidate, members=members, filter="data")
+            else:  # pragma: no cover - Pythons before the filter backport
+                archive.extractall(candidate, members=members)
+        return (check or voice_check.check_update)(
+            home=home, current=checkout, candidate=candidate,
+            current_label=(_rev_parse(runner, checkout, "HEAD") or "")[:7],
+            candidate_label=target_rev[:7])
+    except (OSError, subprocess.SubprocessError, tarfile.TarError):
+        return {"status": "not-checked", "reason": "candidate-failed"}
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def apply_update(checkout, target_rev: str, *, runner: Runner,
                  installer: str = DEFAULT_INSTALLER,
-                 install_receipt=None) -> dict:
+                 install_receipt=None, voice_check=None) -> dict:
     """Bring the checkout to ``target_rev`` and re-run the installer.
 
     Records the last known-good revision as ``from`` -- the one the installer
@@ -359,6 +421,13 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
     even be switched (or this is not a repo), nothing moved and it returns
     ``{"status": "failed", ...}``. The checkout is never left on a broken
     revision, and recovery always lands on a build that installed cleanly once.
+
+    ``voice_check``, when given, is called as ``voice_check(checkout,
+    target_rev)`` after the revisions are known and before anything moves
+    (``apply_update_detached`` passes :func:`voice_check_candidate`). An
+    outcome of ``held`` stops here with ``{"status": "held", ...}``: nothing
+    was checked out and no installer ran. Any other outcome is carried in the
+    result as ``voice_check`` and the update goes on.
     """
     checkout = Path(checkout)
     receipt = DEFAULT_INSTALL_RECEIPT if install_receipt is None else install_receipt
@@ -388,6 +457,19 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
                 previous = resolved
         result["from"] = previous
         previous_branch = _current_branch(runner, checkout)
+
+        # Before anything moves: the candidate on the person's own voice.
+        if voice_check is not None and head != target_rev:
+            try:
+                checked = voice_check(checkout, target_rev)
+            except Exception:
+                checked = {"status": "not-checked", "reason": "failed"}
+            checked = checked if isinstance(checked, dict) else {
+                "status": "not-checked", "reason": "failed"}
+            result["voice_check"] = checked
+            if checked.get("status") == "held":
+                result["status"] = "held"
+                return result
 
         # Only move the checkout when it is not already there. `git checkout
         # <sha>` against a branch that already points at that sha still detaches
@@ -476,25 +558,36 @@ def _write_result(path: Path, payload: dict) -> None:
 
 
 def apply_update_detached(
-        checkout, target_rev: str, result_path, *, label: str = "") -> int:
+        checkout, target_rev: str, result_path, *, label: str = "",
+        update_anyway: bool = False, runner: Runner = subprocess.run,
+        voice_check=None) -> int:
     """Apply an update from a launchd job independent of the app service.
 
     ``Install.command`` reloads ``com.berg.dictate``. Running the installer
     inside that service therefore kills an in-process updater. This helper
     persists its state outside the checkout, survives the reload, and performs
     one final restart after the result is durable.
+
+    First the candidate is tried on the person's recordings
+    (:func:`voice_check_candidate`) unless they chose to update anyway. A
+    held update changed nothing, so the app is not restarted: it is still
+    running, finds the result itself and asks the person what to do.
     """
     checkout = Path(checkout).expanduser().resolve()
     result_path = Path(result_path).expanduser().resolve()
+    if voice_check is None and not update_anyway:
+        def voice_check(where, target):
+            return voice_check_candidate(where, target, runner=runner)
     _write_result(result_path, {
         "status": "running",
-        "from": _rev_parse(subprocess.run, checkout, "HEAD") or "",
+        "from": _rev_parse(runner, checkout, "HEAD") or "",
         "to": target_rev,
         "error": None,
     })
     try:
         outcome = apply_update(
-            checkout, target_rev, runner=subprocess.run)
+            checkout, target_rev, runner=runner,
+            voice_check=None if update_anyway else voice_check)
     except Exception as exc:
         outcome = {
             "status": "failed",
@@ -502,16 +595,19 @@ def apply_update_detached(
             "to": target_rev,
             "error": type(exc).__name__,
         }
+    if update_anyway:
+        outcome["voice_check"] = {"status": "skipped"}
     _write_result(result_path, outcome)
-    subprocess.run(
-        ["/bin/launchctl", "kickstart", "-k",
-         f"gui/{os.getuid()}/com.berg.dictate"],
-        capture_output=True,
-        text=True,
-        timeout=_GIT_TIMEOUT,
-    )
+    if outcome.get("status") != "held":
+        runner(
+            ["/bin/launchctl", "kickstart", "-k",
+             f"gui/{os.getuid()}/com.berg.dictate"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT,
+        )
     if label:
-        subprocess.run(
+        runner(
             ["/bin/launchctl", "remove", label],
             capture_output=True,
             text=True,
@@ -528,12 +624,15 @@ def main(argv: list[str] | None = None) -> int:
     detached.add_argument("--target", required=True)
     detached.add_argument("--result", required=True)
     detached.add_argument("--label", default="")
+    # The person saw a held update's counts and chose to update anyway.
+    detached.add_argument("--update-anyway", action="store_true")
     args = parser.parse_args(argv)
     return apply_update_detached(
         args.checkout,
         args.target,
         args.result,
         label=args.label,
+        update_anyway=args.update_anyway,
     )
 
 

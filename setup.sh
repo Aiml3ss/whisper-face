@@ -412,6 +412,7 @@ personal_files=(
     preferences.json
     learned.json
     transcripts.jsonl
+    delivery_journal.json
     voice_inbox.json
     demonstrations.json
     acoustic_keyword_memory.json
@@ -945,7 +946,7 @@ required=(
     macos_drop_to_target_snapshot.py drop_to_target.py
     whisper_face_gui.py whisper_face_theme.py whisper_face_characters.py
     whisper_face_render.py
-    support_bundle.py self_update.py
+    support_bundle.py self_update.py voice_check.py
     scripts/macos_launcher_app.py scripts/side_by_side_update.py
     scripts/app_update.py scripts/verify_macos_package.py
     scripts/safe_update_advisor.py scripts/release_manifest.py
@@ -963,6 +964,7 @@ required=(
     native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/Vocabulary.swift
     native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/WindowMerge.swift
     native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/WordEvidence.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/TermBias.swift
     setup.ps1 Install.command Install.cmd
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json
@@ -1101,16 +1103,17 @@ verify_install() {
     # The runtime is optional while it is off by default: an install whose
     # runtime did not build has none, and the app uses the helper. One that
     # is present must load the model from the folder named, decode a second
-    # of silence, and answer protocol 2; a binary built before protocol 2, or
-    # one that cannot run the model, fails here.
+    # of silence, and answer protocol 3 (word evidence and the sessions that
+    # decode a long take while it is captured); a binary built before
+    # protocol 3, or one that cannot run the model, fails here.
     if [ -e "$speech_runtime" ]; then
         [ -x "$speech_runtime" ] \
             || fail "speech runtime is present but cannot run; rerun ./setup.sh"
-        runtime_status="$("$speech_runtime" --verify --protocol 2 \
+        runtime_status="$("$speech_runtime" --verify --protocol 3 \
             --models "$parakeet_model_dir")" \
             || fail "speech runtime verification failed"
         case "$runtime_status" in
-            *'"protocol":2'*) ;;
+            *'"protocol":3'*) ;;
             *) fail "speech runtime is out of date; rerun ./setup.sh" ;;
         esac
         echo "== speech runtime: installed and working"
@@ -1677,7 +1680,7 @@ install_speech_runtime() {
             "$DIR/.models/swift-build-runtime/release/parrot-speech-runtime" \
             "$speech_runtime" \
         && step "verifying the speech runtime against the pinned model" \
-        && "$speech_runtime" --preload --protocol 2 --models "$parakeet_model_dir"; then
+        && "$speech_runtime" --preload --protocol 3 --models "$parakeet_model_dir"; then
         return 0
     fi
     rm -f "$speech_runtime"
@@ -1758,7 +1761,8 @@ for name in snippets tones preferences acoustic_keyword_memory dictionary; do
     [ -f "$destination" ] || install -m 600 "$template" "$destination"
     chmod 600 "$destination"
 done
-for private_file in transcripts.jsonl learned.json voice_inbox.json demonstrations.json \
+for private_file in transcripts.jsonl delivery_journal.json learned.json \
+        voice_inbox.json demonstrations.json \
         delayed_cleanup_activation.json \
         acoustic_keyword_activation.json acoustic_calibration_activation.json \
         relisten_activation.json dictate.log ollama.log \

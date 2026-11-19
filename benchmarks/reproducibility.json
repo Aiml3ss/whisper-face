@@ -130,6 +130,15 @@
    "notes": "Only the ci_warm_path profile is reachable from a clone. The product_quality, warm_path_stage, and startup_readiness profiles all need private runtime logs produced by actually dictating on an installed machine."
   },
   {
+   "path": "benchmarks/replay_text_and_route_baseline.json",
+   "case_key": "cases",
+   "cases": 197,
+   "content": "recorded-typed-text-and-routes",
+   "requirement": "reference-data",
+   "command": "uv run tests/test_whole_program.py",
+   "notes": "Not a corpus of its own: what origin/main typed, and the consequence route it chose, for every sentence of default_path_sentences.json and recognizer_transcripts.json, dictated through the real dictate.py on the fake Mac. tests/test_whole_program.py requires the same from a protocol 1 and a protocol 2 helper while the helper word-evidence switches are off. Like the corpora it is recorded from, it needs a macOS host but no audio, model or network. A case is added when one is added to either corpus; an existing one changes only with a deliberate change in what is typed or routed."
+  },
+  {
    "path": "benchmarks/reproducibility.json",
    "case_key": null,
    "cases": null,
@@ -146,6 +155,24 @@
    "requirement": "reference-data",
    "command": "uv run quality_gate.py",
    "notes": "Pinned deterministic quality metrics, not a corpus: the release gate replays the golden, scorecard, proof-recovery and stress collectors and fails on any difference. --rebaseline rewrites it; the diff rides the causing PR."
+  },
+  {
+   "path": "benchmarks/public_benchmark_corpus.json",
+   "case_key": "takes",
+   "cases": 116,
+   "content": "synthetic-text-spoken-by-system-voices",
+   "requirement": "needs-apple-silicon",
+   "command": "uv run benchmark_public.py check",
+   "notes": "The public benchmark. check validates the corpus from a clone. run speaks every take with macOS system voices and measures Whisper Face's own speech runtime and the app path on the fake Mac, so it needs an Apple Silicon Mac, the built runtime and the pinned Parakeet model. No audio is stored; the sentences are written for the benchmark or copied from default_path_sentences.json. docs/benchmarks/public-benchmark.md is the method."
+  },
+  {
+   "path": "benchmarks/public_benchmark_rivals.json",
+   "case_key": null,
+   "cases": null,
+   "content": "publication-rule",
+   "requirement": "reference-data",
+   "command": "uv run public_scorecard.py benchmark",
+   "notes": "Not a corpus: the rule that nothing is published about another product until the owner has recorded an account and terms that allow it, and the owner's entries (none). public_scorecard.py benchmark refuses any other product without one."
   }
  ]
 }

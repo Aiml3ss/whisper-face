@@ -1,0 +1,13 @@
+{
+ "schema_version": 1,
+ "rule": "Nothing is published about another product until the Project Owner holds an account or trial of it, has read its terms, and has recorded here that those terms allow publishing a benchmark of it. public_scorecard.py refuses to render a benchmark result for any product other than whisper-face that has no such entry. No maker is contacted; they are free to rerun the benchmark themselves.",
+ "entry_fields": {
+  "product_id": "the identifier a result names, lower case",
+  "account_held_by": "always 'project-owner'",
+  "terms_read_on": "ISO date the owner read the product's terms",
+  "terms_reference": "where those terms were read",
+  "terms_allow_publishing": "true only when the owner judged that they do",
+  "recorded_by_owner": "true; an agent never adds or edits an entry"
+ },
+ "rivals": []
+}

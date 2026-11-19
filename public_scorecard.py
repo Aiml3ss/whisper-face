@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from benchmark_consequence_routing import (
     DEFAULT_CASES as CONSEQUENCE_CASES,
@@ -981,6 +981,415 @@ def render_publication_markdown(document: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
+_BENCHMARK_KEYS = frozenset({
+    "schema_version", "result_kind", "product", "model", "environment",
+    "corpus", "run", "recognition", "app_path", "outside_probe", "takes",
+})
+
+
+def _benchmark_rivals(path: Path | None = None) -> dict[str, Mapping[str, Any]]:
+    import benchmark_public
+
+    registry = _read_json_file(path or benchmark_public.RIVALS)
+    return {entry.get("product_id"): entry
+            for entry in registry.get("rivals", [])
+            if isinstance(entry, Mapping)}
+
+
+def _rival_may_be_published(entry: Mapping[str, Any] | None) -> bool:
+    return (isinstance(entry, Mapping)
+            and entry.get("account_held_by") == "project-owner"
+            and entry.get("terms_allow_publishing") is True
+            and entry.get("recorded_by_owner") is True
+            and isinstance(entry.get("terms_read_on"), str)
+            and bool(_DATE.match(entry["terms_read_on"]))
+            and isinstance(entry.get("terms_reference"), str)
+            and bool(entry["terms_reference"].strip()))
+
+
+def validate_benchmark_result(
+    result: Any,
+    *,
+    corpus: Mapping[str, Any] | None = None,
+    rivals: Mapping[str, Mapping[str, Any]] | None = None,
+) -> None:
+    """Refuse a public benchmark result that breaks a benchmark rule.
+
+    It must name the machine, the OS, the model and the app revision it
+    measured; be a result of the corpus checked in now, with its seed; keep
+    every number under the way it was measured; leave every number only the
+    outside probe can give empty; and carry accuracy numbers that its own
+    per-take texts reproduce. A product other than Whisper Face is refused
+    unless the owner has recorded its terms in the rivals registry.
+    """
+    import benchmark_public as bench
+
+    if not isinstance(result, Mapping) or set(result) != _BENCHMARK_KEYS:
+        raise PublicationError(
+            "a benchmark result must carry exactly "
+            + ", ".join(sorted(_BENCHMARK_KEYS)))
+    if (result["schema_version"] != bench.SCHEMA_VERSION
+            or isinstance(result["schema_version"], bool)
+            or result["result_kind"] != bench.RESULT_KIND):
+        raise PublicationError("unsupported benchmark result")
+
+    product = result["product"]
+    if not isinstance(product, Mapping):
+        raise PublicationError("the result must name the product")
+    product_id = product.get("product_id")
+    if product_id != bench.PRODUCT_ID:
+        registry = _benchmark_rivals() if rivals is None else rivals
+        if not _rival_may_be_published(registry.get(product_id)):
+            raise PublicationError(
+                f"refusing to publish a result for {product_id!r}: the "
+                "owner has not recorded an account and terms that allow it "
+                "in benchmarks/public_benchmark_rivals.json")
+    revision = product.get("revision")
+    if not isinstance(revision, str) or not _REVISION.match(revision):
+        raise PublicationError(
+            "the result must name the full 40-character app revision")
+    if product.get("tree_clean") is not True:
+        raise PublicationError(
+            "the result was measured on a checkout with uncommitted changes")
+    _concrete_text(product.get("version"), "product version")
+    for key in ("runtime_source_sha256", "runtime_binary_sha256"):
+        if not isinstance(product.get(key), str) or not _SHA256.match(
+                product[key]):
+            raise PublicationError(f"the result must record {key}")
+
+    environment = result["environment"]
+    if not isinstance(environment, Mapping):
+        raise PublicationError("the result must name the machine")
+    validated = validate_environment(
+        {"schema_version": PUBLICATION_SCHEMA_VERSION, **dict(environment)})
+    if validated["whisper_face_revision"] != revision:
+        raise PublicationError(
+            "the machine description names a different app revision")
+
+    model = result["model"]
+    if not isinstance(model, Mapping):
+        raise PublicationError("the result must name the model")
+    _concrete_text(model.get("model_id"), "model id")
+    if not isinstance(model.get("revision"), str) or not _REVISION.match(
+            model["revision"]):
+        raise PublicationError("the result must name the model revision")
+    if (not isinstance(model.get("files_sha256"), str)
+            or not _SHA256.match(model["files_sha256"])
+            or not _integer(model.get("files"))):
+        raise PublicationError("the result must hash the model files")
+
+    corpus = bench.load_corpus() if corpus is None else corpus
+    summary = result["corpus"]
+    if (not isinstance(summary, Mapping)
+            or summary.get("corpus_id") != corpus["corpus_id"]
+            or summary.get("sha256") != bench.canonical_digest(corpus)
+            or summary.get("takes") != len(corpus["takes"])):
+        raise PublicationError(
+            "the result is not of the corpus checked in now; rerun it")
+    if summary.get("synthetic_speech") is not True:
+        raise PublicationError(
+            "the result must say its speech is synthetic")
+    run = result["run"]
+    if (not isinstance(run, Mapping) or run.get("seed") != corpus["seed"]
+            or isinstance(run.get("seed"), bool)):
+        raise PublicationError("the result must use the corpus seed")
+    if (not _integer(run.get("repeats")) or not 1 <= run["repeats"] <= 10
+            or "denied" not in str(run.get("network"))
+            or not str(run.get("command", "")).startswith(
+                "uv run benchmark_public.py run")):
+        raise PublicationError(
+            "the result must record its repeats, the denied network and "
+            "the command that produced it")
+    if any(word.startswith(("/", "~")) or ":\\" in word
+           for word in str(run["command"]).split()):
+        raise PublicationError(
+            "the rerun command names a local folder; a published page "
+            "shows placeholders such as <runtime>, <models> and <out>")
+
+    recognition = result["recognition"]
+    app_path = result["app_path"]
+    if (not isinstance(recognition, Mapping)
+            or recognition.get("measured_by") != bench.RUNTIME_IN_PROCESS):
+        raise PublicationError(
+            f"recognition numbers must be {bench.RUNTIME_IN_PROCESS!r}")
+    if (not isinstance(app_path, Mapping)
+            or app_path.get("measured_by") != bench.APP_ON_FAKE_MAC):
+        raise PublicationError(
+            f"app-path numbers must be {bench.APP_ON_FAKE_MAC!r}")
+    configurations = app_path.get("configurations")
+    if (not isinstance(configurations, Mapping) or not configurations
+            or not set(configurations) <= set(bench.CONFIGURATIONS)):
+        raise PublicationError("unknown app-path configurations")
+    probe = result["outside_probe"]
+    if (not isinstance(probe, Mapping)
+            or set(probe) != set(bench.OUTSIDE_PROBE_METRICS)):
+        raise PublicationError(
+            "the result must list every number only the outside probe gives")
+    for name, entry in probe.items():
+        if (isinstance(entry, Mapping)
+                and entry.get("status") == bench.OUTSIDE_PROBE
+                and name in bench.OUTSIDE_PROBE_MEASURES):
+            continue                 # checked once the takes are known
+        if (not isinstance(entry, Mapping)
+                or entry.get("status") != bench.NEEDS_OUTSIDE_PROBE
+                or entry.get("value") is not None):
+            raise PublicationError(
+                f"{name} can only come from the outside probe; this run "
+                "cannot carry a value for it")
+
+    takes = result["takes"]
+    if (not isinstance(takes, list)
+            or [take.get("id") for take in takes if isinstance(take, Mapping)]
+            != [take["id"] for take in corpus["takes"]]):
+        raise PublicationError("the result must carry every take once, in "
+                               "corpus order")
+    for take in takes:
+        if take.get("voice") not in corpus["speech"]["voices"]:
+            raise PublicationError(f"{take['id']}: not a corpus voice")
+    for name, entry in probe.items():
+        if entry.get("status") == bench.OUTSIDE_PROBE:
+            problems = bench.outside_probe_problems(result, entry)
+            if problems:
+                raise PublicationError(
+                    f"{name} from the outside probe is refused: "
+                    + "; ".join(problems))
+    expected = bench.score_takes(
+        [{"id": take["id"], "hypothesis": take["runtime"]["text"]}
+         for take in takes], corpus)
+    if recognition.get("accuracy") != expected:
+        raise PublicationError(
+            "the recognition accuracy does not follow from the per-take "
+            "texts in the same result")
+    for name, block in configurations.items():
+        rescored = bench.score_takes(
+            [{"id": take["id"], "hypothesis": take["app"][name]["typed"]}
+             for take in takes], corpus)
+        if not isinstance(block, Mapping) or block.get("accuracy") != rescored:
+            raise PublicationError(
+                f"the {name} app-path accuracy does not follow from the "
+                "per-take texts in the same result")
+
+
+def _shown(value: Any, suffix: str = "") -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.2f}".rstrip("0").rstrip(".") + suffix
+    return f"{value}{suffix}"
+
+
+def _latency_rows(label: str, buckets: Mapping[str, Any]) -> list[str]:
+    import benchmark_public as bench
+
+    rows = []
+    for name, _low, _high in (*bench.LENGTH_BUCKETS, ("all", 0, 0)):
+        bucket = buckets[name]
+        rows.append(
+            f"| {label} | {name} | {bucket['takes']} | "
+            f"{_shown(bucket['p50'])} | {_shown(bucket['p95'])} | "
+            f"{_shown(bucket['max'])} |")
+    return rows
+
+
+def render_benchmark_markdown(result: Mapping[str, Any]) -> str:
+    """The human page for one benchmark result; the rules run first."""
+    import benchmark_public as bench
+
+    validate_benchmark_result(result)
+    product = result["product"]
+    environment = result["environment"]
+    model = result["model"]
+    corpus = result["corpus"]
+    run = result["run"]
+    recognition = result["recognition"]
+    configurations = result["app_path"]["configurations"]
+    accuracy = recognition["accuracy"]
+    columns = [("Runtime alone", accuracy)] + [
+        (f"App path, {name}", block["accuracy"])
+        for name, block in configurations.items()]
+    lines = [
+        "# Whisper Face public benchmark",
+        "",
+        f"Run {run['started_utc']} by Whisper Face's own makers. Rerun it "
+        "with the command at the end; docs/benchmarks/public-benchmark.md "
+        "says what is measured, how, and what it cannot show.",
+        "",
+        f"- **Machine:** {environment['hardware']}; "
+        f"{environment['os_name']} {environment['os_version']}; Python "
+        f"{environment['python_version']}.",
+        f"- **App:** Whisper Face {product['version']}, revision "
+        f"`{product['revision']}`; speech runtime sources "
+        f"`sha256:{product['runtime_source_sha256'][:16]}`, binary "
+        f"`sha256:{product['runtime_binary_sha256'][:16]}`.",
+        f"- **Model:** `{model['model_id']}` at revision "
+        f"`{model['revision']}` ({model['files']} files, "
+        f"`sha256:{model['files_sha256'][:16]}`).",
+        f"- **Corpus:** `{corpus['corpus_id']}`, {corpus['takes']} takes, "
+        f"{corpus['audio_seconds']} s of audio, corpus "
+        f"`sha256:{corpus['sha256'][:16]}`, audio "
+        f"`sha256:{corpus['audio_sha256'][:16]}`.",
+        f"- **Run:** seed {run['seed']}, {run['repeats']} timed passes of "
+        f"the runtime, app path paced {run['app_path_pace']}; "
+        f"network {run['network']}.",
+        "",
+        "**Synthetic speech.** Every take was spoken by a macOS system voice "
+        f"({', '.join(corpus['voices'])}). That shows how the app handles "
+        "names, terms, numbers and long takes from clean speech. It says "
+        "nothing about how well it hears a real person, in a real room.",
+        "",
+        "## Accuracy",
+        "",
+        "| Measure | " + " | ".join(label for label, _ in columns) + " |",
+        "|---|" + "---:|" * len(columns),
+    ]
+
+    def row(label: str, pick: Callable[[Mapping[str, Any]], Any],
+            suffix: str = "") -> str:
+        return (f"| {label} | "
+                + " | ".join(_shown(pick(block), suffix)
+                             for _, block in columns) + " |")
+
+    lines += [
+        row("Word error rate", lambda a: a["wer_pct"], "%"),
+        row("Takes exactly right (words)", lambda a: a["exact_pct"], "%"),
+        row("Name and term recall", lambda a: a["terms"]["recall_pct"], "%"),
+        row("Names and terms recalled", lambda a: (
+            f"{a['terms']['recalled']} of {a['terms']['expected']}")),
+        row("False insertions of a glossary term",
+            lambda a: a["terms"]["false_insertions"]),
+        row("... of them in the near misses", lambda a: (
+            f"{a['terms']['false_insertions_in_near_misses']} in "
+            f"{a['terms']['near_miss_takes']} takes")),
+        row("Formatting written exactly", lambda a: (
+            f"{a['formatting']['written_exactly']} of "
+            f"{a['formatting']['targets']} "
+            f"({_shown(a['formatting']['accuracy_pct'], '%')})")),
+    ]
+    for category in bench.CATEGORIES:
+        lines.append(row(
+            f"Word error rate, {category.replace('_', ' ')}",
+            lambda a, c=category: a["by_category"].get(c, {}).get("wer_pct"),
+            "%"))
+    lines += [
+        "",
+        "*Runtime alone* is Whisper Face's own speech runtime given each "
+        "take whole. *App path* is the real `dictate.py` on the fake Mac "
+        "the release gate uses, with the same runtime: the take is spoken "
+        "into the fake microphone at real time, then cut, decoded, "
+        "compiled and pasted as for a person. *defaults* is a fresh "
+        "install; *dictionary* is the same with the corpus glossary in the "
+        "app's own dictionary. A false insertion is a glossary term written "
+        "more often than it was said.",
+        "",
+        "## Latency, milliseconds",
+        "",
+        "| Measured | Take length | Takes | p50 | p95 | max |",
+        "|---|---|---:|---:|---:|---:|",
+    ]
+    lines += _latency_rows(
+        "Runtime alone, request to answer (in process)",
+        recognition["latency_ms"])
+    for name, block in configurations.items():
+        lines += _latency_rows(
+            f"App path, {name}: key release to pasted (fake field)",
+            block["latency_ms"]["release_to_pasted_in_fake_field"])
+    measured = result["outside_probe"]["release_to_text_on_screen_ms"]
+    if measured["status"] == bench.OUTSIDE_PROBE:
+        value = measured["value"]
+        lines += _latency_rows(
+            "Outside probe: key release to first text in a real window",
+            value["release_to_first_text"])
+        lines += _latency_rows(
+            "Outside probe: key release to final text in a real window",
+            value["release_to_final_text"])
+    lines += [
+        "",
+        f"The runtime decodes {recognition['real_time_factor']}x faster "
+        "than real time over the corpus. App-path times are the app's own "
+        "measure on the fake Mac, whose field takes a paste instantly; they "
+        "leave out what a real app adds, so they are not a release-to-screen "
+        "number.",
+    ]
+    if measured["status"] == bench.OUTSIDE_PROBE:
+        method = measured["probe"]["method"]
+        lines += [
+            "",
+            "*Outside probe* times are the only ones here comparable across "
+            "apps: outside_probe.py played each take "
+            f"({method['audio']}), pressed and released the app's capture "
+            "key with synthetic key events, and timed the text arriving in "
+            "its own window "
+            f"({measured['value']['takes']} takes, "
+            f"{measured['probe']['run']['repeats']} repeats each, "
+            f"{measured['value']['repeats_without_text']} repeats with no "
+            "text). Final text is the last change before the window stayed "
+            f"unchanged for {method['settle_ms']} ms.",
+        ]
+    lines += [
+        "",
+        "## Delivery on the fake Mac",
+        "",
+        "| Configuration | Takes | Answered by the runtime | Typed as the "
+        "app meant | Paste verified | Nothing typed |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for name, block in configurations.items():
+        delivery = block["delivery"]
+        lines.append(
+            f"| {name} | {delivery['takes']} | "
+            f"{delivery['answered_by_runtime']} | "
+            f"{delivery['delivered_as_meant']} | "
+            f"{delivery['insertion_verified']} | "
+            f"{delivery['nothing_typed']} |")
+    lines += [
+        "",
+        "This counts the app's own paste and readback against a fake text "
+        "field. It does not show delivery into real apps.",
+        "",
+        "## Not measured here: needs the outside probe",
+        "",
+        "| Measure | Why this run cannot give it |",
+        "|---|---|",
+    ]
+    for name, entry in result["outside_probe"].items():
+        if entry["status"] == bench.NEEDS_OUTSIDE_PROBE:
+            lines.append(f"| `{name}` | {entry['why']} |")
+    lines += ["", "## Where it went wrong", ""]
+    wrong = [("Runtime alone", accuracy)] + [
+        (f"App path, {name}", block["accuracy"])
+        for name, block in configurations.items()]
+    for label, block in wrong:
+        missed = block["terms"]["missed"]
+        inserted = block["terms"]["inserted"]
+        lines.append(f"**{label}:** {len(missed)} names or terms missed, "
+                     f"{len(inserted)} inserted.")
+        lines.append("")
+        for item in missed:
+            lines.append(f"- missed `{item['term']}` in `{item['id']}`: "
+                         f"{item['hypothesis']!r}")
+        for item in inserted:
+            lines.append(f"- inserted `{item['term']}` in `{item['id']}`: "
+                         f"{item['hypothesis']!r}")
+        if missed or inserted:
+            lines.append("")
+    lines += [
+        "## Rerun it",
+        "",
+        "```sh",
+        run["command"],
+        "uv run public_scorecard.py benchmark <out>/result.json",
+        "```",
+        "",
+        "Rival apps are not in this table. Nothing is published about "
+        "another product until the owner holds an account, has read its "
+        "terms, and has recorded that they allow it "
+        "(`benchmarks/public_benchmark_rivals.json`).",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _read_json_file(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -1012,10 +1421,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     publish.add_argument(
         "--format", choices=("json", "markdown"), default="json")
     publish.add_argument("--output", type=Path)
+    benchmark = commands.add_parser(
+        "benchmark",
+        help="check a benchmark_public.py result and render its page")
+    benchmark.add_argument("result", type=Path)
+    benchmark.add_argument(
+        "--format", choices=("markdown", "json"), default="markdown")
+    benchmark.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
 
     if args.command in (None, "synthetic"):
         print(render_json())
+        return 0
+
+    if args.command == "benchmark":
+        try:
+            result = _read_json_file(args.result)
+            if args.format == "markdown":
+                rendered = render_benchmark_markdown(result)
+            else:
+                validate_benchmark_result(result)
+                rendered = json.dumps(
+                    result, ensure_ascii=False, sort_keys=True, indent=1) + "\n"
+        except PublicationError as error:
+            print(f"refusing to publish: {error}")
+            return 1
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered, encoding="utf-8")
+            print(f"wrote {args.format} page ({len(rendered)} characters)")
+        else:
+            print(rendered, end="")
         return 0
 
     try:

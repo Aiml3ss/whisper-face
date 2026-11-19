@@ -706,6 +706,23 @@ SHEET_KEYWORDS = (
     ("Rivera", None, 2, 1),
     ("kubectl", "app-0123456789abcdef", 1, 0),
 )
+# The recent-dictations sheet: one row for each thing a dictation can have
+# come to, as the runtime names it, and the words one of them shows.
+RECENT_DICTATIONS = tuple(
+    {"id": f"take-{index}", "at": 0.0, "age_seconds": seconds,
+     "words": words, "app": app, "receipt": receipt}
+    for index, (seconds, words, app, receipt) in enumerate((
+        (40.0, 12, "Mail", "proven"),
+        (300.0, 4, "Messages", "position"),
+        (1500.0, 31, "Slack", "unchecked"),
+        (4000.0, 9, "Notes", "not_pasted"),
+        (9000.0, 22, "Safari", "unconfirmed"),
+        (90000.0, 7, "TextEdit", "interrupted"),
+        (200000.0, 15, "", "unknown"),
+    )))
+RECENT_WORDS = ("Meet me at the station at six, and bring the blue folder "
+                "with the signed copies.")
+
 MANY_APPS = [
     {"bundle": bundle, "name": name, "tone": "auto"}
     for name, bundle in (
@@ -875,10 +892,16 @@ def render_sheets(suffix: str) -> None:
         forget_snippet_edit=lambda key: forget("snippet", key),
     )
 
+    recent = list(RECENT_DICTATIONS)
+    model.actions = replace(
+        model.actions, recent_dictations=lambda: tuple(recent),
+        reveal_recent_dictation=lambda _entry_id: RECENT_WORDS)
+
     def show() -> None:
         model.state = replace(
             STATE, section="Settings", settings_pane="Personalize",
-            settings=gui.normalize_settings(settings))
+            settings=gui.normalize_settings(settings),
+            recent_dictations=True)
         controller.render()
 
     def run(action, *steps, placed=()) -> None:
@@ -933,6 +956,11 @@ def render_sheets(suffix: str) -> None:
         ("keywords", "export"),
         ("keywords-copied", "done"),
         placed=("keywords",))
+    run(controller.browseRecentDictations_,
+        ("recent", "show:take-0"),
+        ("recent-words", "back"),
+        (None, "done"),
+        placed=("recent", "recent-words"))
 
     # A list too long for the sheet: the sheet stops at its cap and the
     # body scrolls between the header and the footer.
@@ -963,6 +991,8 @@ def render_sheets(suffix: str) -> None:
     run(controller.editSnippets_, ("snippets-empty", "done"))
     run(controller.editVocabulary_, ("vocabulary-empty", "cancel"))
     run(controller.inspectKeywords_, ("keywords-empty", "done"))
+    recent.clear()
+    run(controller.browseRecentDictations_, ("recent-empty", "done"))
     # With no apps the page's Edit button is off, so the app-tones sheet
     # is never opened empty; this is what it would say if it were.
     sheet = controller._new_sheet()

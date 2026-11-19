@@ -80,6 +80,7 @@ FORBIDDEN_BUNDLE_ENTRIES = (
     "acoustic_keyword_activation.json",
     "acoustic_keyword_memory.json",
     "delayed_cleanup_activation.json",
+    "delivery_journal.json",
     "demonstrations.json",
     "dictate.log",
     "dictionary.txt",

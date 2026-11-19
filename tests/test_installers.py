@@ -30,6 +30,7 @@ PERSONAL_FILES = (
     "preferences.json",
     "learned.json",
     "transcripts.jsonl",
+    "delivery_journal.json",
     "voice_inbox.json",
     "demonstrations.json",
     "acoustic_keyword_memory.json",
@@ -442,6 +443,11 @@ class InstallerContractTests(unittest.TestCase):
             for target in unconditional:
                 with self.subTest(personal=personal, target=target):
                     self.assertNotIn(personal, target)
+        # They hold the person's words: none of them may ever be committed.
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for personal in PERSONAL_FILES:
+            with self.subTest(personal=personal, gitignored=True):
+                self.assertIn(f"\n{personal}\n", ignored)
         # The prompt has to say plainly what these files are.
         for installer in (mac_personal, windows_personal):
             self.assertIn("your words and your corrections", installer)
@@ -1162,7 +1168,7 @@ class InstallerContractTests(unittest.TestCase):
                 helper.chmod(0o755)
                 runtime = root / "parrot-speech-runtime"
                 runtime.write_text(
-                    "#!/bin/bash\necho '{\"ok\":true,\"protocol\":2}'\n",
+                    "#!/bin/bash\necho '{\"ok\":true,\"protocol\":3}'\n",
                     encoding="utf-8")
                 runtime.chmod(0o755)
                 logs = (root / "dictate.log", root / "ollama.log")
@@ -1197,13 +1203,13 @@ class InstallerContractTests(unittest.TestCase):
     def test_verify_checks_a_speech_runtime_only_when_one_is_installed(self):
         # The runtime is off by default and optional: --verify passes its
         # check when none is installed and says so. One that is present is
-        # asked for protocol 2 against the model folder Python verified; a
-        # present runtime that cannot run, fails, or predates protocol 2 each
+        # asked for protocol 3 against the model folder Python verified; a
+        # present runtime that cannot run, fails, or predates protocol 3 each
         # names itself.
         cases = {
             "absent": (None, None,
                        "== speech runtime: not installed (optional"),
-            "not executable": ("echo '{\"ok\":true,\"protocol\":2}'",
+            "not executable": ("echo '{\"ok\":true,\"protocol\":3}'",
                                "!! speech runtime is present but cannot run",
                                None),
             "fails": ("echo '{\"error\":\"model load failed\",\"ok\":false}'"
@@ -1211,8 +1217,11 @@ class InstallerContractTests(unittest.TestCase):
                       None),
             "protocol 1": ("echo '{\"ok\":true}'",
                            "!! speech runtime is out of date", None),
+            # Built before sessions: a protocol 2 runtime is out of date.
+            "protocol 2": ("echo '{\"ok\":true,\"protocol\":2}'",
+                           "!! speech runtime is out of date", None),
             "healthy": ('printf "%s\\n" "$*" > "$(dirname "$0")/args"\n'
-                        "echo '{\"ok\":true,\"protocol\":2}'", None,
+                        "echo '{\"ok\":true,\"protocol\":3}'", None,
                         "== speech runtime: installed and working"),
         }
         for name, (body, reason, said) in cases.items():
@@ -1255,7 +1264,7 @@ class InstallerContractTests(unittest.TestCase):
                 if name == "healthy":
                     self.assertEqual(
                         (root / "args").read_text(encoding="utf-8").strip(),
-                        f"--verify --protocol 2 --models {root}/Parakeet Models")
+                        f"--verify --protocol 3 --models {root}/Parakeet Models")
 
     @needs_bash
     def test_a_speech_runtime_that_will_not_build_or_load_does_not_stop_setup(
@@ -1358,7 +1367,7 @@ class InstallerContractTests(unittest.TestCase):
             '--package-path "$DIR/native/ParrotSpeechRuntime"',
             '--scratch-path "$DIR/.models/swift-build-runtime"',
             '"$DIR/.models/swift-build-runtime/release/parrot-speech-runtime"',
-            '"$speech_runtime" --preload --protocol 2 --models '
+            '"$speech_runtime" --preload --protocol 3 --models '
             '"$parakeet_model_dir"',
             'remove_installed_path 1 "$speech_runtime"',
             'remove_installed_path 1 "$DIR/.models/swift-build-runtime"',
@@ -2036,6 +2045,9 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("insertion_integrity.py", installer)
                 self.assertIn("personal_regression.py", installer)
                 self.assertIn("shadow_candidate_gate.py", installer)
+                # Both updaters try an update on the person's recordings
+                # with it before switching (self_update, app_update).
+                self.assertIn("voice_check.py", installer)
                 self.assertIn("cleanup_circuit_breaker.py", installer)
                 self.assertIn("delayed_cleanup_activation.py", installer)
                 self.assertIn("delayed_cleanup_merge.py", installer)
@@ -2342,6 +2354,10 @@ class InstallerContractTests(unittest.TestCase):
         # The restart repair ships on; an older preferences file without the
         # key is read as on by the runtime, so neither installer rewrites it.
         self.assertIn('"remove_repeats": true', template)
+        # "Favor my words" ships on, and so does an install updated from
+        # before the key: the runtime reads a missing key as on, so neither
+        # installer rewrites an existing preferences file to add it.
+        self.assertIn('"favor_my_words": true', template)
         # Whisper Face's own speech runtime ships switched off; a file from
         # before the key existed is read as off, so neither installer
         # rewrites an existing preferences file to add it.

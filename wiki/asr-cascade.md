@@ -32,6 +32,37 @@ speech is recognized *while you talk* through rolling chunk cuts, so a
   is ≥4.0 s with ≥0.6 s silence; pending speculation is reused when
   still valid. Each chunk keeps exact start/end samples so word timings
   stay anchored across silence gaps.
+- **Whole takes** (November 2026): on the Parakeet route no chunk is cut
+  until the take is longer than one Parakeet window (14.96 s), so a take
+  up to that length is decoded as one request, exactly the offline
+  decode of the recording with no joins. A speculation then covers the
+  whole take so far and feeds the HUD caption, as chunks did. Longer
+  takes and the Whisper routes cut chunks as before.
+- **Sessions for long takes** (November 2026): with Whisper Face's own
+  runtime loaded (protocol 3), a take that outgrows one window is also
+  streamed to the runtime while it is captured; the runtime decodes each
+  15 s window as it completes, so release decodes only the last one
+  (finish p95 about 70 ms on this Mac for takes from 15 s to 10 min,
+  against 0.64 s at p95 for 30 s to 2 min in one request). The answer is the
+  runtime's offline decode of the whole take, word for word, and stands
+  for the take only when the cross-check has nothing left to do: no gain
+  needed, every rolling chunk came back from Parakeet, and every word after
+  the last cut clears `CROSSCHECK_SKIP_CONFIDENCE`. Otherwise the take is
+  decoded from its chunks as before. When every chunk and the last part
+  are decoded already at release (a speculation stood because the speaker
+  paused before letting go), the session is not finished at all: its last
+  window would be a decode at release that the joined parts do not need.
+  On the public benchmark, whose takes end in 0.3 s of silence, finishing
+  it anyway had cost long takes about 75 ms at release.
+- **Cross-check timing**: the time Tiny's cross-check and a Turbo
+  escalation took is recorded per dictation (`crosscheck_ms`,
+  `escalation_ms` in the release-path trace). A decode whose every word
+  the runtime scores at 0.90 or more (`CROSSCHECK_SKIP_CONFIDENCE`,
+  calibrated on the owner's 40 recorded sentences, experiment E3) is never
+  escalated to Turbo (`PARAKEET_CONFIDENT_SKIPS_ESCALATION`, on); Tiny
+  still runs beside it. With `PARAKEET_WORD_CONFIDENCE_ROUTING` on (off as
+  shipped) such a decode skips Tiny too, and any other decode runs Tiny
+  after the helper answers instead of beside it.
 - **Routing**: on Mac, the Parakeet helper is tried first. Helper
   failure falls back faithfully to Whisper (Turbo when installed, else
   Tiny with a printed notice). A helper that had started restarts lazily
@@ -83,7 +114,7 @@ speech is recognized *while you talk* through rolling chunk cuts, so a
 - **Whisper Face's own speech runtime**: `native/ParrotSpeechRuntime`
   runs the same Parakeet model files with no package dependencies (Core ML
   and Accelerate only, nothing fetched to build it, no networking API) and
-  speaks protocols 1 and 2. Its transcripts match the FluidAudio helper's
+  speaks protocols 1, 2 and 3 (sessions). Its transcripts match the FluidAudio helper's
   on every measured clip. `setup.sh` requires the helper and builds the runtime if it can (a runtime
   that does not build or load is skipped with one line, not an install failure);
   the New speech runtime switch (Advanced → Models, preference
