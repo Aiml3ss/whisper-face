@@ -66,15 +66,17 @@ version but other contents refuses too. Neither changes anything. To go back
 a version, the previous copy is in `checkout.previous`; no button does it
 yet.
 
-**Permissions after an update.** Until the app is signed with a Developer ID,
-every release has a new code identity, so macOS keeps Whisper Face listed
-under Accessibility and Input Monitoring but stops honouring the grant.
-After the update the runtime waits for permissions and its permission window
-opens by itself, with buttons for the exact Settings pages and **Still Not
-Working…** to clear Whisper Face's two entries. With a Developer ID build the
-identity is the bundle identifier plus the Team ID, which stay the same from
-release to release, so the grants are expected to survive an update; that is
-unverified until a signed build exists.
+**Permissions after an update.** From 0.7.1 the app is signed with a
+Developer ID, so its identity is the bundle identifier plus the Team ID,
+which stay the same from release to release, and the grants are expected to
+survive an update from one signed release to the next; no update between two
+signed releases has been tried yet. Releases up to 0.7.0 were unsigned, so
+each had a new code identity, and the first update from one of them to a
+signed release changes it once more. When the identity changes, macOS keeps
+Whisper Face listed under Accessibility and Input Monitoring but stops
+honouring the grant. After the update the runtime waits for permissions and
+its permission window opens by itself, with buttons for the exact Settings
+pages and **Still Not Working…** to clear Whisper Face's two entries.
 
 ## Moving a folder install into the app
 

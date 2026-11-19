@@ -15,8 +15,10 @@ just another transcript box. The goal is commercial-quality dictation that is
 easy enough for anyone to install, fast enough to disappear into the workflow,
 and conservative enough to protect names, numbers, code, commands, and intent.
 
-Mac is the production focus today, and it is still an unsigned preview: no
-fresh-Mac install from the published disk image has been recorded yet. Windows
+Mac is the production focus today. From 0.7.1 its disk image is signed with
+an Apple Developer ID and notarized by Apple (releases up to 0.7.0 were
+unsigned previews), but no fresh-Mac install from the published disk image
+has been recorded yet. Windows
 shares the core pipeline and has its own installer, but neither that installer
 nor a full dictation has been run on real Windows hardware. The native iPhone
 product is a future workstream, not a current setup promise.
@@ -466,12 +468,13 @@ must be re-audited if it moves.
 1. Download `WhisperFace-<version>-macOS-arm64.dmg` from the
    [latest release](https://github.com/Aiml3ss/whisper-face/releases/latest)
    and open it. Drag **Whisper Face** onto **Applications**.
-2. Open Whisper Face from Applications. It is not yet signed with an Apple
-   Developer ID or notarized, so macOS blocks the first open. On macOS 15 and
-   later, choose **Done**, then go to **System Settings → Privacy & Security**,
-   scroll down, choose **Open Anyway** for Whisper Face, and confirm with
-   your password. On macOS 14, Control-click the app, choose **Open**, then
-   confirm.
+2. Open Whisper Face from Applications. From 0.7.1 it is signed with an
+   Apple Developer ID and notarized by Apple, so macOS only asks once whether
+   to open an app downloaded from the internet: choose **Open**. Releases up
+   to 0.7.0 were unsigned, and macOS blocked their first open: on macOS 15
+   and later you chose **Done**, then **Open Anyway** for Whisper Face in
+   **System Settings → Privacy & Security**; on macOS 14, Control-click the
+   app, **Open**, then confirm.
 3. A setup window opens. If this Mac lacks Apple's command line tools, it
    asks macOS to install them first, in a window of macOS's own. It checks
    for 5 GB of free space and says what it will download, about 1 GB: the
@@ -503,9 +506,11 @@ for Updates…**, which offers a newer published release and downloads it only
 when you click. Either way the new version is set up beside the old one,
 your settings, dictionary, history and models come across, and if anything
 fails the old version is put back and keeps working
-([details](docs/distribution/update-and-rollback.md)). Because the app is
-unsigned, macOS may ask for Input Monitoring and Accessibility again after an
-update. To remove it, run
+([details](docs/distribution/update-and-rollback.md)). From 0.7.1 the app is
+signed with a Developer ID, so Input Monitoring and Accessibility carry over
+from one signed release to the next; the first update from an unsigned
+release (0.7.0 or earlier) changes the app's identity once, and macOS may ask
+for them again that one time. To remove it, run
 `"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh" --uninstall`,
 then drag the app to the Trash.
 
@@ -1058,14 +1063,15 @@ uv run tests/test_installers.py
 ## Distribution, privacy, and security
 
 Public Mac releases are built from one exact Git revision with the same
-`Install.command` used in a checkout. Every release published so far was
-packaged locally as an unsigned preview: the launcher app is ad-hoc signed,
-the disk image is not notarized, and the release carries SHA-256 checksums
-but no build-provenance attestation. The release pipeline can also produce a
-generic signed app inside a signed, notarized, and stapled disk image, but
-signed by the Apple Team ID recorded in the repo-pinned
-`config/macos-signing-policy.json`. That path is ready but has never produced
-a published release. See the
+`Install.command` used in a checkout. From 0.7.1 the Mac disk image holds an
+app signed with the Developer ID of the Apple Team ID pinned in
+`config/macos-signing-policy.json` (`Z6Q832529P`), notarized by Apple with
+the ticket stapled, inside a disk image that is itself signed, notarized and
+stapled; `spctl --assess` and `xcrun stapler validate` check both. Releases
+are still built and uploaded by hand on the Project Owner's Mac, so they
+carry SHA-256 checksums but no build-provenance attestation. Releases up to
+0.7.0 were unsigned previews: an ad-hoc signed app in a disk image that is
+not notarized. The Windows zip is not code-signed. See the
 [Mac release runbook](docs/distribution/macos-release.md) and
 [release provenance](docs/security/release-provenance.md).
 

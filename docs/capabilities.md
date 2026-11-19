@@ -22,7 +22,9 @@ v0.4.0 and earlier behave differently in places (they install Ollama by
 default, for example). v0.6.0 is the first whose Mac download is the
 drag-install app; v0.6.1 adds moving an existing folder install into the app.
 v0.7.0 turns the names fix on (Favor my words), journals each dictation
-before its paste, and tries an update on your own recordings first.
+before its paste, and tries an update on your own recordings first. v0.7.1 is
+the first whose Mac download is signed with a Developer ID and notarized by
+Apple.
 
 **What a default install contains.** On a Mac: Parakeet Unified (English) and
 Whisper Tiny. Whisper large-v3-turbo and the Qwen3.5-4B cleanup model (with
@@ -267,9 +269,13 @@ Qwen3.5-4B, and has no Parakeet.
   icon in place of the HUD, no Accessibility-based insertion transaction, and
   no correction learning. Right Alt is the Windows capture key; on AltGr
   layouts AltGr starts Capture.
-- Distribution is currently an **unsigned preview**: macOS warns that the
-  developer cannot be verified, and permissions may need re-granting after an
-  update. Signing and notarization are not done.
+- From v0.7.1 the Mac download is **signed with a Developer ID and notarized
+  by Apple**, with the ticket stapled: it opens without **Open Anyway**, and
+  Input Monitoring and Accessibility are expected to carry over between signed
+  releases. Releases are still built and uploaded by hand, with no
+  build-provenance attestation. Releases up to v0.7.0 were unsigned previews
+  that need **Open Anyway** and may need permissions re-granted after an
+  update. The Windows download is not code-signed.
 
 ---
 

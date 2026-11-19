@@ -1219,9 +1219,9 @@ section.band {
   text-underline-offset: 3px;
 }
 
-/* Gatekeeper caveat. Loud enough to be read before the download, quiet
-   enough not to read as an error. Remove with the flag in data/release.ts
-   once a notarized build ships. */
+/* Platform caveat (the Windows preview, and the Mac Gatekeeper note when
+   RELEASE.unsigned is true). Loud enough to be read before the download,
+   quiet enough not to read as an error. */
 .install-warn {
   margin: 12px 0 0;
   padding: 11px 14px;

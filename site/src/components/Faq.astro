@@ -25,8 +25,8 @@ const faqs = [
     a: 'Allow about 5 GB free on a default install and 8 GB with the optional models. The setup window downloads about 1 GB, plus Apple’s command line tools if your Mac lacks them. These are estimates: we have not yet measured a clean-machine install, how long it takes, or the memory it uses.',
   },
   {
-    q: 'Why does macOS warn me when I open it?',
-    a: 'Whisper Face is not signed with an Apple Developer ID or notarized by Apple yet, so macOS blocks the first open. On macOS 15 or later, open the app once and choose Done, then choose Open Anyway in System Settings → Privacy & Security. On macOS 14, Control-click the app and choose Open. You can check the download against the release’s SHA256SUMS first.',
+    q: 'Why does macOS ask before I open it?',
+    a: 'From 0.7.1, Whisper Face is signed with an Apple Developer ID and notarized by Apple, so the first open shows only macOS’s usual question about an app downloaded from the internet: choose Open. Releases up to 0.7.0 were not signed or notarized, so macOS blocked their first open until you chose Open Anyway in System Settings → Privacy & Security (on macOS 14, Control-click the app and choose Open). You can check the download against the release’s SHA256SUMS first.',
   },
   {
     q: 'What about Windows or iPhone?',
