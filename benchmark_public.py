@@ -33,6 +33,12 @@ Numbers the outside probe must supply (release to text on screen in a real
 app, paste into real apps, bytes sent) are written as ``null`` with the
 status ``needs-outside-probe``; nothing here estimates them.
 
+    uv run benchmark_public.py attach-probe --out <folder of a finished run>
+
+fills release to text on screen from ``<out>/outside_probe.json``, which
+``outside_probe.py`` writes, after checking that it timed the same app
+revision on the same Mac with the same audio.
+
 The result goes to ``<out>/result.json`` and the human page, rendered by
 ``public_scorecard.py benchmark``, to ``<out>/scorecard.md``. The audio stays
 in ``<out>/audio``; ``--out`` may not be inside the checkout, so audio is
@@ -87,6 +93,13 @@ CONFIGURATIONS = ("defaults", "dictionary")
 RUNTIME_IN_PROCESS = "runtime-in-process"
 APP_ON_FAKE_MAC = "app-on-fake-mac"
 NEEDS_OUTSIDE_PROBE = "needs-outside-probe"
+# The third class: measured by outside_probe.py, from outside the app, in a
+# real window. Only the metrics in OUTSIDE_PROBE_MEASURES may carry it.
+OUTSIDE_PROBE = "outside-probe"
+PROBE_RESULT_KIND = "whisper-face/outside-probe-result"
+PROBE_RESULT_FILE = "outside_probe.json"
+PROBE_COMMAND = "uv run outside_probe.py run"
+PROBE_TAKE_STATES = ("text", "no-text")
 # What only the outside probe can measure. A result carries each as null.
 OUTSIDE_PROBE_METRICS = {
     "release_to_text_on_screen_ms": (
@@ -101,6 +114,9 @@ OUTSIDE_PROBE_METRICS = {
     "idle_memory_mb": "System tools on the installed app between dictations.",
     "time_to_first_dictation_s": "A stopwatch protocol from a fresh download.",
 }
+# What the outside probe measures today; the rest stay null until a tool for
+# them exists.
+OUTSIDE_PROBE_MEASURES = ("release_to_text_on_screen_ms",)
 
 
 class BenchmarkError(ValueError):
@@ -716,7 +732,10 @@ def model_identity(models: Path) -> dict[str, Any]:
     }
 
 
-def machine_environment(product: Mapping[str, Any]) -> dict[str, Any]:
+def host_machine() -> dict[str, str]:
+    """The Mac this process runs on, as every result names it. The outside
+    probe uses the same words, so a probe result can be matched to the
+    benchmark result of the same machine."""
     def sysctl(name: str) -> str:
         return subprocess.run(["sysctl", "-n", name], capture_output=True,
                               text=True, check=True).stdout.strip()
@@ -736,6 +755,12 @@ def machine_environment(product: Mapping[str, Any]) -> dict[str, Any]:
         "hardware": f"{model}, {chip}, {memory} GB",
         "os_name": "macOS",
         "os_version": f"{version} ({build})",
+    }
+
+
+def machine_environment(product: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **host_machine(),
         "python_version": platform.python_version(),
         "whisper_face_revision": product["revision"],
         "software": [
@@ -857,6 +882,153 @@ def build_result(corpus: Mapping[str, Any], *, voices: Mapping[str, str],
     }
 
 
+# -- the outside probe's numbers ---------------------------------------------------
+
+
+def probe_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Release to first and to final text, from the probe's per-take rows.
+
+    Each take's time is its median over the probe's repeats, bucketed by the
+    take's length as every other latency in a result is.
+    """
+    seconds: dict[str, float] = {}
+    first: dict[str, list[float]] = {}
+    final: dict[str, list[float]] = {}
+    without_text = 0
+    for row in rows:
+        seconds[row["id"]] = row["seconds"]
+        if row["status"] != "text":
+            without_text += 1
+            continue
+        first.setdefault(row["id"], []).append(row["release_to_first_text_ms"])
+        final.setdefault(row["id"], []).append(row["release_to_final_text_ms"])
+    return {
+        "release_to_first_text": latency_summary(seconds, {
+            take_id: statistics.median(values)
+            for take_id, values in first.items()}),
+        "release_to_final_text": latency_summary(seconds, {
+            take_id: statistics.median(values)
+            for take_id, values in final.items()}),
+        "takes": len(seconds),
+        "repeats_without_text": without_text,
+    }
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and math.isfinite(value)
+
+
+def outside_probe_problems(result: Mapping[str, Any],
+                           entry: Mapping[str, Any]) -> list[str]:
+    """Why a probe measurement may not stand in this result, if it may not.
+
+    The probe must have timed the same app revision, on the same machine and
+    OS, with the same corpus and audio, and run to the end; every per-take
+    time must be consistent; and the published value must follow from those
+    times, so an edited number is refused.
+    """
+    found = []
+    probe = entry.get("probe")
+    if not isinstance(probe, Mapping) or probe.get(
+            "result_kind") != PROBE_RESULT_KIND:
+        return ["it does not carry the outside probe's own result"]
+    if probe.get("measured_by") != OUTSIDE_PROBE:
+        found.append(f"the probe's numbers must be {OUTSIDE_PROBE!r}")
+    product = result.get("product", {})
+    target = probe.get("target")
+    if not isinstance(target, Mapping) or (
+            target.get("product_id"), target.get("revision")) != (
+            product.get("product_id"), product.get("revision")):
+        found.append("the probe timed a different app or revision")
+    environment = result.get("environment", {})
+    machine = probe.get("environment")
+    if not isinstance(machine, Mapping) or any(
+            machine.get(key) != environment.get(key)
+            for key in ("hardware", "os_name", "os_version")):
+        found.append("the probe ran on a different machine or OS")
+    corpus = probe.get("corpus")
+    if not isinstance(corpus, Mapping) or corpus.get("sha256") != result.get(
+            "corpus", {}).get("sha256"):
+        found.append("the probe played a different corpus")
+    run = probe.get("run")
+    if not isinstance(run, Mapping) or run.get("completed") is not True:
+        found.append("the probe run stopped before its last take")
+    elif not str(run.get("command", "")).startswith(PROBE_COMMAND) or any(
+            word.startswith(("/", "~")) or ":\\" in word
+            for word in str(run["command"]).split()):
+        found.append("the probe's rerun command must start with "
+                     f"{PROBE_COMMAND!r} and name no local folder")
+    takes = {take.get("id"): take for take in result.get("takes", [])
+             if isinstance(take, Mapping)}
+    rows = probe.get("takes")
+    if not isinstance(rows, list) or not rows:
+        return found + ["the probe carries no takes"]
+    for row in rows:
+        take = takes.get(row.get("id")) if isinstance(row, Mapping) else None
+        if take is None:
+            found.append(f"{row!r:.60}: not a take of this result")
+            continue
+        label = row["id"]
+        if row.get("audio_sha256") != take.get("audio_sha256") or row.get(
+                "seconds") != take.get("seconds"):
+            found.append(f"{label}: the probe played different audio")
+        if row.get("status") not in PROBE_TAKE_STATES:
+            found.append(f"{label}: unknown status {row.get('status')!r}")
+            continue
+        times = [row.get(key) for key in (
+            "release_ms", "first_text_ms", "final_text_ms",
+            "release_to_first_text_ms", "release_to_final_text_ms")]
+        if row["status"] == "no-text":
+            if not _is_number(times[0]) or any(
+                    value is not None for value in times[1:]):
+                found.append(f"{label}: a take with no text has no text times")
+            continue
+        if not all(_is_number(value) for value in times):
+            found.append(f"{label}: a take with text needs every time")
+            continue
+        release, first_at, final_at, to_first, to_final = times
+        if not first_at <= final_at or final_at < release:
+            found.append(f"{label}: its times are out of order")
+        if (abs(to_first - (first_at - release)) > 0.002
+                or abs(to_final - (final_at - release)) > 0.002):
+            found.append(f"{label}: its intervals do not follow from its times")
+    if not found and entry.get("value") != probe_summary(rows):
+        found.append("the value does not follow from the probe's own "
+                     "per-take times")
+    return found
+
+
+def attach_probe(result: Mapping[str, Any],
+                 probe: Mapping[str, Any]) -> dict[str, Any]:
+    """The result with the outside probe's release-to-text filled in."""
+    if not isinstance(probe, Mapping) or probe.get(
+            "result_kind") != PROBE_RESULT_KIND:
+        raise BenchmarkError("that is not an outside probe result")
+    rows = probe.get("takes")
+    if not isinstance(rows, list) or not rows:
+        raise BenchmarkError("the outside probe result carries no takes")
+    if probe.get("summary") != probe_summary(rows):
+        raise BenchmarkError("the outside probe's summary does not follow "
+                             "from its own per-take times")
+    attached = json.loads(json.dumps(result))
+    entry = {
+        "status": OUTSIDE_PROBE,
+        "value": probe_summary(rows),
+        "why": ("Key release to the text arriving in the probe's own "
+                "window, timed by outside_probe.py from outside the app."),
+        "probe": {key: probe[key] for key in (
+            "result_kind", "measured_by", "target", "environment", "corpus",
+            "method", "run", "takes")},
+    }
+    problems = outside_probe_problems(attached, entry)
+    if problems:
+        raise BenchmarkError("the outside probe result does not belong to "
+                             "this benchmark result: " + "; ".join(problems))
+    attached["outside_probe"]["release_to_text_on_screen_ms"] = entry
+    return attached
+
+
 def rerun_command(args: argparse.Namespace) -> str:
     """The command that reproduces this run, with the machine's own paths
     left as placeholders: a published page names no local folder."""
@@ -975,6 +1147,32 @@ def check() -> int:
     return 0
 
 
+def attach(args: argparse.Namespace) -> int:
+    """Fill a result's release-to-text from the outside probe's result."""
+    import public_scorecard
+
+    out = args.out.expanduser().resolve()
+    result = json.loads((out / "result.json").read_text(encoding="utf-8"))
+    probe = json.loads((out / PROBE_RESULT_FILE).read_text(encoding="utf-8"))
+    attached = attach_probe(result, probe)
+    try:
+        public_scorecard.validate_benchmark_result(attached)
+    except public_scorecard.PublicationError as error:
+        raise BenchmarkError(str(error)) from error
+    (out / "result.json").write_text(
+        json.dumps(attached, ensure_ascii=False, indent=1) + "\n",
+        encoding="utf-8")
+    (out / "scorecard.md").write_text(
+        public_scorecard.render_benchmark_markdown(attached), encoding="utf-8")
+    final = attached["outside_probe"]["release_to_text_on_screen_ms"][
+        "value"]["release_to_final_text"]["all"]
+    print(f"release to text on screen: p50 {final['p50']} ms, p95 "
+          f"{final['p95']} ms over {final['takes']} takes; wrote "
+          f"{out / 'result.json'} and {out / 'scorecard.md'}",
+          file=sys.stderr)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -996,10 +1194,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_parser.add_argument("--pace", choices=("real-time", "instant"),
                             default="real-time",
                             help="how the fake microphone delivers audio")
+    attach_parser = commands.add_parser(
+        "attach-probe", help="fill release to text on screen from "
+        f"<out>/{PROBE_RESULT_FILE}, written by outside_probe.py")
+    attach_parser.add_argument("--out", type=Path, required=True,
+                               help="the folder of a finished run")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
             return check()
+        if args.command == "attach-probe":
+            return attach(args)
         return run(args)
     except BenchmarkError as error:
         print(f"benchmark_public: {error}", file=sys.stderr)

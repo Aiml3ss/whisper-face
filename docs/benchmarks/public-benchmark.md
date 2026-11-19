@@ -166,7 +166,8 @@ the seed, the passes and the exact command.
 
 A result carries each of these as `null` with the status
 `needs-outside-probe`. The page lists them, and a result that gives any of
-them a value is refused.
+them a value is refused. The one exception is `release_to_text_on_screen_ms`,
+which `attach-probe` fills from the outside probe (next section).
 
 | Measure | Why the run cannot give it |
 |---|---|
@@ -175,6 +176,96 @@ them a value is refused.
 | `bytes_sent_per_dictation` | Needs per-process network counters while dictating. This run denies the network to the runtime instead. |
 | `idle_memory_mb` | Needs system tools on the installed app between dictations. |
 | `time_to_first_dictation_s` | Needs a stopwatch protocol from a fresh download. |
+
+## The outside probe
+
+`outside_probe.py` measures the one latency comparable across dictation
+apps: from letting go of the dictation key to the text arriving in a text
+field. It measures from outside the app, so it times any app the same way.
+
+```sh
+uv run outside_probe.py run --app whisper-face --go-ahead whisper-face \
+    --benchmark <out> --app-revision "$(git -C <app checkout> rev-parse HEAD)"
+uv run benchmark_public.py attach-probe --out <out>
+```
+
+`<out>` is the folder of a finished `benchmark_public.py run`, made from the
+same revision the installed app runs: the probe plays that run's audio, and
+`attach-probe` refuses a probe that timed a different revision, Mac, macOS,
+corpus or audio. The terminal that runs it needs Accessibility (System
+Settings > Privacy & Security), which macOS requires before a program may
+post key events; without it the probe says so and stops.
+
+**What it does on the screen.** A small window titled "Outside probe: keep
+this window in front", with one empty text field, comes to the front. After
+a five-second countdown in the terminal, for each take: the field is emptied,
+the capture key (Right Option, or `--key`) is pressed, the take plays from
+the speakers, 0.6 s later the key is released, and the app's text appears in
+the field. Ctrl-C stops the run and releases the key. With `--repeats 1`
+(the default) the whole corpus takes about 15 minutes.
+
+**What it records.** For each take: the release time, the first change to
+the field's text and the final one (the last change before the text stays
+the same for 1.5 s), on one clock shared by every process on the Mac. The
+result, `<out>/outside_probe.json`, also names the machine, macOS, the app
+and its revision, the corpus hash, each take's audio hash and the rerun
+command. `attach-probe` puts the medians per take length into the
+benchmark result under `release_to_text_on_screen_ms` with a third
+measurement class, `outside-probe`, and the page gains two latency rows:
+release to first text and release to final text.
+
+**How it drives the app, and why that works.** The key is pressed with
+synthetic key events posted at the HID level, which every event tap sees as
+it sees a real key. Whisper Face hears its key through pynput's listen-only
+session event tap; pynput passes posted events on (it marks them as
+injected, and the app's callbacks ignore that mark). The app also polls the
+key's physical state to catch a lost key-up, but it trusts an "up" reading
+only after it has once read "down" during the same hold, so a posted hold
+the physical state never shows ends on the posted key-up, not early. This is
+read from the code (`dictate.py`, `supervise_hotkey_latch`); it has not yet
+been run against the installed app. If an app ignores posted events, every
+take comes back with no text; that app then needs a hardware key press,
+and its numbers are marked as less reproducible.
+
+**The audio path, and its trade-off.** The take plays through the Mac's
+default output and the app hears it through its microphone, as it would
+hear a person. No virtual loopback device is installed (installing one
+needs the owner's approval), and Whisper Face has no seam that feeds a
+recording to its capture: measurement mode covers calibration, keyword
+priority and delayed clean-up only, and a seam would measure something a
+person never gets. The cost is the room: speaker quality, noise and the
+microphone's own processing change what the app hears, so the probe's text
+is kept but not scored for accuracy; accuracy comes from the runtime and the
+fake Mac. The timing does not depend on the room: it starts at the key
+release, which comes after the take and a 0.6 s tail have played.
+
+**What it cannot show.**
+
+- *Pixels.* The time is when the window's text storage changes, before it is
+  drawn; the display adds up to one refresh (8 to 17 ms) for every app alike.
+- *A release mid-word.* Every take ends in silence plus the tail, as on the
+  fake Mac.
+- *Every app's own field.* The probe's field is a plain AppKit text view in a
+  small program; an app that treats some apps differently may deliver
+  differently elsewhere.
+
+**Its own accuracy.** `tests/test_outside_probe.py` runs the real probe
+window (hidden, never in front) against a fake dictation app that types each
+take's text into it in two parts, 150 ms and 450 ms after the key-up, and
+logs when it sent each part. The probe never saw text before it was sent,
+always told the first part from the final one, and over five runs on the M4
+Pro it was built on it saw each part 0.6 to 1.5 ms after it was sent at the
+median and 3.2 ms after at most. That includes the fake's own pipe into the
+window, which a real app's paste does not use, so it bounds the probe's
+error from above.
+
+**Its posture.** The probe runs against an app only when the command line
+names it twice, as `--app` and as the go-ahead `--go-ahead`. It posts only
+the capture key, only while its own window is in front with its field
+focused, stops the moment that changes, and always releases the key. It
+types nothing and touches no pasteboard. It imports no network module, plays
+audio only to the speakers, and writes only into `<out>`, which is outside
+the checkout. `tests/test_outside_probe.py` breaks each of these on purpose.
 
 ## Rules a published result keeps
 
@@ -191,7 +282,8 @@ breaks each on purpose.
    corpus's seed, and says its speech is synthetic.
 4. Every block of numbers keeps how it was measured: `runtime-in-process` or
    `app-on-fake-mac`.
-5. Every number only the outside probe can give is empty.
+5. Every number only the outside probe can give is empty, except release
+   to text on screen when it was attached from an outside probe result.
 6. Its accuracy numbers follow from the per-take texts it carries; an edited
    number is refused.
 7. It carries every take once, each with a corpus voice.
@@ -199,10 +291,14 @@ breaks each on purpose.
    in `benchmarks/public_benchmark_rivals.json`.
 9. Its rerun command names no local folder: the runtime, model and output
    folders appear as `<runtime>`, `<models>` and `<out>`.
+10. An outside probe measurement timed the same app revision, machine, macOS,
+    corpus and audio, ran to its last take, and its numbers follow from its
+    own per-take times (`tests/test_outside_probe.py`).
 
 ## Adding other apps later
 
-This is a design; none of it is built or run.
+This is a design; only the outside probe is built, and it has not been
+run against any app.
 
 **The rule.** Nothing is published about another product until the Project
 Owner holds an account or trial of it, has read its terms, and has recorded
@@ -215,22 +311,19 @@ they are free to rerun the benchmark.
 are measured from outside, and Whisper Face is measured the same way beside
 them:
 
-- The same corpus audio (the WAVs `run` writes) is played into a virtual
-  audio input device that each app is set to use. Installing that device
-  needs the owner's approval.
-- A probe window with one text field has focus. It timestamps every change
-  to its text, so "release to text on screen" is measured identically for
-  every app, from the probe's key release to the last character arriving.
-- Each app's own dictation key is pressed by the probe. If an app ignores
-  synthetic key events, that app's latency needs a hardware key press and is
-  marked as less reproducible.
+- The same corpus audio (the WAVs `run` writes) is played to each app as
+  the outside probe plays it: through the speakers today, or through a
+  virtual audio device each app is set to use, once the owner approves
+  installing one.
+- The outside probe times every app the same way, from its key release to
+  the text arriving in its own window. Its `--key` names Whisper Face's
+  bindable keys; another app's key would be added to it.
 - Each app runs on its defaults, then once on its makers' recommended
   settings with the corpus glossary given through its own dictionary, as
   Whisper Face's `dictionary` configuration does.
-- Three runs per app, medians and spreads published, the app's version and
-  the date recorded, and for a cloud app the network speed. The probe's
-  numbers go into a result's `outside_probe` block with a third measurement
-  class, and the renderer learns that class only when the probe exists.
+- Three runs per app (`--repeats 3`), medians and spreads published, the
+  app's version and the date recorded, and for a cloud app the network
+  speed.
 - The text each app typed is scored by the same `score_takes`, so word error
   rate, recall, false insertions and formatting mean the same thing for
   every app.
@@ -245,6 +338,9 @@ covers setup and correction tasks the probe does not.
 |---|---|
 | `benchmarks/public_benchmark_corpus.json` | The corpus: takes, glossary, voices, seed, licence |
 | `benchmarks/public_benchmark_rivals.json` | The rule for other products, and the owner's entries (none) |
-| `benchmark_public.py` | `check` and `run` |
+| `benchmark_public.py` | `check`, `run` and `attach-probe` |
 | `public_scorecard.py` | `benchmark`: the rules above, and the page |
 | `tests/test_benchmark_public.py` | Each rule broken on purpose |
+| `outside_probe.py` | The outside probe: `run`, and its own window |
+| `tests/test_outside_probe.py` | The probe's rules broken on purpose, and its accuracy against a fake app |
+| `tests/fake_dictation_target.py` | The fake app those tests time |
