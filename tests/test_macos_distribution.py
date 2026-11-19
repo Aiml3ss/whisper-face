@@ -1321,6 +1321,7 @@ class LocalLauncherSigningTests(unittest.TestCase):
             built.append(who)
             staging.mkdir(parents=True)
             (staging / "sig").write_text("developer-id" if who and signs else "adhoc")
+            (staging / "rebuilt").write_text("")
         fakes = {
             "signing_identity": lambda policy: identity,
             "build_app": build,
@@ -1339,6 +1340,7 @@ class LocalLauncherSigningTests(unittest.TestCase):
             stack.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
             module.install_app(app, self.directory, self.directory / "receipt.json",
                                source, self.policy)
+        self.replaced = (app / "rebuilt").exists()
         return built, (app / "sig").read_text()
 
     def test_install_signs_once_and_then_keeps_the_signed_launcher(self):
@@ -1360,6 +1362,7 @@ class LocalLauncherSigningTests(unittest.TestCase):
         identity = (IDENTITY_HASH, IDENTITY_NAME)
         self.assertEqual(self.install(identity=identity, current="adhoc",
                                       signs=False), ([identity], "adhoc"))
+        self.assertFalse(self.replaced, "a working launcher was swapped")
         # A fresh install signs, or falls back to ad hoc.
         import shutil
         shutil.rmtree(self.directory / "home")
