@@ -5,14 +5,12 @@ export const RELEASE = {
   tag: 'v0.7.1',
   /** Apple Silicon disk image: the drag-install app and a link to Applications. */
   dmg: 'https://github.com/Aiml3ss/whisper-face/releases/download/v0.7.1/WhisperFace-0.7.1-macOS-arm64.dmg',
-  // SIZE-PENDING: replace with the published disk image's size before deploying.
-  size: 'SIZE-PENDING',
+  size: '33.3 MB',
   notes: 'https://github.com/Aiml3ss/whisper-face/releases/tag/v0.7.1',
   /** Windows 10/11 x64 source bundle; unzip and run Install.cmd. */
   windows:
     'https://github.com/Aiml3ss/whisper-face/releases/download/v0.7.1/WhisperFace-0.7.1-windows-x64.zip',
-  // SIZE-PENDING: replace with the published Windows zip's size before deploying.
-  windowsSize: 'SIZE-PENDING',
+  windowsSize: '17.1 MB',
   /** Checksums for the Mac assets. This file does not list the Windows zip. */
   checksums:
     'https://github.com/Aiml3ss/whisper-face/releases/download/v0.7.1/SHA256SUMS',
