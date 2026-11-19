@@ -381,6 +381,22 @@ func runWorker(_ command: [String]) -> Never {
     exit(child.terminationStatus)
 }
 
+// What the setup window says about how far it has got: a fraction for the
+// bar from the steps done, and one line with the step and the time so far.
+// No estimate: nobody has measured how long a first setup takes, and most of
+// it is downloading, which depends on the connection.
+func setupProgress(done: Int, total: Int, seconds: Int) -> (Double, String) {
+    let finished = max(0, min(done, total))
+    let fraction = total > 0 ? Double(finished) / Double(total) : 0
+    let values = ["step": String(min(finished + 1, total)), "total": String(total)]
+    let minutes = max(0, seconds) / 60
+    let text: String
+    if minutes < 1 { text = localized("installer.progress.started", values) }
+    else if minutes == 1 { text = localized("installer.progress.minute", values) }
+    else { text = localized("installer.progress.minutes", values.merging(["minutes": String(minutes)]) { $1 }) }
+    return (fraction, text)
+}
+
 // ---------------------------------------------------------------- setup ---
 // Only an app built for drag install carries its release's source archive.
 // The folder installs' locally built launcher has none, so it never sets
@@ -547,7 +563,12 @@ final class SetupController: NSObject, NSWindowDelegate {
     let bodyLabel = NSTextField(wrappingLabelWithString: "")
     let noteLabel = NSTextField(wrappingLabelWithString: "")
     let checklist = NSStackView()
+    // Two bars, never one switched between modes: a bar that has run its
+    // indeterminate animation keeps drawing a sliver after it is made
+    // determinate, whatever its value. `progress` only sweeps (waiting on
+    // Apple's installer); `stepBar` only fills, a step at a time.
     let progress = NSProgressIndicator()
+    let stepBar = NSProgressIndicator()
     let primary = NSButton(title: "", target: nil, action: nil)
     let secondary = NSButton(title: "", target: nil, action: nil)
     let quit = NSButton(title: "", target: nil, action: nil)
@@ -556,6 +577,9 @@ final class SetupController: NSObject, NSWindowDelegate {
     var currentPhase: String? = nil
     var completed: Set<String> = []
     var finishedPhase: String? = nil
+    // When the current setup, update or move began, for the time so far.
+    var startedAt: Date? = nil
+    var progressTimer: Timer? = nil
     var output: [String] = []
     var checkout: URL? = nil
     var setupRun: SetupRun? = nil
@@ -598,6 +622,9 @@ final class SetupController: NSObject, NSWindowDelegate {
             checklist.addArrangedSubview(row); rows[phase] = (icon, label)
         }
         progress.style = .bar; progress.isIndeterminate = true; progress.controlSize = .regular
+        stepBar.style = .bar; stepBar.isIndeterminate = false; stepBar.controlSize = .regular
+        stepBar.minValue = 0; stepBar.maxValue = 1
+        stepBar.setAccessibilityLabel(localized("installer.progress.label"))
         progress.setAccessibilityLabel(localized("installer.progress.label"))
 
         for button in [primary, secondary, quit] { button.bezelStyle = .rounded; button.target = self }
@@ -608,7 +635,7 @@ final class SetupController: NSObject, NSWindowDelegate {
         let buttons = NSStackView(views: [secondary, spacer, quit, primary]); buttons.orientation = .horizontal; buttons.spacing = 12
 
         let filler = NSView(); filler.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
-        let stack = NSStackView(views: [face, titleLabel, bodyLabel, checklist, progress, noteLabel, filler, buttons])
+        let stack = NSStackView(views: [face, titleLabel, bodyLabel, checklist, progress, stepBar, noteLabel, filler, buttons])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 20, right: 28)
         stack.setCustomSpacing(16, after: face); stack.setCustomSpacing(6, after: titleLabel); stack.setCustomSpacing(16, after: bodyLabel)
@@ -623,6 +650,7 @@ final class SetupController: NSObject, NSWindowDelegate {
             face.widthAnchor.constraint(equalToConstant: 64), face.heightAnchor.constraint(equalToConstant: 64),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
             progress.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
+            stepBar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
             content.widthAnchor.constraint(equalToConstant: windowWidth),
         ])
         // One fixed size for every screen: the tallest, the running checklist.
@@ -697,11 +725,29 @@ final class SetupController: NSObject, NSWindowDelegate {
         titleLabel.stringValue = title; bodyLabel.stringValue = body; noteLabel.stringValue = note
         noteLabel.isHidden = note.isEmpty
         checklist.isHidden = !listVisible
-        progress.isHidden = !progressVisible
-        if progressVisible { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+        // While the checklist runs, the step bar fills a step at a time and
+        // the note says which step and how long so far; waiting on Apple's
+        // installer has no steps, so its bar only sweeps.
+        progress.isHidden = !(progressVisible && !listVisible)
+        stepBar.isHidden = !(progressVisible && listVisible)
         primary.isHidden = primaryTitle == nil; primary.title = primaryTitle ?? ""
         secondary.isHidden = secondaryTitle == nil; secondary.title = secondaryTitle ?? ""
+        if progress.isHidden { progress.stopAnimation(nil) } else { progress.startAnimation(nil) }
+        progressTimer?.invalidate(); progressTimer = nil
+        if listVisible && progressVisible {
+            if startedAt == nil { startedAt = Date() }
+            progressTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.refreshProgress() }
+        } else if !listVisible { startedAt = nil }
         refreshChecklist()
+    }
+
+    func refreshProgress() {
+        guard !stepBar.isHidden else { return }
+        let seconds = Int(Date().timeIntervalSince(startedAt ?? Date()))
+        let (fraction, text) = setupProgress(done: finishedPhase != nil ? setupPhases.count : completed.count, total: setupPhases.count, seconds: seconds)
+        stepBar.doubleValue = fraction
+        stepBar.setAccessibilityValueDescription(text)
+        noteLabel.stringValue = text; noteLabel.isHidden = false
     }
 
     func refreshChecklist() {
@@ -729,6 +775,7 @@ final class SetupController: NSObject, NSWindowDelegate {
             label.textColor = (state == "installer.phase.state.pending") ? themeColor("ink_soft") : themeColor("ink")
             label.setAccessibilityLabel(localized(state, ["phase": name]))
         }
+        refreshProgress()
     }
 
     func logURL() -> URL? {
@@ -839,7 +886,7 @@ final class SetupController: NSObject, NSWindowDelegate {
     func beginSetup() {
         if !toolsInstalled() { show(.tools); return }
         if !enoughSpace() { show(.space); return }
-        completed = []; finishedPhase = nil; output = []; currentPhase = setupPhases.first
+        completed = []; finishedPhase = nil; output = []; startedAt = nil; currentPhase = setupPhases.first
         show(.running)
         DispatchQueue.global().async {
             do {
@@ -860,7 +907,7 @@ final class SetupController: NSObject, NSWindowDelegate {
         guard let update = pendingUpdate else { return }
         if !toolsInstalled() { show(.tools); return }
         if !enoughSpace() { show(.space); return }
-        completed = []; finishedPhase = nil; output = []; currentPhase = setupPhases.first
+        completed = []; finishedPhase = nil; output = []; startedAt = nil; currentPhase = setupPhases.first
         show(.updating(update.from, update.to))
         DispatchQueue.global().async {
             do {
@@ -914,7 +961,7 @@ final class SetupController: NSObject, NSWindowDelegate {
         guard let folder = pendingMove else { return }
         if !toolsInstalled() { show(.tools); return }
         if !enoughSpace() { show(.space); return }
-        completed = []; finishedPhase = nil; output = []; currentPhase = setupPhases.first
+        completed = []; finishedPhase = nil; output = []; startedAt = nil; currentPhase = setupPhases.first
         show(.adopting(folder))
         DispatchQueue.global().async {
             do {
@@ -1056,6 +1103,25 @@ func initialScreen() -> Screen? {
     return drag ? .repair : .unset
 }
 
+// How much of a bar's track a picture shows filled: along the bar's middle
+// row, the run of pixels from its left end that keep the fill's colour.
+func drawnFraction(_ rep: NSBitmapImageRep, of bar: NSView, in view: NSView) -> Double {
+    let rect = bar.convert(bar.bounds, to: view)
+    let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+    let y = Int((view.isFlipped ? rect.midY : view.bounds.height - rect.midY) * scale)
+    let left = Int(rect.minX * scale), right = Int(rect.maxX * scale)
+    guard right - left > 8, let fill = rep.colorAt(x: left + 4, y: y)?.usingColorSpace(.sRGB),
+          let track = rep.colorAt(x: right - 4, y: y)?.usingColorSpace(.sRGB) else { return 0 }
+    func distance(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent) + abs(a.blueComponent - b.blueComponent)
+    }
+    // An empty or a full bar is one colour end to end.
+    if distance(fill, track) < 0.06 { return bar is NSProgressIndicator && (bar as! NSProgressIndicator).doubleValue >= 0.99 ? 1 : 0 }
+    var x = left + 4
+    while x < right, let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), distance(colour, fill) < distance(colour, track) { x += 1 }
+    return Double(x - left) / Double(right - left)
+}
+
 // Draws every screen into PNGs, in both appearances, without showing a
 // window, for scripts/window_render_probe.py --installer.
 func renderSetupWindow(to directory: String) -> Int32 {
@@ -1067,7 +1133,7 @@ func renderSetupWindow(to directory: String) -> Int32 {
         ("tools", .tools, {}),
         ("tools-waiting", .toolsWaiting, {}),
         ("space", .space, {}),
-        ("running", .running, { controller.completed = ["prepare", "python", "speech-model"]; controller.currentPhase = "helpers" }),
+        ("running", .running, { controller.completed = ["prepare", "python", "speech-model"]; controller.currentPhase = "helpers"; controller.startedAt = Date().addingTimeInterval(-7 * 60) }),
         ("failed", .failed("installer.reason.network"), { controller.completed = ["prepare"]; controller.currentPhase = "python" }),
         ("failed-before-start", .failed("installer.reason.damaged"), { controller.completed = []; controller.currentPhase = nil }),
         ("repair", .repair, {}),
@@ -1105,6 +1171,11 @@ func renderSetupWindow(to directory: String) -> Int32 {
             // theme's dynamic colours resolve exactly as on screen.
             guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return 1 }
             view.cacheDisplay(in: view.bounds, to: rep)
+            // What the step bar actually drew, beside the value it holds,
+            // so a test can hold the picture to the steps done.
+            if !controller.stepBar.isHidden {
+                print("step-bar \(name)-\(suffix) value=\(String(format: "%.3f", controller.stepBar.doubleValue)) drawn=\(String(format: "%.3f", drawnFraction(rep, of: controller.stepBar, in: view)))")
+            }
             guard let png = rep.representation(using: .png, properties: [:]) else { return 1 }
             do { try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("installer-\(name)-\(suffix).png")) } catch { return 1 }
         }
@@ -1118,6 +1189,10 @@ func renderSetupWindow(to directory: String) -> Int32 {
         if arguments.first == "--run" { runWorker(Array(arguments.dropFirst())) }
         if arguments.count == 2 && arguments[0] == "--render-setup-window" { exit(renderSetupWindow(to: arguments[1])) }
         if arguments.count == 2 && arguments[0] == "--install-match" { print(installMatchLine(arguments[1])); exit(0) }
+        if arguments.count == 3 && arguments[0] == "--setup-progress", let done = Int(arguments[1]), let seconds = Int(arguments[2]) {
+            let (fraction, text) = setupProgress(done: done, total: setupPhases.count, seconds: seconds)
+            print(String(format: "%.3f", fraction), text); exit(0)
+        }
         if arguments == ["--verify"] {
             do { try launchExistingRuntime(start: false); exit(0) } catch {
                 FileHandle.standardError.write(Data("Whisper Face launcher: this installation does not verify\n".utf8)); exit(1)

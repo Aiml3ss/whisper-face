@@ -15,7 +15,7 @@ Open the menu-bar face and choose **Voice Outbox**, then use **Copy & Dismiss** 
 
 ## The hotkey does nothing
 
-On a Mac, check that **Whisper Face** is turned on under both **Input Monitoring** and **Accessibility** (see [Permissions](/docs/permissions)); without Input Monitoring the key is never seen. After an update, turn it off and on again in all three lists. If the log says `hotkey listener keeps exiting`, the key listener cannot start, which almost always means a permission is missing. If the permissions are fine, run `setup.sh --verify`, then run `setup.sh` again to repair (see below for where it is).
+On a Mac, check that **Whisper Face** is turned on under both **Input Monitoring** and **Accessibility** (see [Permissions](/docs/permissions)); without Input Monitoring the key is never seen. After an update, if the switches look on and nothing works, use **Clear and Start Again** in the Whisper Face Permissions window: switching them off and on does not help. If the log says `hotkey listener keeps exiting`, the key listener cannot start, which almost always means a permission is missing. If the permissions are fine, run `setup.sh --verify`, then run `setup.sh` again to repair (see below for where it is).
 
 On Windows the hotkey is **Right Alt**, not Right Option. On keyboard layouts with AltGr, AltGr starts dictation too.
 

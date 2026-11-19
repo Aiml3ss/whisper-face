@@ -20823,13 +20823,32 @@ class PermissionHelpWiringTests(unittest.TestCase):
                                   ["/runtime/python", "dictate.py"])])
         self.assertEqual(fake_os.environ["WHISPER_FACE_PERMISSION_ATTEMPT"], "0")
 
+    def test_a_history_line_is_the_evidence_that_the_grants_existed(self):
+        namespace = load_definitions("dictated_before")
+        before = namespace["dictated_before"]
+        with tempfile.TemporaryDirectory() as folder:
+            history = Path(folder) / "transcripts.jsonl"
+            self.assertFalse(before(history))                 # no file
+            for text, expected in (
+                    ("", False),
+                    ("not json\n", False),
+                    ("[1, 2]\n", False),
+                    ('{"app": "x"}\n', False),
+                    ('{"ts": 1.0, "raw": "secret", "clean": "secret"}\n'
+                     '{"ts": 2.0}\n', True)):
+                with self.subTest(text=text):
+                    history.write_text(text, encoding="utf-8")
+                    self.assertIs(before(history), expected)
+
     def test_the_window_gets_the_runtime_seams_and_never_stops_it(self):
         shown = []
         namespace = load_definitions(
             "show_permission_help", "missing_event_permissions",
             "run_permission_reset_command", "restart_for_fresh_permissions",
+            "dictated_before",
             assignments={"PERMISSION_ATTEMPT_ENV"},
-            extra={"IS_MACOS": True, "subprocess": subprocess, "os": os})
+            extra={"IS_MACOS": True, "subprocess": subprocess, "os": os,
+                   "TRANSCRIPTS_FILE": Path("/nonexistent/transcripts.jsonl")})
         namespace["missing_event_permissions"] = lambda **_: ("accessibility",)
         flow = None
 
@@ -20843,6 +20862,14 @@ class PermissionHelpWiringTests(unittest.TestCase):
         self.assertEqual(flow.missing, ("accessibility",))
         self.assertIs(flow.runner, namespace["run_permission_reset_command"])
         self.assertIs(flow.restart, namespace["restart_for_fresh_permissions"])
+        self.assertFalse(flow.worked_before)
+        self.assertEqual(flow.stage, "missing")
+        # A Mac that has dictated before opens the window on the way out.
+        namespace["dictated_before"] = lambda: True
+        namespace["show_permission_help"](show=show)
+        self.assertTrue(flow.worked_before)
+        self.assertEqual(flow.stage, "stale")
+        shown.pop()
 
         def broken(_flow):
             raise RuntimeError("no window")

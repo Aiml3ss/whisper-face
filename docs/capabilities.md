@@ -24,7 +24,10 @@ drag-install app; v0.6.1 adds moving an existing folder install into the app.
 v0.7.0 turns the names fix on (Favor my words), journals each dictation
 before its paste, and tries an update on your own recordings first. v0.7.1 is
 the first whose Mac download is signed with a Developer ID and notarized by
-Apple.
+Apple. v0.7.2 makes first run plainer: the permissions window walks both
+switches in order and clears an old grant macOS stopped honouring in one
+click, setup shows its step and the time so far, and the guide's finish
+shows what the first dictation did.
 
 **What a default install contains.** On a Mac: Parakeet Unified (English) and
 Whisper Tiny. Whisper large-v3-turbo and the Qwen3.5-4B cleanup model (with

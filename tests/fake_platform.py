@@ -484,6 +484,8 @@ class Listener:
         self.alive = False
 
     def start(self):
+        self.desktop.opened_on.append(
+            ("listener", threading.current_thread() is threading.main_thread()))
         self.running = self.alive = True
         self.desktop.listeners.append(self)
 
@@ -516,6 +518,8 @@ class InputStream:
         desktop.streams.append(self)
 
     def start(self):
+        self.desktop.opened_on.append(
+            ("stream", threading.current_thread() is threading.main_thread()))
         if self.closed:
             raise RuntimeError("stream closed")
         if self.desktop.microphone_fails:
@@ -767,6 +771,9 @@ class Desktop:
         self.pastes = []
         self.listeners = []
         self.streams = []
+        # (what started, whether on the main thread): a microphone stream or
+        # the key listener. The main thread must be free for the event loop.
+        self.opened_on = []
         self.microphone_fails = False
         self.default_input = "Built-in Microphone"
         self.portaudio_default = self.default_input

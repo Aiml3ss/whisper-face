@@ -398,17 +398,17 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.notice.capture.error": "Could not change capture state: {error}",
         "overview.notice.status.error": "Status unavailable: {error}",
         "onboarding.permissions.title": "First, let me hear you",
-        "onboarding.permissions.detail": "Microphone so I can hear you, Accessibility so I can type for you, Input Monitoring so your key works. You grant them in System Settings — I never change them\u00a0myself.",
+        "onboarding.permissions.detail": "Microphone so I can hear you, Accessibility so I can type for you, Input Monitoring so your key works. Switch Whisper Face on in each, in order; each one ticks itself off as soon as macOS\u00a0agrees.",
         "onboarding.hotkey.title": "Now try your key",
-        "onboarding.hotkey.detail": "Hold {hotkey}, say a few words, then let go. This step only ticks once Whisper Face observes capture on this Mac — no\u00a0pretending.",
-        "onboarding.models.title": "Getting your models ready",
-        "onboarding.models.detail": "The recognition models unpack here the first time you run. One ready engine is all you need; the rest can keep warming in the\u00a0background.",
-        "onboarding.first_dictation.title": "Say something",
-        "onboarding.first_dictation.detail": "Click into any text field, hold your key, and speak one sentence. If the focus moves before it lands, your words wait in the Voice Outbox under Copy\u00a0&\u00a0Dismiss.",
+        "onboarding.hotkey.detail": "Hold {hotkey}, say “hello”, then let go. This ticks itself off the moment I really hear\u00a0you.",
+        "onboarding.models.title": "Loading the speech model",
+        "onboarding.models.detail": "The first time, it takes a minute to load on this Mac. One ready model is all you need; any others can finish while you\u00a0talk.",
+        "onboarding.first_dictation.title": "Now say hello for real",
+        "onboarding.first_dictation.detail": "Click into any text box, in Notes, Mail or a chat, hold {hotkey} and say “hello”. It types where you clicked. If you click away first, your words wait in the Voice Outbox under Copy\u00a0&\u00a0Dismiss.",
         "onboarding.status.done": "Done",
         "onboarding.status.attention": "Needs attention",
         "onboarding.status.try": "Try it now",
-        "onboarding.status.warming": "Warming up",
+        "onboarding.status.warming": "Loading",
         "onboarding.status.turn": "Your turn",
         "onboarding.status.checking": "Checking",
         "onboarding.progress": "SETTING UP · {completed} OF {total} DONE",
@@ -430,6 +430,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.complete.progress": "ALL SET · {total} OF {total} CONFIRMED",
         "onboarding.complete.title": "Nice. You’re ready.",
         "onboarding.complete.detail": "Permissions, your key, a local model, and one real dictation — all four confirmed on this Mac. Hold your key anywhere you can type and just\u00a0talk.",
+        "onboarding.complete.proof.one": "It heard you: 1 word, typed in {seconds}\u00a0s, and none of it left this Mac. Hold your key anywhere you can type and just\u00a0talk.",
+        "onboarding.complete.proof": "It heard you: {words} words, typed in {seconds}\u00a0s, and none of it left this Mac. Hold your key anywhere you can type and just\u00a0talk.",
         "onboarding.complete.status": "Every step confirmed",
         "onboarding.accessibility.progress_track": "First run setup progress",
         "onboarding.privacy": "Everything you say stays on this Mac.",
@@ -1209,9 +1211,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.permission.checking": "Checking",
         "onboarding.permission.open.label": "Open {permission} settings",
         "onboarding.permission.open.help": "Open System Settings › Privacy & Security › {permission}. Whisper Face does not change permissions.",
-        "onboarding.row.hotkey.caption": "Hold it, say a few words, then let go",
+        "onboarding.row.hotkey.caption": "Hold it, say “hello”, then let go",
         "onboarding.row.models.caption": "Waiting for the first local model to report in",
-        "onboarding.row.first_dictation.caption": "Click into a text field, hold your key and say one sentence",
+        "onboarding.row.first_dictation.caption": "Click into a text box, hold your key and say “hello”",
         "onboarding.row.accessibility.status": "{row} status",
         "onboarding.action.waiting.help": "Available once every permission above is allowed in System Settings.",
 
@@ -1274,7 +1276,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "installer.quit": "Quit",
         "installer.face.label": "Whisper Face",
         "installer.welcome.title": "Set up Whisper Face",
-        "installer.welcome.body": "The first time, Whisper Face downloads about 1\u00a0GB: the speech model (565\u00a0MB), a small preview model (75\u00a0MB) and the parts they run on. It takes a while, and you can keep working. Your voice never leaves this Mac.",
+        "installer.welcome.body": "The first time, Whisper Face downloads about 1\u00a0GB: the speech model (565\u00a0MB), a small preview model (75\u00a0MB) and the parts they run on. You can keep working while it runs. Then you switch on two permissions and try your key. Your voice never leaves this Mac.",
         "installer.welcome.action": "Set Up",
         "installer.move.title": "Move Whisper Face to Applications",
         "installer.move.body": "Whisper Face sets itself up from your Applications folder. It moves itself there and opens again.",
@@ -1288,9 +1290,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "installer.space.body": "Whisper Face needs 5\u00a0GB free to set up. Free some space on this Mac, then try again.",
         "installer.space.action": "Try Again",
         "installer.running.title": "Setting up Whisper Face",
-        "installer.running.body": "This takes a while the first time. You can keep working while it runs.",
+        "installer.running.body": "Most of the time goes on downloading, so it depends on your connection. You can keep working while it runs.",
         "installer.checklist.label": "Setup steps",
         "installer.progress.label": "Setup progress",
+        "installer.progress.started": "Step {step} of {total} · just started",
+        "installer.progress.minute": "Step {step} of {total} · 1 minute so far",
+        "installer.progress.minutes": "Step {step} of {total} · {minutes} minutes so far",
         "installer.phase.prepare": "Getting ready",
         "installer.phase.python": "Downloading the parts it runs on",
         "installer.phase.speech-model": "Downloading the speech model",
@@ -1366,13 +1371,21 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         # The small window the running app shows while macOS has not given
         # it Accessibility or Input Monitoring (PermissionHelpWindowController).
         "permission_help.window.title": "Whisper Face Permissions",
-        "permission_help.title": "Whisper Face needs your permission",
-        "permission_help.body": "macOS hasn’t switched these on for Whisper Face yet. Open each one and switch Whisper Face on.",
+        "permission_help.title": "Two switches and you’re in",
+        "permission_help.body": "Switch Whisper Face on in each list, in this order. Each button opens the right page of System Settings, and this window ticks each one off by itself.",
         "permission_help.open": "Open Settings",
         "permission_help.open.label": "Open {permission} settings",
-        "permission_help.toggle": "If Whisper Face is already listed and switched on, switch it off and on again.",
+        "permission_help.on": "On",
+        "permission_help.row.on": "{permission}, on",
+        "permission_help.row.off": "{permission}, not on yet",
         "permission_help.closes": "This window closes by itself once both are on.",
+        "permission_help.suspect": "Switched it on and nothing changed? macOS may be holding an old switch from an earlier copy of Whisper Face. Switching it off and on won’t fix that, but asking macOS again will.",
+        "permission_help.suspect.action": "Ask macOS Again…",
         "permission_help.still": "Still Not Working…",
+        "permission_help.stale.title": "macOS needs to ask again",
+        "permission_help.stale.body": "Whisper Face has worked on this Mac before, so its switches in System Settings may still look on, but macOS has stopped honouring them. This happens after an update, and switching them off and on doesn’t help.",
+        "permission_help.stale.note": "Clear and Start Again removes Whisper Face’s own Accessibility and Input Monitoring entries and restarts it, and macOS asks you afresh. Nothing else in System Settings changes.",
+        "permission_help.stale.later": "Not Now",
         "permission_help.confirm.title": "Ask macOS again?",
         "permission_help.confirm.body": "Whisper Face can clear its own Accessibility and Input Monitoring entries so macOS asks you afresh, then start again. Nothing else in System Settings changes.",
         "permission_help.confirm.action": "Clear and Start Again",
@@ -3532,12 +3545,28 @@ def _build_onboarding_steps(
         ),
         OnboardingStep(
             "first_dictation", copy("onboarding.first_dictation.title"),
-            copy("onboarding.first_dictation.detail"),
+            copy("onboarding.first_dictation.detail", hotkey=hotkey_label),
             copy("onboarding.status.done") if first_dictation_complete else copy(
                 "onboarding.status.turn"),
             first_dictation_complete,
         ),
     )
+
+
+def _first_dictation_proof(word_count: int | None, latency_ms: float | None,
+                           locale: str) -> str:
+    """"It heard you: 4 words, typed in 0.9 s", or "" without both numbers."""
+    try:
+        words = int(word_count or 0)
+        seconds = float(latency_ms or 0.0) / 1000.0
+    except (TypeError, ValueError):
+        return ""
+    if words <= 0 or not math.isfinite(seconds) or seconds <= 0:
+        return ""
+    return localized_string(
+        "onboarding.complete.proof.one" if words == 1
+        else "onboarding.complete.proof", locale=locale,
+        words=words, seconds=f"{seconds:.1f}")
 
 
 def onboarding_presentation(
@@ -3546,8 +3575,14 @@ def onboarding_presentation(
     acknowledged: bool,
     locale: str = "en",
     permission_missing: bool = True,
+    word_count: int | None = None,
+    latency_ms: float | None = None,
 ) -> OnboardingPresentation:
-    """Build the active-step or explicit completion presentation."""
+    """Build the active-step or explicit completion presentation.
+
+    Once every step is done, the last dictation's own numbers are the
+    proof it worked: how many words, and how fast they were typed.
+    """
 
     total = len(steps)
     completed = sum(step.complete for step in steps)
@@ -3561,8 +3596,8 @@ def onboarding_presentation(
                 "onboarding.complete.progress", locale=locale, total=total),
             title=localized_string(
                 "onboarding.complete.title", locale=locale),
-            detail=localized_string(
-                "onboarding.complete.detail", locale=locale),
+            detail=_first_dictation_proof(word_count, latency_ms, locale)
+            or localized_string("onboarding.complete.detail", locale=locale),
             status=localized_string(
                 "onboarding.complete.status", locale=locale),
             action_title=localized_string(
@@ -11815,6 +11850,8 @@ if APPKIT_AVAILABLE:
                 acknowledged=state.onboarding_acknowledged,
                 locale=self.view_model.locale,
                 permission_missing=bool(state.missing_permissions),
+                word_count=state.last_word_count,
+                latency_ms=state.last_latency_ms,
             )
             self._onboarding_presentation = presentation
             # Setup has the window to itself only while it is what Home is
@@ -20089,11 +20126,14 @@ def run_native_appkit_smoke(*, construction_only: bool = False
 # --- Permission help -------------------------------------------------------
 # When macOS has not given the app Accessibility or Input Monitoring, the
 # runtime shows a small window that names what is missing and opens the exact
-# System Settings page for each. A launcher rebuilt with a new code identity
-# leaves its old entries listed and switched on but no longer applying, and
-# macOS then asks nothing; switching the entry off and on, or as a last
-# resort clearing this app's own two entries so macOS asks afresh, is the
-# way out. Nobody should need Terminal for it.
+# System Settings page for each, one after the other. A launcher with a new
+# code identity (an update of an ad hoc signed app, a rebuild) leaves its old
+# entries listed and switched on but no longer applying, and macOS then asks
+# nothing; switching the entry off and on does not help. The window says so
+# itself: at once when this Mac has dictated before (the grants existed, so
+# losing them means a stale entry), or once the person has been to Settings
+# and nothing changed. Its way out is clearing this app's own two entries so
+# macOS asks afresh. Nobody should need Terminal for it.
 
 LAUNCHER_BUNDLE_ID = "com.berg.whisper-face.launcher"
 # (permission key, System Settings anchor, tccutil service, catalog name key)
@@ -20110,7 +20150,11 @@ TCCUTIL = "/usr/bin/tccutil"
 PERMISSION_HELP_EVENTS = frozenset({
     "shown", "opened_settings", "still_not_working", "reset_cancelled",
     "reset_confirmed", "reset_done", "reset_failed", "granted",
+    "stale_detected", "stale_suspected",
 })
+# How long after the person opened a permission's page a still-missing
+# permission reads as an old entry macOS is holding, not one still to switch.
+PERMISSION_STALE_SUSPECT_SECONDS = 45.0
 
 
 def permission_settings_url(permission: str) -> str:
@@ -20154,8 +20198,13 @@ class PermissionHelpFlow:
     ``opener`` opens a URL, ``runner`` runs one command and returns its exit
     status, ``restart`` replaces the process the way the permission re-check
     does, ``record`` writes one log line, ``probe`` reports what is still
-    missing from a fresh process. All are injected, so tests use fakes and
-    never open Settings or touch TCC.
+    missing from a fresh process, ``clock`` reads seconds. All are injected,
+    so tests use fakes and never open Settings or touch TCC.
+
+    ``worked_before`` is the runtime's evidence that Whisper Face has
+    dictated on this Mac, so both grants existed once: a permission missing
+    now is an old entry macOS stopped honouring, and the window opens on
+    the way out of that (``stale``) instead of on the switches.
     """
 
     missing: tuple[str, ...]
@@ -20164,18 +20213,37 @@ class PermissionHelpFlow:
     restart: Callable[[], Any]
     record: Callable[[str], Any]
     probe: Callable[[], Sequence[str]] = lambda: ()
-    stage: str = "missing"          # "missing" | "confirm" | "failed"
+    stage: str = "missing"   # "missing" | "stale" | "confirm" | "failed"
+    worked_before: bool = False
+    clock: Callable[[], float] = time.monotonic
+    opened_at: float | None = None
+    suspected: bool = False
 
     def __post_init__(self) -> None:
         self.missing = tuple(key for key in PERMISSION_HELP_KEYS
                              if key in tuple(self.missing))
+        if self.worked_before and self.missing and self.stage == "missing":
+            self.stage = "stale"
+
+    @property
+    def granted(self) -> tuple[str, ...]:
+        return tuple(key for key in PERMISSION_HELP_KEYS
+                     if key not in self.missing)
+
+    @property
+    def next_missing(self) -> str:
+        """The permission to switch on next, in the window's order."""
+        return self.missing[0] if self.missing else ""
 
     def shown(self) -> None:
         self.record(permission_help_record("shown", self.missing))
+        if self.stage == "stale":
+            self.record(permission_help_record("stale_detected", self.missing))
 
     def open_settings(self, permission: str) -> None:
         url = permission_settings_url(permission)
         self.record(permission_help_record("opened_settings", (permission,)))
+        self.opened_at = self.clock()
         self.opener(url)
 
     def still_not_working(self) -> None:
@@ -20188,7 +20256,7 @@ class PermissionHelpFlow:
 
     def reset(self, *, confirmed: bool) -> bool:
         """Clear this app's own entries and start again; only on a click."""
-        if not confirmed or self.stage != "confirm":
+        if not confirmed or self.stage not in ("confirm", "stale"):
             return False
         self.record(permission_help_record("reset_confirmed"))
         for command in permission_reset_commands():
@@ -20205,13 +20273,30 @@ class PermissionHelpFlow:
         return True
 
     def update(self, missing: Sequence[str]) -> bool:
-        """Take a fresh reading; True once nothing is missing."""
+        """Take a fresh reading; True once nothing is missing.
+
+        While the person works through System Settings, a permission that
+        just came on sends them straight to the next one's page, and one
+        still off long after they went to switch it reads as an old entry
+        (``suspected``), which the window answers with the way out.
+        """
+        before = self.missing
         self.missing = tuple(key for key in PERMISSION_HELP_KEYS
                              if key in tuple(missing))
-        if self.missing:
-            return False
-        self.record(permission_help_record("granted"))
-        return True
+        if not self.missing:
+            self.record(permission_help_record("granted"))
+            return True
+        if (self.stage == "missing" and self.opened_at is not None
+                and len(self.missing) < len(before)):
+            self.open_settings(self.next_missing)
+        elif (self.stage == "missing" and not self.suspected
+                and self.opened_at is not None
+                and self.clock() - self.opened_at
+                >= PERMISSION_STALE_SUSPECT_SECONDS):
+            self.suspected = True
+            self.record(permission_help_record(
+                "stale_suspected", self.missing))
+        return False
 
 
 PERMISSION_HELP_WIDTH = 460.0
@@ -20274,6 +20359,21 @@ if APPKIT_AVAILABLE:
             return button
 
         @objc.python_method
+        def _row_icon(self, granted, number, dark):
+            """A check once a permission is on; its place in the order before."""
+            icon = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 20, 20))
+            image = _symbol_image(
+                "checkmark.circle.fill" if granted else f"{number}.circle",
+                size=17.0, weight="semibold")
+            if image is not None:
+                icon.setImage_(image)
+            icon.setContentTintColor_(
+                _token_color("brand_ink", dark) if granted else _theme_color(
+                    palette_for_appearance(dark).ink_soft))
+            icon.setAccessibilityElement_(False)
+            return icon
+
+        @objc.python_method
         def render(self):
             """Lay the window out for the flow's current stage."""
             for view in list(self.content.subviews()):
@@ -20294,12 +20394,14 @@ if APPKIT_AVAILABLE:
             face.setAccessibilityElement_(False)
             self.content.addSubview_(face)
             y += 56 + 16
-            confirm = self.flow.stage == "confirm"
-            title_key = ("permission_help.confirm.title" if confirm
-                         else "permission_help.title")
+            stage = self.flow.stage
+            title_key = {"confirm": "permission_help.confirm.title",
+                         "stale": "permission_help.stale.title"}.get(
+                             stage, "permission_help.title")
             body_key = {"confirm": "permission_help.confirm.body",
+                        "stale": "permission_help.stale.body",
                         "failed": "permission_help.failed"}.get(
-                            self.flow.stage, "permission_help.body")
+                            stage, "permission_help.body")
             for key, role, color, gap in (
                     (title_key, "page_title", ink, 6.0),
                     (body_key, "row_caption", soft, 16.0)):
@@ -20308,58 +20410,94 @@ if APPKIT_AVAILABLE:
                 label.setFrame_(NSMakeRect(pad, y, width, height))
                 self.content.addSubview_(label)
                 y += height + gap
-            if not confirm:
+            if stage in ("missing", "failed"):
+                # Both switches, in the order to do them: a check once one
+                # is on, the next one's button the default.
+                icon_width = 20.0 + 10.0
                 for index, key in enumerate(PERMISSION_HELP_KEYS):
-                    if key not in self.flow.missing:
-                        continue
+                    granted = key not in self.flow.missing
                     name_key = PERMISSION_HELP_PANES[index][3]
                     name = localized_string(name_key)
-                    button = self._button(
-                        localized_string("permission_help.open"),
-                        "openSettings:", index)
-                    button.setAccessibilityLabel_(localized_string(
-                        "permission_help.open.label", permission=name))
-                    button_width = float(button.frame().size.width)
-                    text_width = width - button_width - 12
+                    if granted:
+                        trailing = self._text(
+                            localized_string("permission_help.on"),
+                            "row_caption", soft, 120.0)[0]
+                        trailing.sizeToFit()
+                    else:
+                        trailing = self._button(
+                            localized_string("permission_help.open"),
+                            "openSettings:", index)
+                        trailing.setAccessibilityLabel_(localized_string(
+                            "permission_help.open.label", permission=name))
+                        if key == self.flow.next_missing:
+                            trailing.setKeyEquivalent_("\r")
+                        self.buttons[key] = trailing
+                    trailing_width = float(trailing.frame().size.width)
+                    text_width = width - icon_width - trailing_width - 12
                     title, title_height = self._text(
                         name, "row_title", ink, text_width)
+                    title.setAccessibilityLabel_(localized_string(
+                        "permission_help.row.on" if granted
+                        else "permission_help.row.off", permission=name))
                     why, why_height = self._text(
                         localized_string(f"{name_key}.why"), "row_caption",
                         soft, text_width)
-                    title.setFrame_(NSMakeRect(pad, y, text_width, title_height))
+                    title.setFrame_(NSMakeRect(
+                        pad + icon_width, y, text_width, title_height))
                     why.setFrame_(NSMakeRect(
-                        pad, y + title_height + 2, text_width, why_height))
+                        pad + icon_width, y + title_height + 2, text_width,
+                        why_height))
                     row_height = max(title_height + 2 + why_height, 28.0)
-                    button.setFrameOrigin_((
-                        pad + width - button_width,
-                        y + (row_height - float(button.frame().size.height)) / 2))
-                    for view in (title, why, button):
+                    icon = self._row_icon(granted, index + 1, dark)
+                    icon.setFrameOrigin_((pad, y + 1))
+                    trailing.setFrameOrigin_((
+                        pad + width - trailing_width,
+                        y + (row_height - float(trailing.frame().size.height)) / 2))
+                    for view in (icon, title, why, trailing):
                         self.content.addSubview_(view)
-                    self.buttons[key] = button
                     y += row_height + 14
-                for key in ("permission_help.toggle", "permission_help.closes"):
+                if stage == "missing":
+                    suspect = self.flow.suspected
+                    key = ("permission_help.suspect" if suspect
+                           else "permission_help.closes")
                     label, height = self._text(
                         localized_string(key), "row_caption",
-                        ink if key == "permission_help.toggle" else soft, width)
+                        ink if suspect else soft, width)
                     label.setFrame_(NSMakeRect(pad, y, width, height))
                     self.content.addSubview_(label)
                     y += height + 8
+            elif stage == "stale":
+                label, height = self._text(
+                    localized_string("permission_help.stale.note"),
+                    "row_caption", ink, width)
+                label.setFrame_(NSMakeRect(pad, y, width, height))
+                self.content.addSubview_(label)
+                y += height + 8
             y += 12
             row = []
-            if confirm:
+            if stage in ("confirm", "stale"):
                 cancel = self._button(
-                    localized_string("permission_help.confirm.cancel"),
+                    localized_string("permission_help.confirm.cancel"
+                                     if stage == "confirm"
+                                     else "permission_help.stale.later"),
                     "cancelReset:")
                 cancel.setKeyEquivalent_("\x1b")
                 clear = self._button(
                     localized_string("permission_help.confirm.action"),
                     "confirmReset:")
-                clear.setHasDestructiveAction_(True)
+                if stage == "stale":
+                    # The way out is the point of this stage, so Return
+                    # takes it; under "Still Not Working" it stays a choice.
+                    clear.setKeyEquivalent_("\r")
+                else:
+                    clear.setHasDestructiveAction_(True)
                 row = [cancel, clear]
                 self.buttons["cancel"], self.buttons["confirm"] = cancel, clear
-            elif self.flow.stage == "missing":
+            elif stage == "missing":
                 still = self._button(
-                    localized_string("permission_help.still"),
+                    localized_string("permission_help.suspect.action"
+                                     if self.flow.suspected
+                                     else "permission_help.still"),
                     "stillNotWorking:")
                 still.setFrameOrigin_((pad, y))
                 self.content.addSubview_(still)
@@ -20417,7 +20555,7 @@ if APPKIT_AVAILABLE:
                 return
             if self.flow.update(tuple(missing or ())):
                 self.close()
-            elif self.flow.stage == "missing":
+            elif self.flow.stage in ("missing", "stale"):
                 self.render()
 
         @objc.python_method

@@ -19,7 +19,7 @@ app. An unsigned app is accepted only from a preview build. A signed build
 signs `uv` and then the app with the hardened runtime, a secure timestamp and
 the microphone entitlement, then notarizes and staples the app before the disk
 image is made, and signs, notarizes and staples the disk image too. v0.7.1 is
-the first release built that way.
+the first release built that way, and v0.7.2 is built the same way.
 
 ## What published releases carry today
 

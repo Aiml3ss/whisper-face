@@ -69,6 +69,10 @@ def booted() -> fake_platform.FakeMac:
                 traceback.format_exception(MAC.boot_error)))
     if not MAC.wait_until(MAC.warmed_up, 10.0):
         raise AssertionError("warm-up did not finish\n" + MAC.log_tail())
+    # The key listener starts beside the event loop, once the microphone
+    # has opened.
+    if not MAC.wait_until(lambda: MAC.desktop.listeners, 10.0):
+        raise AssertionError("the key listener never started\n" + MAC.log_tail())
     return MAC
 
 
@@ -126,6 +130,22 @@ class BootTests(unittest.TestCase):
         loops = [call for call in mac.desktop.main_thread_calls
                  if call[0] == "runEventLoop"]
         self.assertEqual(len(loops), 1, mac.log_tail())
+
+    def test_the_menu_bar_is_live_before_the_microphone_opens(self):
+        # The menu-bar face is drawn, and answers a click, only while the
+        # main thread runs its event loop. The first microphone open on a
+        # new Mac waits for the answer to macOS's microphone question, so
+        # it, and the key listener after it, start on another thread.
+        mac = booted()
+        opened = list(mac.desktop.opened_on)
+        self.assertIn(("stream", False), opened)
+        self.assertIn(("listener", False), opened)
+        self.assertEqual([what for what, on_main in opened if on_main], [],
+                         mac.log_tail())
+        startup = [thread for thread in threading.enumerate()
+                   if thread.name == mac.dictate.STARTUP_THREAD_NAME]
+        # Its work is done by now; a thread still alive would be one stuck.
+        self.assertEqual(startup, [])
 
     def test_the_window_is_built_with_every_action_main_wires(self):
         mac = booted()
