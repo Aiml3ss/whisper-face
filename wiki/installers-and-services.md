@@ -46,8 +46,10 @@ reruns are idempotent.
 - **The launcher app** exists so macOS attributes Input Monitoring /
   Accessibility / Microphone to one grantable "Whisper Face" identity
   that survives reinstalls. The bundle contains no runtime or paths;
-  machine binding lives in an outside 0600 receipt; local builds get a
-  deterministic ad-hoc signature; at runtime it starts the existing
+  machine binding lives in an outside 0600 receipt; local builds are
+  signed with the owner's Developer ID when the keychain holds one of the
+  pinned team (so permissions survive rebuilds) and get a deterministic
+  ad-hoc signature otherwise; at runtime it starts the existing
   service and writes exactly one byte to a PID+revision-bound 0600
   socket to show the GUI.
 - **Verify modes** are read-only and never repair: tools, helper,

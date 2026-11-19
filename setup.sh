@@ -1135,12 +1135,19 @@ verify_install() {
             --receipt "$launcher_receipt" \
             --installed-runtime >/dev/null \
             || fail "the Whisper Face app or its link to this copy is missing or stale; open Whisper Face to set it up again"
+        echo "== launcher signature: $("$uv_bin" run --quiet --no-project \
+            --python "$PYTHON_VERSION" "$DIR/scripts/macos_launcher_app.py" \
+            signature --app "$APP_BUNDLE" 2>/dev/null || echo unreadable)"
     elif [ "$MODE" = "full" ]; then
         python3 "$DIR/scripts/macos_launcher_app.py" verify \
             --app "$launcher_app" --checkout "$DIR" \
             --receipt "$launcher_receipt" \
             --installed-runtime >/dev/null \
             || fail "Whisper Face launcher app is missing or stale"
+        # Developer ID (team and bundle ID) or ad hoc (its code hash): which
+        # one macOS uses to remember the launcher's permissions.
+        echo "== launcher signature: $(python3 "$DIR/scripts/macos_launcher_app.py" \
+            signature --app "$launcher_app" 2>/dev/null || echo unreadable)"
     fi
     "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null \
         || fail "the Python lock does not match dictate.py; rerun ./setup.sh"

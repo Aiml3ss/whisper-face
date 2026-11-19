@@ -99,8 +99,9 @@ never constructs a second settings GUI; the checkout-backed menu-bar service
 continues to own its UI.
 Rerunning the installer replaces only an app owned by this launcher contract.
 For a DMG install it copies and digest-checks the packaged app without rewriting
-it, preserving any Developer ID signature; for a source checkout it builds an
-unsigned (ad-hoc) app locally. A working ad-hoc app already in place is kept
+it, preserving any Developer ID signature; for a source checkout it builds the app locally, signed with the pinned
+team's Developer ID when this Mac's keychain holds one and ad hoc otherwise
+(see [Folder installs](#folder-installs)). A working ad-hoc app already in place is kept
 rather than swapped for another ad-hoc app, because its code hash is its
 privacy identity and swapping it would cost the user every permission grant. `./setup.sh --verify` checks the app structure and
 signature when present, exact receipt digest and checkout/revision binding, and
@@ -259,19 +260,43 @@ something to execute and the disk image as something to open.
 ### Folder installs
 
 A folder install (`Install.command` in a source checkout or a git clone)
-builds its own launcher with `swiftc` and signs it ad hoc. Its privacy
-identity is then its code hash, so a rebuild after the launcher source changes
-costs every permission. Signing that local launcher with this Developer ID
-when the identity is in the keychain would let permissions survive rebuilds,
-because macOS would then identify it by team and bundle identifier, and the
-verifier already accepts a launcher signed by the pinned team. It is not
-implemented: `setup.sh` also runs from the in-app updater and other
-unattended paths, where `codesign` can stop on a keychain prompt or fail
-without one, and the identity exists only on the owner's Mac. If wanted, it
-belongs behind an explicit opt-in that names the identity, falls back to the
-ad-hoc build on any signing failure, signs with the hardened runtime and the
-same microphone entitlement, and replaces a working ad-hoc launcher once,
-costing its permissions that one time.
+builds its own launcher with `swiftc`. When the login keychain holds a valid
+`Developer ID Application: <name> (<team>)` identity whose team is the one
+pinned in `config/macos-signing-policy.json`, `macos_launcher_app.py install`
+signs that launcher with it, as `package_macos.sh --sign` signs a release's:
+the hardened runtime, a secure timestamp and only the microphone entitlement.
+Its designated requirement is then the pinned team plus the bundle ID, which
+stays the same across rebuilds, so macOS keeps its Accessibility, Input
+Monitoring and microphone permissions. Otherwise the launcher is signed ad
+hoc, as before, and its privacy identity is its code hash, so a rebuild after
+the launcher source changes costs every permission.
+
+- **Choosing.** `security find-identity -v -p codesigning` lists the valid
+  identities without prompting; the first Developer ID Application identity of
+  the pinned team is used, by its SHA-1 hash. Setting
+  `WHISPER_FACE_LAUNCHER_SIGNING=adhoc` keeps the ad-hoc build.
+- **Falling back.** `setup.sh` also runs from the in-app updater and other
+  unattended paths, where a keychain prompt would wait forever. codesign runs
+  with no input and is stopped after 60 seconds; if it fails, is stopped, or
+  produces a launcher that does not pass the signed-launcher checks, the
+  launcher is signed ad hoc with one plain line saying why, and the install
+  goes on. No password is ever asked for or handled.
+- **Once.** A working ad-hoc launcher on a Mac that can sign is replaced by a
+  signed one, which costs its permissions that one time. If that signing
+  fails, the working ad-hoc launcher is kept rather than swapped for another
+  ad-hoc build, and the next run tries again. A signed launcher whose source
+  and icon match the checkout is current and is never rebuilt, on this Mac or
+  one without the identity. An ad-hoc launcher packaged beside a release
+  folder is not used on a Mac that can sign; the launcher is built and signed
+  there instead.
+- **Checking.** Every check of an installed or packaged launcher that is not
+  ad hoc requires the pinned team's designated requirement, the hardened
+  runtime, a secure timestamp and exactly the microphone entitlement.
+  `./setup.sh --verify` prints `== launcher signature:` with the signer and
+  team, or `ad hoc` and whether this Mac could sign it.
+
+The drag-install app is never rebuilt or re-signed on the Mac it runs on: app
+mode verifies and adopts it as released.
 
 ## GitHub release automation
 
