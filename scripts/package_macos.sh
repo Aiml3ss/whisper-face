@@ -278,8 +278,11 @@ print(payload["id"])
     python3 -c '
 import json, sys
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
-issues = payload.get("issues", [])
-if not isinstance(issues, list):
+# Apple writes "issues": null when there are none.
+issues = payload.get("issues")
+if issues is None:
+    issues = []
+if not isinstance(issues, list) or payload.get("status") != "Accepted":
     raise SystemExit("Apple notarization log has an unexpected format")
 for issue in issues:
     print("notary issue:", issue, file=sys.stderr)

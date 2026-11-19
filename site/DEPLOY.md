@@ -56,6 +56,7 @@ To use the repository's beacon instead: dashboard → **Web Analytics** → add 
 ## Before going live
 
 - The download buttons already point at a real release: `src/data/release.ts` holds the version, tag, DMG, size, release-notes and SHA256SUMS URLs, and every link on the site reads from there. Update those values when cutting a release.
-- That build is ad-hoc signed but **not** notarized, which is what `RELEASE.unsigned` records; the install section shows the Gatekeeper note because of it. Once a Developer ID build ships, set `unsigned: false` so the note disappears.
+- From 0.7.1 the Mac build is signed with the Developer ID, notarized and stapled, so `RELEASE.unsigned` is `false` and the install section shows no Open Anyway note. Releases up to 0.7.0 were ad-hoc signed and not notarized; set it back to `true` only for a build that is not notarized.
+- `size` and `windowsSize` read `SIZE-PENDING` until the assets are uploaded; replace them with the published sizes before deploying.
 - Swap placeholder copy in `src/content/` and the components as needed.
 - Re-render `public/og.png` if the tagline changes.

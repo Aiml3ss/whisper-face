@@ -23,7 +23,7 @@ microphone -> local ASR -> VoiceIR/Compiler -> local Ollama -> insertion lease
     |              |               |           (optional)          |
     + RAM audio    + model files   + context   + 127.0.0.1 only    + target app
 
-release producer -> Git commit -> unsigned (ad-hoc) artifact -> local installer
+release producer -> Git commit -> hand-built signed, notarized artifact -> local installer
 Check for Updates -> git fetch of tracked branch -> checkout -> installer run
 Check for Updates (app copy) -> release manifest -> click -> disk image + source
     -> advisor + package verifier -> new app -> its update: switch, setup, put back
@@ -74,7 +74,7 @@ application alone can prevent. They remain important deployment risks.
 | Persistent audio | Hold-to-talk and Flight Recorder keep audio in RAM; recorder is opt-in and visibly indicated. | OS/audio drivers and unrelated software are outside the process boundary. |
 | Private-state disclosure | Gitignored files, installer-created user-only permissions on Mac, a transcript log bounded to 500 entries and 30 days. | The logged-in user, backups, cloud-synced folders, and privileged software can read the files. Private state lives inside the checkout. On Windows `transcripts.jsonl` and `learned.json` get no owner-only ACL. |
 | Model or dependency drift | Whisper, Parakeet, FluidAudio, and Qwen artifacts/revisions are pinned and verified; every `uv` call runs on CPython 3.12; `dictate.py.lock` pins Python packages and is verified on every pull request; `tests/test_supply_chain_integrity.py` fails closed when the runtime, model wallet, benchmark scorecard, and third-party notices disagree about a revision or a locked version, or when CI runs an action that is not pinned to a full commit. | Upstream package installers and first download remain supply-chain dependencies. The weekly `model-audit.yml` check is the only thing that notices an upstream repository changing underneath a pinned revision. |
-| Release substitution | Published releases carry an exact Git archive and SHA256SUMS. The release workflow is designed to add a Developer ID signature, notarization, stapling, and a signed SLSA build-provenance attestation, but every release published so far was packaged by hand as an unsigned preview with none of those. See [release-provenance.md](release-provenance.md). | Whoever can replace a release asset can replace the checksum file beside it. The ad-hoc signed launcher and unsigned disk image give a downloader no proof of origin. The update manifest is not independently signed. |
+| Release substitution | Published releases carry an exact Git archive and SHA256SUMS. From 0.7.1 the Mac app and disk image carry a Developer ID signature from the pinned team, notarization, and a stapled ticket, which `spctl` and `xcrun stapler validate` check. Releases up to 0.7.0 were unsigned previews (an ad-hoc signed app, a disk image not notarized). The release workflow is designed to add a signed SLSA build-provenance attestation, but every release so far, 0.7.1 included, was built and uploaded by hand without one. See [release-provenance.md](release-provenance.md). | Whoever can replace a release asset can replace the checksum file beside it. The Developer ID signature names the signer, not the source revision or the build machine, and no attestation ties a release to a CI run. Releases up to 0.7.0 give a downloader no proof of origin. The update manifest is not independently signed. The Windows zip is not code-signed. |
 | Update path | **Check for Updates…** runs only when the user chooses it, refuses a checkout with local changes or local commits, and rolls back to the last revision that installed cleanly. For a copy the drag-install app set up it follows published releases only: it offers a strictly newer release on the app's channel, downloads nothing before a click, verifies the disk image and source archive against the release manifest with the advisor's rules (and, for a stable release, `codesign`, `stapler` and the pinned Developer ID), proves the new app against its release's own launcher contract, and puts the previous copy back if the new one's setup fails. | **Open.** For folder and clone installs it fetches the tip of the tracked branch and runs that revision's installer with no release-tag, signature, or provenance check, so users receive unreleased commits. For the app's copy, a preview (unsigned) release is trusted only as far as HTTPS to GitHub and the manifest's digests go, and the manifest itself is not independently signed. |
 | Borrowed privacy grants | launchd starts the runtime through the Whisper Face launcher, so macOS attributes Input Monitoring, Accessibility, and Microphone to Whisper Face. | **Open.** Those grants are not confined to the reviewed runtime. The launcher, and the user-writable checkout it starts, sit inside the same trust boundary as everything else running as the logged-in user, so software already running as that user can act with all three grants without a new prompt. |
 | Speech leaving the machine | `tests/test_network_egress.py` checks that no first-party module on the dictation path imports a network client, enumerates every socket call site in the runtime, drives a synthetic utterance through the compile path against an instrumented socket, `urllib`, and `http.client`, and runs the shipping cleanup client against a live loopback proxy. The cleanup client reaches only `127.0.0.1:11434`, ignores environment and system proxies, and sends nothing when the model is not installed. Windows loads models from local files only at runtime. | A dynamic check only covers the code a test executes; a structural check cannot see through `getattr`. Neither observes the operating system, the installed model processes, or a compromised dependency's own traffic. It is a tripwire, not a proof. |
@@ -92,7 +92,8 @@ application alone can prevent. They remain important deployment risks.
    source and notices, and is verifiable before installation.
 6. A production Mac artifact is signed, notarized, stapled, checksummed, and
    paired with rollback metadata. Unsigned artifacts are previews only. Every
-   Mac release published so far is such a preview.
+   Mac release up to 0.7.0 is such a preview; 0.7.1 is the first signed,
+   notarized and stapled one.
 7. New outbound data flows require explicit consent and an updated privacy
    promise and threat model.
 
@@ -103,8 +104,9 @@ application alone can prevent. They remain important deployment risks.
 - confine the launcher's privacy grants to the runtime it is meant to start,
   and longer term ship the runtime inside a signed bundle so editing the
   checkout cannot borrow them;
-- publish a release through the signed, notarized, attested workflow; none has
-  been yet;
+- publish a release through the attested release workflow; from 0.7.1
+  releases are signed and notarized, but built and uploaded by hand with no
+  build-provenance attestation;
 - decode `--server-only` uploads without a temporary file, and restrict
   `phone_token.txt` to its owner on Windows;
 - sandbox model and capture work into least-privilege processes. The

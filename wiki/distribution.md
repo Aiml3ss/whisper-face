@@ -79,13 +79,12 @@ checkout.
 >
 > The [[marketing-site]] offers exactly one of them through a single
 > constant, `site/src/data/release.ts` — version, tag, DMG URL, size,
-> notes and checksums links, plus an `unsigned: true` flag. That flag is
-> what drives the honest Gatekeeper copy on the install section: "This
-> build is not notarized yet", with a pointer to `SHA256SUMS` and "A
-> signed release is on the way." This is consistent with the signing
-> policy above: the team id is now recorded and signing is ready, but no
-> signed release has been published, and the site says so rather than
-> hiding it.
+> notes and checksums links, plus an `unsigned` flag. While it was `true`
+> (every release up to 0.7.0) it drove the honest Gatekeeper copy on the
+> install section and the **Open Anyway** step. From 0.7.1, the first
+> release signed with the pinned Developer ID, notarized and stapled, it is
+> `false` and the install steps just say to open the app; the docs keep a
+> short note that releases up to 0.7.0 need **Open Anyway**.
 
 ## Related Concepts
 

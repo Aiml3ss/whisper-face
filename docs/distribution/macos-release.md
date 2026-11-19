@@ -21,18 +21,20 @@ The release produces:
 - `WhisperFace-VERSION-source.zip`, the architecture-neutral writable source
   bundle (its Mac installer currently requires Apple Silicon);
 - `WhisperFace-VERSION-macOS-arm64.dmg`, the disk image people install
-  from: the drag-install app and a link to Applications (signed and notarized
-  once a Developer ID exists; an unsigned preview until then);
+  from: the drag-install app and a link to Applications (signed with the
+  Developer ID, notarized and stapled from 0.7.1; an unsigned preview up to
+  0.7.0);
 - `PACKAGE-CONTENTS.json` inside both containers, a deterministic logical-tree
   receipt bound to the version, full revision, commit timestamp, entry count,
   executable bits, symlink targets, and file hashes;
 - `update-manifest.json`, binding version, full Git revision, source offer,
   artifact sizes and SHA-256 hashes, Apple trust state, and rollback target;
 - `SHA256SUMS`, covering both artifacts and the update manifest;
-- a signed SLSA build-provenance attestation over `SHA256SUMS`, which by
-  extension covers everything that file names. It is stored by GitHub rather
-  than uploaded as a release asset, and is retrieved by
-  `gh attestation verify`.
+- from the tagged release workflow only, a signed SLSA build-provenance
+  attestation over `SHA256SUMS`, which by extension covers everything that
+  file names. It is stored by GitHub rather than uploaded as a release asset,
+  and is retrieved by `gh attestation verify`. A release built by hand, as
+  every release so far has been, has none.
 
 The disk image holds exactly two entries: `Whisper Face.app` and an
 `Applications` link to `/Applications`, on a volume named `Whisper Face`.
@@ -58,8 +60,9 @@ plan without changing anything. Opened on a Mac with a folder install, the
 app offers to move it into itself, carrying the personal files over and
 putting the folder install back if setup fails
 ([how](update-and-rollback.md#moving-a-folder-install-into-the-app)). The ZIP still expands to a writable source
-folder whose `Install.command` builds an unsigned local launcher, exactly as
-before.
+folder whose `Install.command` builds a local launcher, exactly as before
+(signed with the pinned Developer ID only on a Mac that holds it, ad hoc
+otherwise).
 
 A drag install updates to a newer release when that release's app is dragged
 over the old one, or from **Check for Updates…**
@@ -119,9 +122,8 @@ designated requirement for bundle ID `com.berg.whisper-face.launcher` and the
 exact ten-character Team ID pinned in
 `config/macos-signing-policy.json`; an arbitrary valid or ad-hoc signature is
 not accepted. The policy pins the Project Owner's Team ID, `Z6Q832529P`.
-Signing is ready, not yet published: a local test build has been signed with
-that Developer ID, but no signed or notarized release has been published, so
-every published release is still the unsigned preview described in
+From 0.7.1, releases are signed with that Developer ID, notarized and
+stapled; releases up to 0.7.0 were unsigned previews. What each carries is in
 [release provenance](../security/release-provenance.md).
 
 `scripts/package_macos.sh` normalizes the staged tree to the selected commit's
@@ -332,6 +334,11 @@ publication; it has no Apple credentials.
 
 ## Release procedure
 
+Until a tag completes the workflow, releases are built by hand on the Project
+Owner's Mac with the command in [Sign and notarize locally](#sign-and-notarize-locally)
+and uploaded by hand: that replaces steps 3 and 4, and step 5's
+`gh attestation verify` has nothing to verify. Every other step applies.
+
 1. Run every repository release gate and `./setup.sh --verify` on the candidate.
 2. Confirm `git status` is understood; only committed files enter the artifact.
 3. Create an annotated `vX.Y.Z` tag on the approved full revision and push it.
@@ -346,8 +353,8 @@ publication; it has no Apple credentials.
    does and does not prove is set out in
    [release provenance](../security/release-provenance.md).
 6. Install the way a person will: drag the app from the disk image to
-   Applications, open it (an unsigned build needs **Open Anyway** in System
-   Settings → Privacy & Security first), let the setup window finish, then run
+   Applications, open it (it must open without **Open Anyway**; only an
+   unsigned preview needs it), let the setup window finish, then run
    `"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh" --verify`.
    On another Mac or account, also install from the extracted source ZIP and
    run `./setup.sh --verify` there.
