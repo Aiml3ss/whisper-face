@@ -1063,9 +1063,9 @@ packaged locally as an unsigned preview: the launcher app is ad-hoc signed,
 the disk image is not notarized, and the release carries SHA-256 checksums
 but no build-provenance attestation. The release pipeline can also produce a
 generic signed app inside a signed, notarized, and stapled disk image, but
-only once the production Apple Team ID is recorded in the repo-pinned
-`config/macos-signing-policy.json`; its current `null` value disables
-signing, and that path has never produced a published release. See the
+signed by the Apple Team ID recorded in the repo-pinned
+`config/macos-signing-policy.json`. That path is ready but has never produced
+a published release. See the
 [Mac release runbook](docs/distribution/macos-release.md) and
 [release provenance](docs/security/release-provenance.md).
 

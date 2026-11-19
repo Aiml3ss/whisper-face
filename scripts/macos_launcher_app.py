@@ -3,7 +3,8 @@
 
 Two apps come from one Swift source. A folder install builds the *generic*
 launcher locally (``build``/``install``): it only starts the service its
-receipt names. A release packages the *drag-install* app (``package``): the
+receipt names. ``install`` signs it with a Developer ID of the pinned team
+when this Mac's keychain holds one, and ad hoc otherwise. A release packages the *drag-install* app (``package``): the
 same launcher plus its own release's source archive and a copy of ``uv``, so
 that opening it on a Mac with nothing installed unpacks that archive into
 ``~/Library/Application Support/Whisper Face/checkout`` and runs the
@@ -25,6 +26,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 BUNDLE_ID = "com.berg.whisper-face.launcher"
@@ -61,6 +63,39 @@ DEFAULT_RECEIPT = Path("Library/Application Support/Whisper Face/launcher-instal
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY = REPO / "config/macos-signing-policy.json"
 DEFAULT_ICON = REPO / f"icons/{ICON_NAME}.icns"
+# A Developer ID release signs every program in the drag-install app with the
+# hardened runtime and a secure timestamp, which notarization requires, and
+# gives each exactly these entitlements. The launcher's are the file
+# package_macos.sh signs it with: the microphone, because the launcher is the
+# launchd job and so TCC's responsible process for the Python runtime it
+# starts, and a hardened responsible process without it is denied the
+# microphone without a prompt. uv gets none: it is a static program that loads
+# only system libraries and starts Python as a separate process.
+LAUNCHER_ENTITLEMENTS = REPO / "config/macos-launcher-entitlements.plist"
+UV_IDENTIFIER = "com.berg.whisper-face.uv"
+# A folder install signs the launcher it builds with a Developer ID from this
+# Mac's keychain when one belongs to the pinned team. macOS then knows the
+# launcher by team and bundle ID instead of by its code hash, so its
+# Accessibility, Input Monitoring and microphone grants survive a rebuild.
+SECURITY = "/usr/bin/security"
+CODESIGN = "/usr/bin/codesign"
+# "adhoc" keeps every build ad hoc, as before signing existed.
+SIGNING_ENVIRONMENT = "WHISPER_FACE_LAUNCHER_SIGNING"
+# `security find-identity -v` lists only valid identities, one per line:
+#   2) <SHA-1> "Developer ID Application: Name (TEAMID)"
+DEVELOPER_ID_LINE = re.compile(r'^\s*\d+\) ([0-9A-F]{40}) "(Developer ID Application: .+ \(([A-Z0-9]{10})\))"$')
+# Listing identities never prompts. Signing can: a key whose access list does
+# not yet allow codesign makes macOS ask, and in an unattended run nobody
+# answers, so codesign would wait forever. It normally finishes in a few
+# seconds, the secure timestamp from Apple included; past this it is stopped
+# and the launcher is signed ad hoc instead.
+IDENTITY_TIMEOUT = 15
+SIGNING_TIMEOUT = 60
+# The first four bytes of a Mach-O program, thin or universal, either byte order.
+MACHO_MAGICS = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+                b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+# Containers Apple's notary service opens and scans for programs.
+NESTED_ARCHIVE_MAGICS = (b"PK\x03\x04", b"xar!", b"\x1f\x8b")
 SETUP_FACE = REPO / "icons/faces/color/parrot-idle.svg"
 TEAM_IDENTIFIER = re.compile(r"^[A-Z0-9]{10}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1312,6 +1347,52 @@ def _adhoc_sign(app: Path) -> None:
     result = subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--identifier", BUNDLE_ID, str(app)], text=True, capture_output=True)
     if result.returncode: raise LauncherError(result.stderr.strip() or "ad-hoc code signing failed")
 
+def signing_identity(policy: Path = DEFAULT_POLICY) -> tuple[str, str] | None:
+    """The Developer ID this Mac can sign the launcher with, as (SHA-1, name),
+    or None: no valid "Developer ID Application" identity of the pinned team
+    is in the keychain, no team is pinned, or signing is turned off."""
+    if os.environ.get(SIGNING_ENVIRONMENT, "").strip().lower() == "adhoc": return None
+    try: team = _pinned_team(policy)
+    except (LauncherError, OSError, ValueError): return None
+    try: listed = subprocess.run([SECURITY, "find-identity", "-v", "-p", "codesigning"], text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=IDENTITY_TIMEOUT)
+    except (OSError, subprocess.SubprocessError): return None
+    if listed.returncode: return None
+    for line in listed.stdout.splitlines():
+        found = DEVELOPER_ID_LINE.match(line)
+        if found and found.group(3) == team: return found.group(1), found.group(2)
+    return None
+
+def _developer_id_sign(app: Path, identity: tuple[str, str]) -> bool:
+    """Sign the staged launcher as package_macos.sh signs a release's: the
+    hardened runtime, a secure timestamp and the microphone entitlement.
+    Returns False, after one plain line, when codesign fails or does not
+    finish in time; the caller then signs ad hoc."""
+    sha1, name = identity
+    command = [CODESIGN, "--force", "--options", "runtime", "--timestamp", "--entitlements", str(LAUNCHER_ENTITLEMENTS), "--identifier", BUNDLE_ID, "--sign", sha1, str(app)]
+    try:
+        # subprocess.run kills codesign when the timeout passes.
+        result = subprocess.run(command, text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=SIGNING_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        reason = f"codesign did not finish within {SIGNING_TIMEOUT} seconds, perhaps waiting on a keychain prompt"
+    except OSError as exc:
+        reason = str(exc)
+    else:
+        if result.returncode == 0: return True
+        reason = (result.stderr.strip().splitlines() or ["codesign failed"])[-1]
+    print(f"macOS launcher: could not sign with {name} ({reason}); signing it ad hoc instead", file=sys.stderr)
+    return False
+
+def describe_signature(app: Path, policy: Path = DEFAULT_POLICY) -> str:
+    """One line for setup.sh --verify: who signed the launcher."""
+    app = app.expanduser().resolve()
+    if _is_adhoc_signed(app):
+        identity = signing_identity(policy)
+        if identity: return f"ad hoc; this Mac holds {identity[1]}, so the next ./setup.sh signs it"
+        return "ad hoc; macOS asks for its permissions again whenever it is rebuilt"
+    fields, flags, _ = _signature_facts(app)
+    runtime = ", hardened runtime" if "runtime" in flags else ""
+    return f"{fields.get('Authority', 'unknown signer')}, team {fields.get('TeamIdentifier', 'not set')}{runtime}"
+
 def _entries(app: Path) -> set[str]:
     return {p.relative_to(app).as_posix() for p in app.rglob("*") if p.is_file() or p.is_symlink()}
 
@@ -1358,15 +1439,86 @@ def _pinned_team(policy: Path = DEFAULT_POLICY) -> str:
     if not isinstance(team, str) or not TEAM_IDENTIFIER.fullmatch(team): raise LauncherError("pinned Developer ID team is not configured")
     return team
 
-def _verify_pinned_signature(app: Path, policy: Path = DEFAULT_POLICY) -> None:
-    team = _pinned_team(policy)
-    requirement = (
+def _developer_id_requirement(team: str, identifier: str) -> str:
+    return (
         f'anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists '
         f'and certificate leaf[field.1.2.840.113635.100.6.1.13] exists '
-        f'and certificate leaf[subject.OU] = "{team}" and identifier "{BUNDLE_ID}"'
+        f'and certificate leaf[subject.OU] = "{team}" and identifier "{identifier}"'
     )
-    result = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", f"-R={requirement}", str(app)], text=True, capture_output=True)
+
+def _verify_pinned_signature(app: Path, policy: Path = DEFAULT_POLICY) -> None:
+    team = _pinned_team(policy)
+    result = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", f"-R={_developer_id_requirement(team, BUNDLE_ID)}", str(app)], text=True, capture_output=True)
     if result.returncode: raise LauncherError("launcher does not satisfy the pinned Developer ID requirement")
+
+def _verify_signed_launcher(app: Path, policy: Path = DEFAULT_POLICY) -> None:
+    """A Developer ID launcher, released or built here: the pinned team's
+    designated requirement, the hardened runtime, a secure timestamp and
+    exactly the microphone entitlement."""
+    _verify_pinned_signature(app, policy)
+    try: entitlements = plistlib.loads(LAUNCHER_ENTITLEMENTS.read_bytes())
+    except Exception as exc: raise LauncherError("launcher entitlements file is missing or invalid") from exc
+    _verify_release_program(app, team=_pinned_team(policy), identifier=BUNDLE_ID, entitlements=entitlements)
+
+def _signature_facts(path: Path) -> tuple[dict[str, str], set[str], dict[str, object]]:
+    """What codesign reports about one signature: its fields (the leaf
+    Authority first), its CodeDirectory flags, and its entitlements."""
+    shown = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=4", str(path)], text=True, capture_output=True)
+    if shown.returncode: raise LauncherError(f"{path.name} is not signed")
+    fields: dict[str, str] = {}; flags: set[str] = set()
+    for line in shown.stderr.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in ("Authority", "Identifier", "TeamIdentifier", "Timestamp"): fields.setdefault(key, value.strip())
+        found = re.search(r"\bflags=0x[0-9a-f]+\(([^)]*)\)", line) if line.startswith("CodeDirectory ") else None
+        if found: flags = set(found.group(1).split(","))
+    shown = subprocess.run(["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(path)], capture_output=True)
+    if shown.returncode: raise LauncherError(f"{path.name}'s entitlements are unreadable")
+    try: entitlements = plistlib.loads(shown.stdout) if shown.stdout.strip() else {}
+    except Exception as exc: raise LauncherError(f"{path.name}'s entitlements are unreadable") from exc
+    return fields, flags, entitlements
+
+def _verify_release_program(path: Path, *, team: str, identifier: str, entitlements: dict[str, object]) -> None:
+    """One program in a Developer ID release: the pinned team's Developer ID,
+    the hardened runtime, a secure timestamp, and exactly these entitlements.
+    Notarization refuses a program without the first three."""
+    name = path.name
+    fields, flags, granted = _signature_facts(path)
+    if not fields.get("Authority", "").startswith("Developer ID Application: ") or fields.get("TeamIdentifier") != team: raise LauncherError(f"{name} is not signed with the pinned Developer ID")
+    if fields.get("Identifier") != identifier: raise LauncherError(f"{name} is signed as {fields.get('Identifier')!r}, not {identifier!r}")
+    if "runtime" not in flags: raise LauncherError(f"{name} is not signed with the hardened runtime")
+    if not fields.get("Timestamp"): raise LauncherError(f"{name} carries no secure timestamp")
+    if granted != entitlements: raise LauncherError(f"{name} carries entitlements {sorted(granted)}, not {sorted(entitlements)}")
+    result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", f"-R={_developer_id_requirement(team, identifier)}", str(path)], text=True, capture_output=True)
+    if result.returncode: raise LauncherError(f"{name} does not satisfy the pinned Developer ID requirement")
+
+def _verify_release_programs(app: Path, policy: Path = DEFAULT_POLICY) -> None:
+    """Every Mach-O in a Developer ID drag-install app is the launcher or uv,
+    and each is signed the way notarization and the microphone need."""
+    team = _pinned_team(policy)
+    try: launcher_entitlements = plistlib.loads(LAUNCHER_ENTITLEMENTS.read_bytes())
+    except Exception as exc: raise LauncherError("launcher entitlements file is missing or invalid") from exc
+    expected = {f"Contents/MacOS/{EXECUTABLE}": (app, BUNDLE_ID, launcher_entitlements), UV_HELPER: (app / UV_HELPER, UV_IDENTIFIER, {})}
+    for relative in sorted(_entries(app)):
+        path = app / relative
+        if path.is_symlink() or relative in expected: continue
+        with path.open("rb") as handle:
+            if handle.read(4) in MACHO_MAGICS: raise LauncherError(f"drag-install app carries an unexpected program: {relative}")
+    for _relative, (path, identifier, entitlements) in sorted(expected.items()):
+        _verify_release_program(path, team=team, identifier=identifier, entitlements=entitlements)
+
+def _verify_archive_holds_no_programs(archive: Path) -> None:
+    """The source archive inside the app holds no program and no nested
+    archive. Apple's notary service opens archives it finds and refuses any
+    program in them that lacks a Developer ID signature; signing one would
+    change the published source, so none may be there."""
+    try:
+        with zipfile.ZipFile(archive) as source:
+            for member in source.infolist():
+                if member.is_dir(): continue
+                with source.open(member) as handle: head = handle.read(4)
+                if head in MACHO_MAGICS: raise LauncherError(f"source archive carries a program: {member.filename}")
+                if any(head.startswith(magic) for magic in NESTED_ARCHIVE_MAGICS): raise LauncherError(f"source archive carries a nested archive: {member.filename}")
+    except (zipfile.BadZipFile, OSError) as exc: raise LauncherError("drag-install app source archive is unreadable") from exc
 
 def _is_adhoc_signed(app: Path) -> bool:
     result = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=2", str(app)], text=True, capture_output=True)
@@ -1389,7 +1541,7 @@ def _macho_minimum_macos(data: bytes) -> tuple[int, int] | None:
         offset += size
     return None
 
-def _stage_bundle(app: Path) -> None:
+def _stage_bundle(app: Path, identity: tuple[str, str] | None = None, policy: Path = DEFAULT_POLICY) -> None:
     executable = app / "Contents/MacOS" / EXECUTABLE; executable.parent.mkdir(parents=True)
     resources = app / "Contents/Resources"; resources.mkdir()
     _atomic_write(app / "Contents/Info.plist", plistlib.dumps(_expected_plist(), sort_keys=True), 0o644)
@@ -1403,16 +1555,20 @@ def _stage_bundle(app: Path) -> None:
     # grantable app in the privacy panes instead of the underlying interpreter.
     # The signature is deterministic (no timestamp), so byte-identical source
     # still yields a byte-identical signed bundle. Release automation replaces
-    # this with a Developer ID signature via `codesign --force`.
+    # this with a Developer ID signature via `codesign --force`, and so does a
+    # folder install on a Mac that holds one (signing_identity).
+    if identity is not None and _developer_id_sign(app, identity):
+        try: _verify_signed_launcher(app, policy); return
+        except (LauncherError, OSError) as exc: print(f"macOS launcher: the launcher signed with {identity[1]} does not pass its checks ({exc}); signing it ad hoc instead", file=sys.stderr)
     _adhoc_sign(app)
 
-def build_app(app: Path) -> None:
+def build_app(app: Path, identity: tuple[str, str] | None = None, policy: Path = DEFAULT_POLICY) -> None:
     app = app.expanduser().resolve(); app.parent.mkdir(parents=True, exist_ok=True)
     if app.name != f"{PRODUCT}.app": raise LauncherError("launcher target is invalid")
     staging_root = Path(tempfile.mkdtemp(prefix=f".{app.name}.", dir=app.parent)); staging = staging_root / app.name
     try:
-        _stage_bundle(staging)
-        verify_generic_app(staging)
+        _stage_bundle(staging, identity, policy)
+        verify_generic_app(staging, policy=policy)
         if app.exists(): verify_owned_app(app); shutil.rmtree(app)
         os.replace(staging, app)
     finally:
@@ -1460,7 +1616,7 @@ def verify_generic_app(app: Path, *, policy: Path = DEFAULT_POLICY, require_sign
         if require_signed: raise LauncherError("release launcher must be signed")
         _verify_adhoc_signature(app)
     else:
-        _verify_pinned_signature(app, policy)
+        _verify_signed_launcher(app, policy)
     for forbidden in ("checkout-path", "source-revision", "dictate.py", "setup.sh"):
         if any(p.name == forbidden for p in app.rglob("*")): raise LauncherError("launcher must not embed runtime source or machine binding")
 
@@ -1488,12 +1644,14 @@ def verify_drag_app(app: Path, *, policy: Path = DEFAULT_POLICY, require_signed:
     archive = app / SOURCE_ARCHIVE
     if _file_sha256(archive) != plist["WFSourceArchiveSHA256"]: raise LauncherError("drag-install app source archive does not match its recorded digest")
     if source_zip is not None and _file_sha256(source_zip) != plist["WFSourceArchiveSHA256"]: raise LauncherError("drag-install app does not carry the published source archive")
+    _verify_archive_holds_no_programs(archive)
     if _is_adhoc_signed(app):
         if require_signed: raise LauncherError("release launcher must be signed")
         if plist["WFReleaseChannel"] != "preview": raise LauncherError("an unsigned drag-install app must be a preview build")
         _verify_adhoc_signature(app)
     else:
         _verify_pinned_signature(app, policy)
+        _verify_release_programs(app, policy)
     for forbidden in ("checkout-path", "source-revision", "dictate.py", "setup.sh"):
         if any(p.name == forbidden for p in app.rglob("*")): raise LauncherError("launcher must not embed runtime source or machine binding")
     return plist
@@ -1584,16 +1742,25 @@ def install_app(app: Path, checkout: Path, receipt: Path, source_app: Path | Non
             # an install that has already downloaded everything else.
             print(f"macOS launcher: not using the app beside this folder ({exc}); building one here instead", file=sys.stderr)
             source_app = None
+    identity = signing_identity(policy)
+    if source_app and identity and _is_adhoc_signed(source_app):
+        # This Mac can build a launcher macOS knows by team and bundle ID,
+        # which an ad-hoc copy can never be.
+        source_app = None
     current = app.exists() and _is_current(app, policy)
-    if source_app and current and (_is_adhoc_signed(source_app) or _bundle_digest(source_app) == _bundle_digest(app)):
+    # On a Mac that can sign, a working ad-hoc launcher is replaced by a
+    # signed one. That costs its permissions once; every later rebuild keeps
+    # them, because the signed launcher's identity does not change.
+    to_sign = current and identity is not None and _is_adhoc_signed(app)
+    if source_app and current and not to_sign and (_is_adhoc_signed(source_app) or _bundle_digest(source_app) == _bundle_digest(app)):
         # An ad-hoc app's privacy identity is its code hash, so swapping one
         # working ad-hoc app for another costs the user every permission
         # grant. Only a Developer ID app, whose identity survives, replaces it.
         source_app = None
-    if not source_app and current:
+    if not source_app and current and not to_sign:
         # Keep the exact working bundle when launcher source is unchanged.
         _write_receipt(receipt, checkout, app)
-        verify_installation(app, checkout, receipt)
+        verify_installation(app, checkout, receipt, policy=policy)
         return
     staging_root = Path(tempfile.mkdtemp(prefix=f".{app.name}.", dir=app.parent)); staging = staging_root / app.name
     try:
@@ -1601,7 +1768,15 @@ def install_app(app: Path, checkout: Path, receipt: Path, source_app: Path | Non
             subprocess.run(["/usr/bin/ditto", str(source_app), str(staging)], check=True)
             if _bundle_digest(source_app) != _bundle_digest(staging): raise LauncherError("installed launcher differs from packaged app")
         else:
-            build_app(staging)
+            build_app(staging, identity, policy)
+            if to_sign and _is_adhoc_signed(staging):
+                # Signing failed. Swapping one working ad-hoc launcher for
+                # another would cost its permissions for nothing: keep it,
+                # and the next run tries to sign again.
+                _write_receipt(receipt, checkout, app)
+                verify_installation(app, checkout, receipt, policy=policy)
+                return
+            if not _is_adhoc_signed(staging): print(f"macOS launcher: signed with {identity[1]}")
         verify_generic_app(staging, policy=policy)
         if app.exists(): verify_owned_app(app); backup = app.with_name(f".{app.name}.previous-{os.getpid()}"); os.replace(app, backup)
         else: backup = None
@@ -1611,7 +1786,7 @@ def install_app(app: Path, checkout: Path, receipt: Path, source_app: Path | Non
             raise
         if backup: shutil.rmtree(backup)
     finally: shutil.rmtree(staging_root, ignore_errors=True)
-    _write_receipt(receipt, checkout, app); verify_installation(app, checkout, receipt)
+    _write_receipt(receipt, checkout, app); verify_installation(app, checkout, receipt, policy=policy)
 
 def adopt_app(app: Path, checkout: Path, receipt: Path, folder_launcher: Path | None, policy: Path, *, dry_run: bool = False) -> list[str]:
     """Bind a drag install to the app that set it up, where the person put it.
@@ -1656,13 +1831,14 @@ def verify_installation(app: Path, checkout: Path, receipt: Path, *, policy: Pat
         if result.returncode: raise LauncherError("compiled launcher runtime verification failed")
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("command", choices=("build", "install", "verify", "digest", "package", "verify-drag", "adopt", "source")); parser.add_argument("--app"); parser.add_argument("--checkout"); parser.add_argument("--receipt"); parser.add_argument("--source-app"); parser.add_argument("--policy", default=str(DEFAULT_POLICY)); parser.add_argument("--installed-runtime", action="store_true"); parser.add_argument("--require-signed", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("command", choices=("build", "install", "verify", "digest", "package", "verify-drag", "adopt", "source", "signature")); parser.add_argument("--app"); parser.add_argument("--checkout"); parser.add_argument("--receipt"); parser.add_argument("--source-app"); parser.add_argument("--policy", default=str(DEFAULT_POLICY)); parser.add_argument("--installed-runtime", action="store_true"); parser.add_argument("--require-signed", action="store_true")
     parser.add_argument("--source-zip"); parser.add_argument("--uv"); parser.add_argument("--uv-licenses"); parser.add_argument("--version"); parser.add_argument("--revision"); parser.add_argument("--channel", default="stable"); parser.add_argument("--launcher"); parser.add_argument("--folder-launcher"); parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "source": sys.stdout.write(swift_source()); return 0
         if not args.app: raise LauncherError("--app is required")
         if args.command == "digest": print(_bundle_digest(Path(args.app).expanduser().resolve())); return 0
+        if args.command == "signature": print(describe_signature(Path(args.app), Path(args.policy))); return 0
         if args.command == "build": build_app(Path(args.app)); verify_generic_app(Path(args.app), policy=Path(args.policy), require_signed=args.require_signed)
         elif args.command == "install":
             if not args.checkout or not args.receipt: raise LauncherError("install requires --checkout and --receipt")

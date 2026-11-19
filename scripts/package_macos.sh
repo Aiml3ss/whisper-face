@@ -142,6 +142,7 @@ if [ "$SIGN_RELEASE" -eq 1 ]; then
 fi
 if [ "$NOTARIZE_RELEASE" -eq 1 ]; then
     command -v xcrun >/dev/null 2>&1 || fail "xcrun is unavailable"
+    command -v spctl >/dev/null 2>&1 || fail "spctl is unavailable"
     if [ -z "${APPLE_NOTARY_KEYCHAIN_PROFILE:-}" ]; then
         [ -n "${APPLE_ID:-}" ] \
             && [ -n "${APPLE_TEAM_ID:-}" ] \
@@ -302,10 +303,15 @@ python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" package \
     --channel "$CHANNEL"
 if [ "$SIGN_RELEASE" -eq 1 ]; then
     # Inside out: uv first, then the app that seals it. Both get the
-    # hardened runtime and a secure timestamp; the app also gets the
-    # microphone entitlement, without which a hardened app cannot hear.
+    # hardened runtime and a secure timestamp, which notarization requires;
+    # the app also gets the microphone entitlement, without which a hardened
+    # app cannot hear, and nothing else. uv gets no entitlement and its own
+    # identifier rather than one codesign would derive from the file name.
+    # verify-drag --require-signed then checks every program in the app for
+    # exactly this.
     echo "== signing the drag-install app"
     codesign --force --options runtime --timestamp \
+        --identifier com.berg.whisper-face.uv \
         --sign "$APPLE_DEVELOPER_ID_APPLICATION" \
         "$LAUNCHER_APP/Contents/Helpers/uv"
     codesign --force --options runtime --timestamp \
@@ -330,6 +336,8 @@ if [ "$NOTARIZE_RELEASE" -eq 1 ]; then
     notarize_submission "$app_submission" app
     xcrun stapler staple "$LAUNCHER_APP"
     xcrun stapler validate "$LAUNCHER_APP"
+    # Gatekeeper's own verdict on the app a person drags out of the image.
+    spctl --assess --type execute --verbose=2 "$LAUNCHER_APP"
     python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify-drag \
         --app "$LAUNCHER_APP" --require-signed --source-zip "$ZIP_PATH" \
         --version "$VERSION" --revision "$FULL_REVISION"
@@ -356,6 +364,8 @@ if [ "$NOTARIZE_RELEASE" -eq 1 ]; then
     xcrun stapler staple "$DMG_PATH"
     xcrun stapler validate "$DMG_PATH"
     codesign --verify --strict --verbose=2 "$DMG_PATH"
+    spctl --assess --type open --context context:primary-signature \
+        --verbose=2 "$DMG_PATH"
     DMG_NOTARIZED=1
 else
     DMG_NOTARIZED=0
