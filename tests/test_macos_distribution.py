@@ -894,7 +894,12 @@ class SetupWindowContractTests(unittest.TestCase):
             "interruptedAdoption()", "installMatch(", "receipt.app == nil",
             "launchExistingRuntime(start: false)")]
         self.assertEqual(order, sorted(order))
-        self.assertIn(".adopt(receipt.checkout)", decide)
+        self.assertIn(
+            "    if drag, let receipt = try? binding(), receipt.app == nil {\n"
+            "        return folderHoldsInstall(receipt.checkout) ? "
+            ".adopt(receipt.checkout) : firstSetupScreen()\n    }", decide)
+        self.assertIn("    if drag, let folder = interruptedAdoption() { return "
+                      ".adoptStuck(", decide)
         self.assertIn('.adoptStuck("installer.adopt.interrupted", folder)', decide)
         # The app reads the journal app_update.py writes, and runs that
         # module's move from the copy it unpacked, with its own uv.

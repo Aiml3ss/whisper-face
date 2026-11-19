@@ -787,7 +787,9 @@ class FolderMoveTests(unittest.TestCase):
 
     def test_a_put_back_that_cannot_be_seen_running_is_never_called_one(self):
         os.environ["SETUP_SHOULD_FAIL"] = "1"
-        status, lines = self.move(FakeLaunchctl(starts=False))
+        # Only the dictation service: its own start is what is judged.
+        status, lines = self.move(FakeLaunchctl(loaded=("com.berg.dictate",),
+                                                starts=False))
         self.assertEqual(status, MODULE.EXIT_ROLLBACK_FAILED, "\n".join(lines))
         self.assertTrue(self.layout.move_journal.exists())
         self.assertIn("app-move rollback_failed", self.layout.log.read_text())
