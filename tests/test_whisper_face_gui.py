@@ -992,6 +992,43 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(onboarding_presentation(
             complete.onboarding_steps, acknowledged=True).visible)
 
+    def test_the_finish_proves_the_first_dictation_with_its_own_numbers(self):
+        complete = normalize_snapshot({
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
+            "hotkey_practiced": True,
+            "models": [READY_MODEL],
+            "last_word_count": 4,
+            "last_latency_ms": 930.0,
+        })
+        proof = onboarding_presentation(
+            complete.onboarding_steps, acknowledged=False,
+            word_count=complete.last_word_count,
+            latency_ms=complete.last_latency_ms)
+        self.assertTrue(proof.complete)
+        self.assertTrue(proof.detail.startswith(
+            "It heard you: 4 words, typed in 0.9\u00a0s"), proof.detail)
+        one = onboarding_presentation(
+            complete.onboarding_steps, acknowledged=False, word_count=1,
+            latency_ms=1250.0)
+        self.assertTrue(one.detail.startswith(
+            "It heard you: 1 word, typed in 1.2\u00a0s"), one.detail)
+        # Without both numbers there is nothing to prove with, so the
+        # finish says what was confirmed instead; never a made-up number.
+        for words, latency in ((None, 930.0), (4, None), (0, 930.0),
+                               (4, float("nan")), ("x", 930.0)):
+            with self.subTest(words=words, latency=latency):
+                self.assertEqual(onboarding_presentation(
+                    complete.onboarding_steps, acknowledged=False,
+                    word_count=words, latency_ms=latency).detail,
+                    STRING_CATALOGS["en"]["onboarding.complete.detail"])
+        # An unfinished setup never shows it.
+        unfinished = normalize_snapshot({"microphone_status": "Unavailable"})
+        self.assertNotIn("It heard you", onboarding_presentation(
+            unfinished.onboarding_steps, acknowledged=False, word_count=4,
+            latency_ms=930.0).detail)
+
     def test_a_permission_still_being_checked_offers_no_system_settings(self):
         starting = normalize_snapshot({
             "microphone_status": "Starting",
@@ -1017,12 +1054,15 @@ class SnapshotTests(unittest.TestCase):
         hotkey = next(
             step for step in state.onboarding_steps if step.key == "hotkey")
         self.assertFalse(hotkey.complete)
-        self.assertIn("observes capture", hotkey.detail)
+        # It ticks off on capture the runtime saw, and says so plainly.
+        self.assertIn("Hold Right Option, say “hello”", hotkey.detail)
+        self.assertIn("really hear", hotkey.detail)
 
         first_dictation = next(
             step for step in state.onboarding_steps
             if step.key == "first_dictation")
         self.assertIn("Voice Outbox", first_dictation.detail)
+        self.assertIn("hold Right Option and say “hello”", first_dictation.detail)
         # The button's name, held on one line by no-break spaces.
         self.assertIn("Copy\u00a0&\u00a0Dismiss", first_dictation.detail)
 

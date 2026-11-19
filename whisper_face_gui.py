@@ -398,17 +398,17 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.notice.capture.error": "Could not change capture state: {error}",
         "overview.notice.status.error": "Status unavailable: {error}",
         "onboarding.permissions.title": "First, let me hear you",
-        "onboarding.permissions.detail": "Microphone so I can hear you, Accessibility so I can type for you, Input Monitoring so your key works. You grant them in System Settings — I never change them\u00a0myself.",
+        "onboarding.permissions.detail": "Microphone so I can hear you, Accessibility so I can type for you, Input Monitoring so your key works. Switch Whisper Face on in each, in order; each one ticks itself off as soon as macOS\u00a0agrees.",
         "onboarding.hotkey.title": "Now try your key",
-        "onboarding.hotkey.detail": "Hold {hotkey}, say a few words, then let go. This step only ticks once Whisper Face observes capture on this Mac — no\u00a0pretending.",
-        "onboarding.models.title": "Getting your models ready",
-        "onboarding.models.detail": "The recognition models unpack here the first time you run. One ready engine is all you need; the rest can keep warming in the\u00a0background.",
-        "onboarding.first_dictation.title": "Say something",
-        "onboarding.first_dictation.detail": "Click into any text field, hold your key, and speak one sentence. If the focus moves before it lands, your words wait in the Voice Outbox under Copy\u00a0&\u00a0Dismiss.",
+        "onboarding.hotkey.detail": "Hold {hotkey}, say “hello”, then let go. This ticks itself off the moment I really hear\u00a0you.",
+        "onboarding.models.title": "Loading the speech model",
+        "onboarding.models.detail": "The first time, it takes a minute to load on this Mac. One ready model is all you need; any others can finish while you\u00a0talk.",
+        "onboarding.first_dictation.title": "Now say hello for real",
+        "onboarding.first_dictation.detail": "Click into any text box, in Notes, Mail or a chat, hold {hotkey} and say “hello”. It types where you clicked. If you click away first, your words wait in the Voice Outbox under Copy\u00a0&\u00a0Dismiss.",
         "onboarding.status.done": "Done",
         "onboarding.status.attention": "Needs attention",
         "onboarding.status.try": "Try it now",
-        "onboarding.status.warming": "Warming up",
+        "onboarding.status.warming": "Loading",
         "onboarding.status.turn": "Your turn",
         "onboarding.status.checking": "Checking",
         "onboarding.progress": "SETTING UP · {completed} OF {total} DONE",
@@ -430,6 +430,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.complete.progress": "ALL SET · {total} OF {total} CONFIRMED",
         "onboarding.complete.title": "Nice. You’re ready.",
         "onboarding.complete.detail": "Permissions, your key, a local model, and one real dictation — all four confirmed on this Mac. Hold your key anywhere you can type and just\u00a0talk.",
+        "onboarding.complete.proof.one": "It heard you: 1 word, typed in {seconds}\u00a0s, and none of it left this Mac. Hold your key anywhere you can type and just\u00a0talk.",
+        "onboarding.complete.proof": "It heard you: {words} words, typed in {seconds}\u00a0s, and none of it left this Mac. Hold your key anywhere you can type and just\u00a0talk.",
         "onboarding.complete.status": "Every step confirmed",
         "onboarding.accessibility.progress_track": "First run setup progress",
         "onboarding.privacy": "Everything you say stays on this Mac.",
@@ -1209,9 +1211,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.permission.checking": "Checking",
         "onboarding.permission.open.label": "Open {permission} settings",
         "onboarding.permission.open.help": "Open System Settings › Privacy & Security › {permission}. Whisper Face does not change permissions.",
-        "onboarding.row.hotkey.caption": "Hold it, say a few words, then let go",
+        "onboarding.row.hotkey.caption": "Hold it, say “hello”, then let go",
         "onboarding.row.models.caption": "Waiting for the first local model to report in",
-        "onboarding.row.first_dictation.caption": "Click into a text field, hold your key and say one sentence",
+        "onboarding.row.first_dictation.caption": "Click into a text box, hold your key and say “hello”",
         "onboarding.row.accessibility.status": "{row} status",
         "onboarding.action.waiting.help": "Available once every permission above is allowed in System Settings.",
 
@@ -3543,12 +3545,28 @@ def _build_onboarding_steps(
         ),
         OnboardingStep(
             "first_dictation", copy("onboarding.first_dictation.title"),
-            copy("onboarding.first_dictation.detail"),
+            copy("onboarding.first_dictation.detail", hotkey=hotkey_label),
             copy("onboarding.status.done") if first_dictation_complete else copy(
                 "onboarding.status.turn"),
             first_dictation_complete,
         ),
     )
+
+
+def _first_dictation_proof(word_count: int | None, latency_ms: float | None,
+                           locale: str) -> str:
+    """"It heard you: 4 words, typed in 0.9 s", or "" without both numbers."""
+    try:
+        words = int(word_count or 0)
+        seconds = float(latency_ms or 0.0) / 1000.0
+    except (TypeError, ValueError):
+        return ""
+    if words <= 0 or not math.isfinite(seconds) or seconds <= 0:
+        return ""
+    return localized_string(
+        "onboarding.complete.proof.one" if words == 1
+        else "onboarding.complete.proof", locale=locale,
+        words=words, seconds=f"{seconds:.1f}")
 
 
 def onboarding_presentation(
@@ -3557,8 +3575,14 @@ def onboarding_presentation(
     acknowledged: bool,
     locale: str = "en",
     permission_missing: bool = True,
+    word_count: int | None = None,
+    latency_ms: float | None = None,
 ) -> OnboardingPresentation:
-    """Build the active-step or explicit completion presentation."""
+    """Build the active-step or explicit completion presentation.
+
+    Once every step is done, the last dictation's own numbers are the
+    proof it worked: how many words, and how fast they were typed.
+    """
 
     total = len(steps)
     completed = sum(step.complete for step in steps)
@@ -3572,8 +3596,8 @@ def onboarding_presentation(
                 "onboarding.complete.progress", locale=locale, total=total),
             title=localized_string(
                 "onboarding.complete.title", locale=locale),
-            detail=localized_string(
-                "onboarding.complete.detail", locale=locale),
+            detail=_first_dictation_proof(word_count, latency_ms, locale)
+            or localized_string("onboarding.complete.detail", locale=locale),
             status=localized_string(
                 "onboarding.complete.status", locale=locale),
             action_title=localized_string(
@@ -11826,6 +11850,8 @@ if APPKIT_AVAILABLE:
                 acknowledged=state.onboarding_acknowledged,
                 locale=self.view_model.locale,
                 permission_missing=bool(state.missing_permissions),
+                word_count=state.last_word_count,
+                latency_ms=state.last_latency_ms,
             )
             self._onboarding_presentation = presentation
             # Setup has the window to itself only while it is what Home is

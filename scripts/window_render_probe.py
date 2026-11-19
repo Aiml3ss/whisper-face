@@ -493,7 +493,7 @@ ONBOARDING_STAGES = (
         **GRANTED, "hotkey_practiced": True, "models": READY_MODELS}),
     ("complete", {
         **GRANTED, "hotkey_practiced": True, "models": READY_MODELS,
-        "last_word_count": 9,
+        "last_word_count": 9, "last_latency_ms": 930.0,
     }),
 )
 ONBOARDING_STATE = gui.normalize_snapshot(ONBOARDING_RUNTIME)
