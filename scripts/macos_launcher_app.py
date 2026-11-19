@@ -381,6 +381,22 @@ func runWorker(_ command: [String]) -> Never {
     exit(child.terminationStatus)
 }
 
+// What the setup window says about how far it has got: a fraction for the
+// bar from the steps done, and one line with the step and the time so far.
+// No estimate: nobody has measured how long a first setup takes, and most of
+// it is downloading, which depends on the connection.
+func setupProgress(done: Int, total: Int, seconds: Int) -> (Double, String) {
+    let finished = max(0, min(done, total))
+    let fraction = total > 0 ? Double(finished) / Double(total) : 0
+    let values = ["step": String(min(finished + 1, total)), "total": String(total)]
+    let minutes = max(0, seconds) / 60
+    let text: String
+    if minutes < 1 { text = localized("installer.progress.started", values) }
+    else if minutes == 1 { text = localized("installer.progress.minute", values) }
+    else { text = localized("installer.progress.minutes", values.merging(["minutes": String(minutes)]) { $1 }) }
+    return (fraction, text)
+}
+
 // ---------------------------------------------------------------- setup ---
 // Only an app built for drag install carries its release's source archive.
 // The folder installs' locally built launcher has none, so it never sets
@@ -556,6 +572,9 @@ final class SetupController: NSObject, NSWindowDelegate {
     var currentPhase: String? = nil
     var completed: Set<String> = []
     var finishedPhase: String? = nil
+    // When the current setup, update or move began, for the time so far.
+    var startedAt: Date? = nil
+    var progressTimer: Timer? = nil
     var output: [String] = []
     var checkout: URL? = nil
     var setupRun: SetupRun? = nil
@@ -598,6 +617,7 @@ final class SetupController: NSObject, NSWindowDelegate {
             checklist.addArrangedSubview(row); rows[phase] = (icon, label)
         }
         progress.style = .bar; progress.isIndeterminate = true; progress.controlSize = .regular
+        progress.minValue = 0; progress.maxValue = 1
         progress.setAccessibilityLabel(localized("installer.progress.label"))
 
         for button in [primary, secondary, quit] { button.bezelStyle = .rounded; button.target = self }
@@ -698,10 +718,28 @@ final class SetupController: NSObject, NSWindowDelegate {
         noteLabel.isHidden = note.isEmpty
         checklist.isHidden = !listVisible
         progress.isHidden = !progressVisible
-        if progressVisible { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
         primary.isHidden = primaryTitle == nil; primary.title = primaryTitle ?? ""
         secondary.isHidden = secondaryTitle == nil; secondary.title = secondaryTitle ?? ""
+        // While the checklist runs, the bar fills a step at a time and the
+        // note says which step and how long so far; waiting on Apple's
+        // installer has no steps, so its bar only moves.
+        progress.isIndeterminate = !listVisible
+        if progressVisible && progress.isIndeterminate { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+        progressTimer?.invalidate(); progressTimer = nil
+        if listVisible && progressVisible {
+            if startedAt == nil { startedAt = Date() }
+            progressTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.refreshProgress() }
+        } else if !listVisible { startedAt = nil }
         refreshChecklist()
+    }
+
+    func refreshProgress() {
+        guard progressTimer != nil || !progress.isHidden else { return }
+        let seconds = Int(Date().timeIntervalSince(startedAt ?? Date()))
+        let (fraction, text) = setupProgress(done: finishedPhase != nil ? setupPhases.count : completed.count, total: setupPhases.count, seconds: seconds)
+        progress.doubleValue = fraction
+        progress.setAccessibilityValueDescription(text)
+        if !progress.isHidden && !progress.isIndeterminate { noteLabel.stringValue = text; noteLabel.isHidden = false }
     }
 
     func refreshChecklist() {
@@ -729,6 +767,7 @@ final class SetupController: NSObject, NSWindowDelegate {
             label.textColor = (state == "installer.phase.state.pending") ? themeColor("ink_soft") : themeColor("ink")
             label.setAccessibilityLabel(localized(state, ["phase": name]))
         }
+        refreshProgress()
     }
 
     func logURL() -> URL? {
@@ -839,7 +878,7 @@ final class SetupController: NSObject, NSWindowDelegate {
     func beginSetup() {
         if !toolsInstalled() { show(.tools); return }
         if !enoughSpace() { show(.space); return }
-        completed = []; finishedPhase = nil; output = []; currentPhase = setupPhases.first
+        completed = []; finishedPhase = nil; output = []; startedAt = nil; currentPhase = setupPhases.first
         show(.running)
         DispatchQueue.global().async {
             do {
@@ -860,7 +899,7 @@ final class SetupController: NSObject, NSWindowDelegate {
         guard let update = pendingUpdate else { return }
         if !toolsInstalled() { show(.tools); return }
         if !enoughSpace() { show(.space); return }
-        completed = []; finishedPhase = nil; output = []; currentPhase = setupPhases.first
+        completed = []; finishedPhase = nil; output = []; startedAt = nil; currentPhase = setupPhases.first
         show(.updating(update.from, update.to))
         DispatchQueue.global().async {
             do {
@@ -914,7 +953,7 @@ final class SetupController: NSObject, NSWindowDelegate {
         guard let folder = pendingMove else { return }
         if !toolsInstalled() { show(.tools); return }
         if !enoughSpace() { show(.space); return }
-        completed = []; finishedPhase = nil; output = []; currentPhase = setupPhases.first
+        completed = []; finishedPhase = nil; output = []; startedAt = nil; currentPhase = setupPhases.first
         show(.adopting(folder))
         DispatchQueue.global().async {
             do {
@@ -1067,7 +1106,7 @@ func renderSetupWindow(to directory: String) -> Int32 {
         ("tools", .tools, {}),
         ("tools-waiting", .toolsWaiting, {}),
         ("space", .space, {}),
-        ("running", .running, { controller.completed = ["prepare", "python", "speech-model"]; controller.currentPhase = "helpers" }),
+        ("running", .running, { controller.completed = ["prepare", "python", "speech-model"]; controller.currentPhase = "helpers"; controller.startedAt = Date().addingTimeInterval(-7 * 60) }),
         ("failed", .failed("installer.reason.network"), { controller.completed = ["prepare"]; controller.currentPhase = "python" }),
         ("failed-before-start", .failed("installer.reason.damaged"), { controller.completed = []; controller.currentPhase = nil }),
         ("repair", .repair, {}),
@@ -1118,6 +1157,10 @@ func renderSetupWindow(to directory: String) -> Int32 {
         if arguments.first == "--run" { runWorker(Array(arguments.dropFirst())) }
         if arguments.count == 2 && arguments[0] == "--render-setup-window" { exit(renderSetupWindow(to: arguments[1])) }
         if arguments.count == 2 && arguments[0] == "--install-match" { print(installMatchLine(arguments[1])); exit(0) }
+        if arguments.count == 3 && arguments[0] == "--setup-progress", let done = Int(arguments[1]), let seconds = Int(arguments[2]) {
+            let (fraction, text) = setupProgress(done: done, total: setupPhases.count, seconds: seconds)
+            print(String(format: "%.3f", fraction), text); exit(0)
+        }
         if arguments == ["--verify"] {
             do { try launchExistingRuntime(start: false); exit(0) } catch {
                 FileHandle.standardError.write(Data("Whisper Face launcher: this installation does not verify\n".utf8)); exit(1)

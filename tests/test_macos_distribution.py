@@ -1809,6 +1809,27 @@ class DragInstallAppTests(unittest.TestCase):
                 self.assertEqual(module.install_match(
                     receipt, plistlib.loads(info_path.read_bytes())), expected)
 
+    def test_the_setup_window_says_how_far_it_has_got_without_guessing(self):
+        # The bar fills a step at a time and one line says which step and
+        # how long so far. No time estimate: none has been measured.
+        program = str(self.generic / "Contents/MacOS/Whisper Face")
+
+        def progress(done, seconds):
+            return subprocess.run(
+                [program, "--setup-progress", str(done), str(seconds)],
+                text=True, capture_output=True, timeout=30).stdout.strip()
+        self.assertEqual(progress(0, 5), "0.000 Step 1 of 6 · just started")
+        self.assertEqual(progress(3, 60), "0.500 Step 4 of 6 · 1 minute so far")
+        self.assertEqual(progress(5, 1260),
+                         "0.833 Step 6 of 6 · 21 minutes so far")
+        self.assertEqual(progress(6, 900), "1.000 Step 6 of 6 · 15 minutes so far")
+        self.assertEqual(progress(-2, -9), "0.000 Step 1 of 6 · just started")
+        module = load_launcher_tool()
+        for key in ("installer.progress.started", "installer.progress.minute",
+                    "installer.progress.minutes", "installer.running.body"):
+            for guess in ("about", "remaining", "left", "estimate"):
+                self.assertNotIn(guess, module.setup_copy()[key])
+
     def test_the_setup_window_renders_every_screen_in_both_appearances(self):
         out = self.root / "renders"
         out.mkdir()
