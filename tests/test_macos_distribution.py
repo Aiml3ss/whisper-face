@@ -1859,6 +1859,22 @@ class DragInstallAppTests(unittest.TestCase):
         self.assertNotEqual(
             (out / "installer-folder-light.png").read_bytes(),
             (out / "installer-folder-keep-light.png").read_bytes())
+        # The step bar shows the steps done, in the picture as well as in
+        # its value: three of six while running and moving a folder
+        # install, two of six while updating. A bar that once swept and was
+        # then made to fill drew a sliver whatever its value.
+        bars = {}
+        for line in rendered.stdout.decode().splitlines():
+            if line.startswith("step-bar "):
+                name, value, drawn = line.split()[1:]
+                bars[name] = (float(value.split("=")[1]),
+                              float(drawn.split("=")[1]))
+        for screen, done in (("running", 3), ("adopting", 3), ("updating", 2)):
+            for appearance in ("light", "dark"):
+                with self.subTest(bar=screen, appearance=appearance):
+                    value, drawn = bars[f"{screen}-{appearance}"]
+                    self.assertAlmostEqual(value, done / 6, places=3)
+                    self.assertAlmostEqual(drawn, value, delta=0.05)
 
 
 if __name__ == "__main__":

@@ -340,9 +340,24 @@ if INSTALLER:
 def render_permissions(out: Path) -> int:
     """Draw the permission window's stages with fake seams; never shown."""
     from AppKit import (NSApplication, NSAppearance, NSAppearanceNameAqua,
-                        NSAppearanceNameDarkAqua, NSBitmapImageFileTypePNG)
+                        NSAppearanceNameDarkAqua, NSBitmapImageFileTypePNG,
+                        NSWindow)
     import whisper_face_gui as gui
     NSApplication.sharedApplication()
+
+    class KeyPermissionWindow(NSWindow):
+        """The window as it is on screen: the key window, so the system
+        draws its default button in the accent colour. A window that is
+        never shown never has the keyboard, and draws every button grey."""
+
+        def isKeyWindow(self):
+            return True
+
+        def hasKeyAppearance(self):
+            return True
+
+        def _hasKeyAppearance(self):
+            return True
 
     def refuse(*_args, **_kwargs):
         raise AssertionError("the probe never acts")
@@ -367,6 +382,14 @@ def render_permissions(out: Path) -> int:
             flow.stage = "missing" if stage == "suspect" else stage
             controller = gui.PermissionHelpWindowController.alloc() \
                 .initWithFlow_(flow)
+            plain = controller.window
+            keyed = KeyPermissionWindow.alloc() \
+                .initWithContentRect_styleMask_backing_defer_(
+                    plain.contentRectForFrameRect_(plain.frame()),
+                    plain.styleMask(), plain.backingType(), True)
+            keyed.setReleasedWhenClosed_(False)
+            keyed.setContentView_(controller.content)
+            controller.window = keyed
             controller.window.setAppearance_(
                 NSAppearance.appearanceNamed_(appearance))
             controller.render()

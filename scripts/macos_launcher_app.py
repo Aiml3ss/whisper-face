@@ -563,7 +563,12 @@ final class SetupController: NSObject, NSWindowDelegate {
     let bodyLabel = NSTextField(wrappingLabelWithString: "")
     let noteLabel = NSTextField(wrappingLabelWithString: "")
     let checklist = NSStackView()
+    // Two bars, never one switched between modes: a bar that has run its
+    // indeterminate animation keeps drawing a sliver after it is made
+    // determinate, whatever its value. `progress` only sweeps (waiting on
+    // Apple's installer); `stepBar` only fills, a step at a time.
     let progress = NSProgressIndicator()
+    let stepBar = NSProgressIndicator()
     let primary = NSButton(title: "", target: nil, action: nil)
     let secondary = NSButton(title: "", target: nil, action: nil)
     let quit = NSButton(title: "", target: nil, action: nil)
@@ -617,7 +622,9 @@ final class SetupController: NSObject, NSWindowDelegate {
             checklist.addArrangedSubview(row); rows[phase] = (icon, label)
         }
         progress.style = .bar; progress.isIndeterminate = true; progress.controlSize = .regular
-        progress.minValue = 0; progress.maxValue = 1
+        stepBar.style = .bar; stepBar.isIndeterminate = false; stepBar.controlSize = .regular
+        stepBar.minValue = 0; stepBar.maxValue = 1
+        stepBar.setAccessibilityLabel(localized("installer.progress.label"))
         progress.setAccessibilityLabel(localized("installer.progress.label"))
 
         for button in [primary, secondary, quit] { button.bezelStyle = .rounded; button.target = self }
@@ -628,7 +635,7 @@ final class SetupController: NSObject, NSWindowDelegate {
         let buttons = NSStackView(views: [secondary, spacer, quit, primary]); buttons.orientation = .horizontal; buttons.spacing = 12
 
         let filler = NSView(); filler.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
-        let stack = NSStackView(views: [face, titleLabel, bodyLabel, checklist, progress, noteLabel, filler, buttons])
+        let stack = NSStackView(views: [face, titleLabel, bodyLabel, checklist, progress, stepBar, noteLabel, filler, buttons])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 20, right: 28)
         stack.setCustomSpacing(16, after: face); stack.setCustomSpacing(6, after: titleLabel); stack.setCustomSpacing(16, after: bodyLabel)
@@ -643,6 +650,7 @@ final class SetupController: NSObject, NSWindowDelegate {
             face.widthAnchor.constraint(equalToConstant: 64), face.heightAnchor.constraint(equalToConstant: 64),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
             progress.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
+            stepBar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
             content.widthAnchor.constraint(equalToConstant: windowWidth),
         ])
         // One fixed size for every screen: the tallest, the running checklist.
@@ -717,14 +725,14 @@ final class SetupController: NSObject, NSWindowDelegate {
         titleLabel.stringValue = title; bodyLabel.stringValue = body; noteLabel.stringValue = note
         noteLabel.isHidden = note.isEmpty
         checklist.isHidden = !listVisible
-        progress.isHidden = !progressVisible
+        // While the checklist runs, the step bar fills a step at a time and
+        // the note says which step and how long so far; waiting on Apple's
+        // installer has no steps, so its bar only sweeps.
+        progress.isHidden = !(progressVisible && !listVisible)
+        stepBar.isHidden = !(progressVisible && listVisible)
         primary.isHidden = primaryTitle == nil; primary.title = primaryTitle ?? ""
         secondary.isHidden = secondaryTitle == nil; secondary.title = secondaryTitle ?? ""
-        // While the checklist runs, the bar fills a step at a time and the
-        // note says which step and how long so far; waiting on Apple's
-        // installer has no steps, so its bar only moves.
-        progress.isIndeterminate = !listVisible
-        if progressVisible && progress.isIndeterminate { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+        if progress.isHidden { progress.stopAnimation(nil) } else { progress.startAnimation(nil) }
         progressTimer?.invalidate(); progressTimer = nil
         if listVisible && progressVisible {
             if startedAt == nil { startedAt = Date() }
@@ -734,12 +742,12 @@ final class SetupController: NSObject, NSWindowDelegate {
     }
 
     func refreshProgress() {
-        guard progressTimer != nil || !progress.isHidden else { return }
+        guard !stepBar.isHidden else { return }
         let seconds = Int(Date().timeIntervalSince(startedAt ?? Date()))
         let (fraction, text) = setupProgress(done: finishedPhase != nil ? setupPhases.count : completed.count, total: setupPhases.count, seconds: seconds)
-        progress.doubleValue = fraction
-        progress.setAccessibilityValueDescription(text)
-        if !progress.isHidden && !progress.isIndeterminate { noteLabel.stringValue = text; noteLabel.isHidden = false }
+        stepBar.doubleValue = fraction
+        stepBar.setAccessibilityValueDescription(text)
+        noteLabel.stringValue = text; noteLabel.isHidden = false
     }
 
     func refreshChecklist() {
@@ -1095,6 +1103,25 @@ func initialScreen() -> Screen? {
     return drag ? .repair : .unset
 }
 
+// How much of a bar's track a picture shows filled: along the bar's middle
+// row, the run of pixels from its left end that keep the fill's colour.
+func drawnFraction(_ rep: NSBitmapImageRep, of bar: NSView, in view: NSView) -> Double {
+    let rect = bar.convert(bar.bounds, to: view)
+    let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+    let y = Int((view.isFlipped ? rect.midY : view.bounds.height - rect.midY) * scale)
+    let left = Int(rect.minX * scale), right = Int(rect.maxX * scale)
+    guard right - left > 8, let fill = rep.colorAt(x: left + 4, y: y)?.usingColorSpace(.sRGB),
+          let track = rep.colorAt(x: right - 4, y: y)?.usingColorSpace(.sRGB) else { return 0 }
+    func distance(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent) + abs(a.blueComponent - b.blueComponent)
+    }
+    // An empty or a full bar is one colour end to end.
+    if distance(fill, track) < 0.06 { return bar is NSProgressIndicator && (bar as! NSProgressIndicator).doubleValue >= 0.99 ? 1 : 0 }
+    var x = left + 4
+    while x < right, let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), distance(colour, fill) < distance(colour, track) { x += 1 }
+    return Double(x - left) / Double(right - left)
+}
+
 // Draws every screen into PNGs, in both appearances, without showing a
 // window, for scripts/window_render_probe.py --installer.
 func renderSetupWindow(to directory: String) -> Int32 {
@@ -1144,6 +1171,11 @@ func renderSetupWindow(to directory: String) -> Int32 {
             // theme's dynamic colours resolve exactly as on screen.
             guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return 1 }
             view.cacheDisplay(in: view.bounds, to: rep)
+            // What the step bar actually drew, beside the value it holds,
+            // so a test can hold the picture to the steps done.
+            if !controller.stepBar.isHidden {
+                print("step-bar \(name)-\(suffix) value=\(String(format: "%.3f", controller.stepBar.doubleValue)) drawn=\(String(format: "%.3f", drawnFraction(rep, of: controller.stepBar, in: view)))")
+            }
             guard let png = rep.representation(using: .png, properties: [:]) else { return 1 }
             do { try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("installer-\(name)-\(suffix).png")) } catch { return 1 }
         }

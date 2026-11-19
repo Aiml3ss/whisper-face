@@ -8822,6 +8822,8 @@ class PermissionHelpAppKitTests(unittest.TestCase):
         self.assertEqual(window.buttons["input_monitoring"].keyEquivalent(), "\r")
         both = self.controller(seams.flow())
         self.assertEqual(both.buttons["accessibility"].keyEquivalent(), "\r")
+        self.assertIs(both.window.defaultButtonCell(),
+                      both.buttons["accessibility"].cell())
         self.assertEqual(both.buttons["input_monitoring"].keyEquivalent(), "")
         labels = {view.accessibilityLabel() for view in
                   window.content.subviews() if view.accessibilityLabel()}
@@ -8841,6 +8843,10 @@ class PermissionHelpAppKitTests(unittest.TestCase):
         self.assertEqual(window.buttons["still"].title(), "Ask macOS Again…")
         stale = self.controller(seams.flow(worked_before=True))
         self.assertEqual(stale.buttons["confirm"].keyEquivalent(), "\r")
+        # Return is the window's own default button: drawn in the accent
+        # colour whenever the window has the keyboard.
+        self.assertIs(stale.window.defaultButtonCell(),
+                      stale.buttons["confirm"].cell())
         self.assertEqual(stale.buttons["cancel"].title(), "Not Now")
         self.assertEqual(seams.ran, [])
         stale.buttons["confirm"].performClick_(None)
