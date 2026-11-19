@@ -117,9 +117,11 @@ launcher is built locally instead. A Developer ID signed sibling must satisfy an
 designated requirement for bundle ID `com.berg.whisper-face.launcher` and the
 exact ten-character Team ID pinned in
 `config/macos-signing-policy.json`; an arbitrary valid or ad-hoc signature is
-not accepted. The policy is intentionally unconfigured until the Project Owner
-records the production Team ID, so the signed release path currently aborts
-rather than trusting an unknown signer.
+not accepted. The policy pins the Project Owner's Team ID, `Z6Q832529P`.
+Signing is ready, not yet published: a local test build has been signed with
+that Developer ID, but no signed or notarized release has been published, so
+every published release is still the unsigned preview described in
+[release provenance](../security/release-provenance.md).
 
 `scripts/package_macos.sh` normalizes the staged tree to the selected commit's
 timestamp, stamps its logical-tree digest, then reopens both containers and
@@ -162,12 +164,23 @@ published as production builds.
 
 ## Sign and notarize locally
 
-Use a **Developer ID Application** certificate installed in the login keychain:
+Use the **Developer ID Application** certificate installed in the login
+keychain. Notarization reads a `notarytool` keychain profile named
+`whisper-face-notary`. Only the Project Owner creates it, once per Mac, by
+running this and typing an app-specific password (made at account.apple.com)
+when it asks; the password goes straight into the keychain and is never put in
+a file, an environment variable or a command line:
 
 ```sh
-export APPLE_DEVELOPER_ID_APPLICATION='Developer ID Application: Example (TEAMID)'
 xcrun notarytool store-credentials whisper-face-notary \
-  --apple-id you@example.com --team-id TEAMID --password APP_SPECIFIC_PASSWORD
+  --apple-id OWNER_APPLE_ID --team-id Z6Q832529P
+```
+
+Then:
+
+```sh
+export APPLE_DEVELOPER_ID_APPLICATION='Developer ID Application: Andrew Bergstrom (Z6Q832529P)'
+export APPLE_TEAM_ID=Z6Q832529P
 export APPLE_NOTARY_KEYCHAIN_PROFILE=whisper-face-notary
 
 scripts/package_macos.sh --version 1.2.3 --sign --notarize \
@@ -193,13 +206,72 @@ Apple's current [custom notarization workflow](https://developer.apple.com/docum
 which accepts UDIF disk images and uses `notarytool` plus `stapler`. Apple
 documents Developer ID Application as the appropriate certificate for signing
 disk images in its [notarization troubleshooting guide](https://developer.apple.com/documentation/security/resolving-common-notarization-issues).
-Before the first signed release, replace the `null` Team ID in
-`config/macos-signing-policy.json` with the production certificate's Team ID in
-an owner-reviewed commit. Packaging requires `APPLE_TEAM_ID` and the Team ID in
-`APPLE_DEVELOPER_ID_APPLICATION` to match that selected revision's policy before
-using the credential. Artifact verification reuses the launcher verifier from
+`config/macos-signing-policy.json` records the production Team ID; changing
+it is an owner-reviewed commit. Packaging requires `APPLE_TEAM_ID` and the
+Team ID in `APPLE_DEVELOPER_ID_APPLICATION` to match that selected revision's
+policy before using the credential, so a build of a revision from before the
+Team ID was recorded (0.6.0 and earlier) cannot be signed. Artifact verification reuses the launcher verifier from
 the exact packaged source: unsigned previews are rebuilt and byte-compared;
 signed apps must satisfy that source revision's pinned designated requirement.
+
+### What a signed app carries, and why
+
+Notarization refuses any program that lacks a Developer ID signature, the
+hardened runtime or a secure timestamp, and it opens archives it finds and
+checks the programs inside them too. The app holds exactly two programs and
+`scripts/package_macos.sh --sign` signs both, inside out:
+
+| Program | Identifier | Entitlements |
+|---|---|---|
+| `Contents/Helpers/uv` | `com.berg.whisper-face.uv` | none |
+| `Contents/MacOS/Whisper Face` (the app) | `com.berg.whisper-face.launcher` | `com.apple.security.device.audio-input` |
+
+- **Microphone (`audio-input`).** The launcher is the program launchd runs for
+  the login service, and it starts the Python runtime as its child, so macOS
+  treats the launcher as the responsible process when that runtime opens the
+  microphone. A hardened responsible process without this entitlement is
+  denied the microphone without a prompt.
+- **Nothing else.** The hardened runtime and its library validation apply only
+  to a process whose own program was signed with them. The launcher links only
+  system frameworks and starts `bash`, `uv` and Python as separate processes;
+  uv links only system libraries and starts Python as a separate process. The
+  Python that uv installs, and the libraries it loads, keep their own
+  signatures and are not hardened, so neither
+  `com.apple.security.cs.disable-library-validation` nor
+  `allow-dyld-environment-variables`, `allow-jit` or
+  `allow-unsigned-executable-memory` is needed. A hardened, Developer ID
+  signed uv was run to start a uv-installed Python 3.12 that loaded `ssl`,
+  `ctypes` and `sqlite3`. The runtime sends no Apple events, so
+  `automation.apple-events` is not needed either; Accessibility, Input
+  Monitoring and Screen Recording have no hardened-runtime entitlement.
+
+`verify-drag --require-signed`, and every check of a signed app after it,
+refuses a program that is not signed by the pinned team, lacks the hardened
+runtime or a secure timestamp, carries any other entitlement, or is not one of
+those two. It also refuses, signed or not, a source archive that holds a
+program or a nested archive: notarization would refuse the program, and
+signing it would change the published source. Today's source holds neither;
+its `.git` objects are zlib streams, which notarization does not open.
+
+With `--notarize`, after stapling, `spctl --assess` must accept the app as
+something to execute and the disk image as something to open.
+
+### Folder installs
+
+A folder install (`Install.command` in a source checkout or a git clone)
+builds its own launcher with `swiftc` and signs it ad hoc. Its privacy
+identity is then its code hash, so a rebuild after the launcher source changes
+costs every permission. Signing that local launcher with this Developer ID
+when the identity is in the keychain would let permissions survive rebuilds,
+because macOS would then identify it by team and bundle identifier, and the
+verifier already accepts a launcher signed by the pinned team. It is not
+implemented: `setup.sh` also runs from the in-app updater and other
+unattended paths, where `codesign` can stop on a keychain prompt or fail
+without one, and the identity exists only on the owner's Mac. If wanted, it
+belongs behind an explicit opt-in that names the identity, falls back to the
+ad-hoc build on any signing failure, signs with the hardened runtime and the
+same microphone entitlement, and replaces a working ad-hoc launcher once,
+costing its permissions that one time.
 
 ## GitHub release automation
 

@@ -549,8 +549,10 @@ class MacDistributionContractTests(unittest.TestCase):
     def test_packager_exports_one_exact_source_and_applies_apple_trust(self):
         script = self.read("scripts/package_macos.sh")
         policy = json.loads(self.read("config/macos-signing-policy.json"))
+        # The owner's Developer ID team. Packaging with --sign refuses any
+        # other team, and a signed app must satisfy this team's requirement.
         self.assertEqual(policy, {
-            "developer_id_team_identifier": None,
+            "developer_id_team_identifier": "Z6Q832529P",
             "schema_version": 1,
         })
         launcher = self.read("scripts/macos_launcher_app.py")
@@ -974,6 +976,157 @@ class SetupWindowContractTests(unittest.TestCase):
         # The app is notarized and stapled before the disk image is made.
         self.assertLess(script.index('xcrun stapler staple "$LAUNCHER_APP"'),
                         script.index("hdiutil create"))
+        # uv is signed under the identifier the verifier requires of it.
+        module = load_launcher_tool()
+        self.assertIn(f"--identifier {module.UV_IDENTIFIER}", script)
+        self.assertEqual(module.LAUNCHER_ENTITLEMENTS,
+                         ROOT / "config/macos-launcher-entitlements.plist")
+        # Gatekeeper assesses the stapled app and the stapled disk image.
+        self.assertIn('spctl --assess --type execute --verbose=2 "$LAUNCHER_APP"',
+                      script)
+        self.assertIn("spctl --assess --type open --context "
+                      "context:primary-signature", script)
+
+
+TEAM = "Z6Q832529P"
+LEAF = "Developer ID Application: Andrew Bergstrom (Z6Q832529P)"
+MICROPHONE = {"com.apple.security.device.audio-input": True}
+
+
+def codesign_display(*, identifier, authority=LEAF, team=TEAM,
+                     flags="0x10000(runtime)", timestamp=True):
+    """The lines `codesign --display --verbose=4` prints, as a release has them."""
+    lines = [f"Identifier={identifier}", "Format=Mach-O thin (arm64)",
+             f"CodeDirectory v=20500 size=1 flags={flags} hashes=1+2 "
+             "location=embedded"]
+    if authority:
+        lines += [f"Authority={authority}",
+                  "Authority=Developer ID Certification Authority",
+                  "Authority=Apple Root CA"]
+    lines.append("Timestamp=Nov 17, 2026 at 11:00:00 AM" if timestamp
+                 else "Signed Time=Nov 17, 2026 at 11:00:00 AM")
+    lines.append(f"TeamIdentifier={team}")
+    return "\n".join(lines) + "\n"
+
+
+class ReleaseSignatureRuleTests(unittest.TestCase):
+    """Each program in a Developer ID app must be what notarization accepts
+    and carry exactly its entitlements. codesign is faked here; the release
+    build checks a real signature with the same code."""
+
+    def setUp(self):
+        self.module = load_launcher_tool()
+
+    def check(self, *, display, entitlements, requirement_ok=True,
+              identifier="com.berg.whisper-face.uv", expected=None):
+        module = self.module
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            if "--entitlements" in command:
+                body = plistlib.dumps(entitlements) if entitlements else b""
+                return subprocess.CompletedProcess(command, 0, body, b"")
+            if "--display" in command:
+                return subprocess.CompletedProcess(command, 0, "", display)
+            return subprocess.CompletedProcess(
+                command, 0 if requirement_ok else 3, "", "")
+
+        original = module.subprocess.run
+        module.subprocess.run = fake_run
+        self.addCleanup(setattr, module.subprocess, "run", original)
+        module._verify_release_program(
+            Path("/fake/uv"), team=TEAM, identifier=identifier,
+            entitlements={} if expected is None else expected)
+        return calls
+
+    def test_a_correctly_signed_program_passes(self):
+        calls = self.check(display=codesign_display(
+            identifier="com.berg.whisper-face.uv"), entitlements={})
+        requirement = [c for c in calls if any(
+            str(part).startswith("-R=") for part in c)]
+        self.assertTrue(requirement)
+        self.assertIn(f'certificate leaf[subject.OU] = "{TEAM}"',
+                      requirement[0][3])
+        self.check(display=codesign_display(
+            identifier="com.berg.whisper-face.launcher",
+            flags="0x10000(runtime)"), entitlements=MICROPHONE,
+            identifier="com.berg.whisper-face.launcher", expected=MICROPHONE)
+
+    def test_each_rule_notarization_or_the_microphone_needs_is_enforced(self):
+        module = self.module
+        uv = "com.berg.whisper-face.uv"
+        broken = {
+            "hardened runtime": dict(display=codesign_display(
+                identifier=uv, flags="0x0(none)"), entitlements={}),
+            "secure timestamp": dict(display=codesign_display(
+                identifier=uv, timestamp=False), entitlements={}),
+            "pinned Developer ID": dict(display=codesign_display(
+                identifier=uv, team="ABCDE12345"), entitlements={}),
+            "ad hoc": dict(display=codesign_display(
+                identifier=uv, authority=None, flags="0x10002(adhoc,runtime)",
+                team="not set"), entitlements={}),
+            "Apple Development": dict(display=codesign_display(
+                identifier=uv,
+                authority="Apple Development: someone (Y62WJVD69G)"),
+                entitlements={}),
+            "identifier": dict(display=codesign_display(identifier="uv"),
+                               entitlements={}),
+            "library validation": dict(display=codesign_display(
+                identifier=uv), entitlements={
+                    "com.apple.security.cs.disable-library-validation": True}),
+            "requirement": dict(display=codesign_display(identifier=uv),
+                                entitlements={}, requirement_ok=False),
+        }
+        for name, case in broken.items():
+            with self.subTest(rule=name), self.assertRaises(module.LauncherError):
+                self.check(**case)
+        # The launcher without its microphone entitlement is refused too.
+        with self.assertRaises(module.LauncherError):
+            self.check(display=codesign_display(
+                identifier="com.berg.whisper-face.launcher"), entitlements={},
+                identifier="com.berg.whisper-face.launcher", expected=MICROPHONE)
+
+    def test_the_source_archive_holds_no_program_and_no_nested_archive(self):
+        import zipfile
+        module = load_launcher_tool()
+        with tempfile.TemporaryDirectory() as directory:
+            def archive(name, payload):
+                path = Path(directory) / name
+                with zipfile.ZipFile(path, "w") as source:
+                    source.writestr("Whisper Face 1.0.0/README.md", "source\n")
+                    source.writestr("Whisper Face 1.0.0/.git/objects/ab/cd",
+                                    b"\x78\x01loose object")
+                    if payload is not None:
+                        source.writestr("Whisper Face 1.0.0/tools/thing",
+                                        payload)
+                return path
+            module._verify_archive_holds_no_programs(archive("clean.zip", None))
+            for name, payload, reason in (
+                    ("thin", b"\xcf\xfa\xed\xfe" + b"\0" * 28, "program"),
+                    ("universal", b"\xca\xfe\xba\xbe" + b"\0" * 28, "program"),
+                    ("zip", b"PK\x03\x04" + b"\0" * 26, "nested archive"),
+                    ("gzip", b"\x1f\x8b\x08\0" + b"\0" * 6, "nested archive")):
+                with self.subTest(payload=name):
+                    with self.assertRaisesRegex(module.LauncherError, reason):
+                        module._verify_archive_holds_no_programs(
+                            archive(f"{name}.zip", payload))
+
+    def test_a_signed_app_carries_no_program_besides_the_launcher_and_uv(self):
+        module = load_launcher_tool()
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Whisper Face.app"
+            policy = Path(directory) / "policy.json"
+            policy.write_text(json.dumps({
+                "developer_id_team_identifier": TEAM, "schema_version": 1}))
+            for relative in module.DRAG_FILES:
+                (app / relative).parent.mkdir(parents=True, exist_ok=True)
+                (app / relative).write_bytes(b"text")
+            (app / "Contents/Resources/ThirdParty/uv/LICENSE-MIT").write_bytes(
+                b"\xcf\xfa\xed\xfe" + b"\0" * 28)
+            with self.assertRaisesRegex(module.LauncherError,
+                                        "unexpected program"):
+                module._verify_release_programs(app, policy)
 
 
 UV_STAND_IN = r"""
@@ -1132,6 +1285,40 @@ class DragInstallAppTests(unittest.TestCase):
         self.assertEqual(refused.returncode, 2)
         self.assertIn("does not carry the published source archive",
                       refused.stderr)
+
+    def test_a_developer_id_app_is_checked_program_by_program(self):
+        # codesign --verify --deep accepts an ad-hoc uv inside a Developer ID
+        # app, which notarization refuses, so a signed app's programs are
+        # each checked as well. No Developer ID exists here, so the signature
+        # checks are stood in for and only the call is proved.
+        app, result = self.package("program-by-program")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        module = load_launcher_tool()
+        checked = []
+        module._is_adhoc_signed = lambda _app: False
+        module._verify_pinned_signature = lambda _app, _policy: None
+        module._verify_release_programs = (
+            lambda app_path, policy: checked.append((app_path, policy)))
+        module.verify_drag_app(app)
+        self.assertEqual(checked, [(app.resolve(), module.DEFAULT_POLICY)])
+
+    def test_a_source_archive_carrying_a_program_is_never_packaged(self):
+        # Notarization would refuse the unsigned program inside the archive,
+        # and signing it would change the published source.
+        import zipfile
+        carrying = self.root / "carrying-a-program.zip"
+        with zipfile.ZipFile(carrying, "w") as archive:
+            archive.writestr("Whisper Face 0.6.0-drag.1/README.md", "source\n")
+            archive.write(self.uv, "Whisper Face 0.6.0-drag.1/bin/tool")
+        app = self.root / "carrying" / "Whisper Face.app"
+        result = self.tool(
+            "package", "--app", str(app), "--launcher", str(self.generic),
+            "--source-zip", str(carrying), "--uv", str(self.uv),
+            "--version", "0.6.0-drag.1", "--revision", self.revision,
+            "--channel", "preview")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("source archive carries a program", result.stderr)
+        self.assertFalse(app.exists())
 
     def test_adopting_binds_the_receipt_to_the_app_where_it_is(self):
         app, result = self.package("adopted")
