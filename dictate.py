@@ -9176,6 +9176,22 @@ def restart_for_fresh_permissions(*, execv=os.execv) -> None:
     execv(sys.executable, [sys.executable] + sys.argv)
 
 
+def dictated_before(path=None) -> bool:
+    """Whether this install's history holds a dictation: if it does, macOS
+    gave Whisper Face Input Monitoring once, so a permission missing now is
+    an old entry macOS stopped honouring (after an update, or a rebuild of
+    the launcher), not one never switched on. Reads only the first line's
+    shape; no dictated text leaves this function."""
+    target = TRANSCRIPTS_FILE if path is None else path
+    try:
+        with open(target, encoding="utf-8", errors="replace") as handle:
+            first = handle.readline(65536)
+        entry = json.loads(first)
+    except (OSError, ValueError):
+        return False
+    return isinstance(entry, dict) and "ts" in entry
+
+
 def show_permission_help(*, show=None):
     """Show the permission window while macOS withholds a permission.
 
@@ -9197,6 +9213,7 @@ def show_permission_help(*, show=None):
             restart=restart_for_fresh_permissions,
             record=lambda line: print(line, flush=True),
             probe=missing_event_permissions,
+            worked_before=dictated_before(),
         )
         return (show or show_permission_help_window)(flow)
     except Exception as e:  # the window is help, never a reason to stop

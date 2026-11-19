@@ -8555,12 +8555,13 @@ class FakePermissionSeams:
         self.restarts = 0
         self.statuses = list(statuses)
 
-    def flow(self, missing=("accessibility", "input_monitoring"), probe=()):
+    def flow(self, missing=("accessibility", "input_monitoring"), probe=(),
+             **options):
         import whisper_face_gui as gui
         return gui.PermissionHelpFlow(
             missing=missing, opener=self.opened.append, runner=self.run,
             restart=self.restart, record=self.lines.append,
-            probe=lambda: probe)
+            probe=lambda: probe, **options)
 
     def run(self, command):
         self.ran.append(list(command))
@@ -8645,18 +8646,87 @@ class PermissionHelpTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gui.permission_help_record("shown", ("/Users/someone",))
 
-    def test_the_window_says_switch_it_off_and_on_in_plain_words(self):
+    def test_the_window_never_sends_people_to_flip_a_switch_that_cannot_help(self):
+        # On the owner's Mac, five rebuilds left the switches looking on and
+        # doing nothing, and switching them off and on never helped. The
+        # window says that, and offers the way that works instead.
         from whisper_face_gui import internal_words_in
         catalog = {key: value for key, value in STRING_CATALOGS["en"].items()
                    if key.startswith("permission_help.")}
-        self.assertIn("If Whisper Face is already listed and switched on, "
-                      "switch it off and on again.",
-                      catalog["permission_help.toggle"])
+        self.assertNotIn("permission_help.toggle", catalog)
+        for key in ("permission_help.suspect", "permission_help.stale.body"):
+            self.assertIn("off and on", catalog[key])
+            self.assertIn("n’t", catalog[key])
         for key, value in catalog.items():
             with self.subTest(key=key):
                 self.assertEqual(internal_words_in(value), [])
                 for word in ("tccutil", "terminal", "tcc", "bundle"):
                     self.assertNotIn(word, value.casefold())
+
+    def test_a_mac_that_has_dictated_before_opens_on_the_way_out(self):
+        # The grants existed once, so a missing one is an old entry macOS
+        # stopped honouring: the window opens on clearing it, one click.
+        seams = FakePermissionSeams()
+        flow = seams.flow(missing=("accessibility",), worked_before=True)
+        self.assertEqual(flow.stage, "stale")
+        flow.shown()
+        self.assertEqual(seams.lines, [
+            "[permissions] help shown permissions=accessibility",
+            "[permissions] help stale_detected permissions=accessibility"])
+        self.assertFalse(flow.reset(confirmed=False))
+        self.assertTrue(flow.reset(confirmed=True))
+        self.assertEqual(len(seams.ran), 2)
+        self.assertEqual(seams.restarts, 1)
+        # Not Now goes back to the switches, and nothing is cleared.
+        later = FakePermissionSeams()
+        flow = later.flow(worked_before=True)
+        flow.cancel_reset()
+        self.assertEqual(flow.stage, "missing")
+        self.assertEqual(later.ran, [])
+        # A first install has no such evidence and starts on the switches;
+        # so does a Mac whose grants are all there.
+        self.assertEqual(seams.flow().stage, "missing")
+        self.assertEqual(seams.flow(missing=(), worked_before=True).stage,
+                         "missing")
+
+    def test_each_switch_turned_on_sends_the_person_to_the_next_page(self):
+        seams = FakePermissionSeams()
+        flow = seams.flow()
+        self.assertEqual(flow.next_missing, "accessibility")
+        # Nothing opens before the person asks for the first page.
+        self.assertFalse(flow.update(("accessibility", "input_monitoring")))
+        self.assertEqual(seams.opened, [])
+        flow.open_settings(flow.next_missing)
+        self.assertFalse(flow.update(("input_monitoring",)))
+        self.assertEqual(flow.granted, ("accessibility",))
+        self.assertEqual([url.rsplit("?", 1)[1] for url in seams.opened],
+                         ["Privacy_Accessibility", "Privacy_ListenEvent"])
+        # A reading that changes nothing opens nothing more.
+        self.assertFalse(flow.update(("input_monitoring",)))
+        self.assertEqual(len(seams.opened), 2)
+        self.assertTrue(flow.update(()))
+
+    def test_a_switch_still_off_long_after_settings_reads_as_an_old_entry(self):
+        import whisper_face_gui as gui
+        now = [100.0]
+        seams = FakePermissionSeams()
+        flow = seams.flow(missing=("input_monitoring",), clock=lambda: now[0])
+        flow.update(("input_monitoring",))
+        self.assertFalse(flow.suspected)       # never been to Settings
+        flow.open_settings("input_monitoring")
+        now[0] += gui.PERMISSION_STALE_SUSPECT_SECONDS - 1
+        flow.update(("input_monitoring",))
+        self.assertFalse(flow.suspected)
+        now[0] += 1
+        flow.update(("input_monitoring",))
+        self.assertTrue(flow.suspected)
+        flow.update(("input_monitoring",))
+        self.assertEqual(seams.lines.count(
+            "[permissions] help stale_suspected permissions=input_monitoring"),
+            1)
+        # Suspecting only offers the way out; nothing is cleared by itself.
+        self.assertEqual(flow.stage, "missing")
+        self.assertEqual(seams.ran, [])
 
 
 @unittest.skipUnless(
@@ -8701,6 +8771,39 @@ class PermissionHelpAppKitTests(unittest.TestCase):
         self.assertEqual(seams.ran, [])
         window.buttons["still"].performClick_(None)
         window.buttons["confirm"].performClick_(None)
+        self.assertEqual(len(seams.ran), 2)
+        self.assertEqual(seams.restarts, 1)
+
+    def test_the_window_walks_both_switches_in_order(self):
+        seams = FakePermissionSeams()
+        window = self.controller(seams.flow(missing=("input_monitoring",)))
+        # The one already on has no button; the next one is the default.
+        self.assertNotIn("accessibility", window.buttons)
+        self.assertEqual(window.buttons["input_monitoring"].keyEquivalent(), "\r")
+        both = self.controller(seams.flow())
+        self.assertEqual(both.buttons["accessibility"].keyEquivalent(), "\r")
+        self.assertEqual(both.buttons["input_monitoring"].keyEquivalent(), "")
+        labels = {view.accessibilityLabel() for view in
+                  window.content.subviews() if view.accessibilityLabel()}
+        self.assertIn("Accessibility, on", labels)
+        self.assertIn("Input Monitoring, not on yet", labels)
+
+    def test_an_old_entry_is_answered_with_the_way_out(self):
+        now = [0.0]
+        seams = FakePermissionSeams()
+        window = self.controller(seams.flow(
+            missing=("accessibility",), clock=lambda: now[0]))
+        self.assertEqual(window.buttons["still"].title(), "Still Not Working…")
+        window.buttons["accessibility"].performClick_(None)
+        import whisper_face_gui as gui
+        now[0] += gui.PERMISSION_STALE_SUSPECT_SECONDS
+        window.applyReading_(["accessibility"])
+        self.assertEqual(window.buttons["still"].title(), "Ask macOS Again…")
+        stale = self.controller(seams.flow(worked_before=True))
+        self.assertEqual(stale.buttons["confirm"].keyEquivalent(), "\r")
+        self.assertEqual(stale.buttons["cancel"].title(), "Not Now")
+        self.assertEqual(seams.ran, [])
+        stale.buttons["confirm"].performClick_(None)
         self.assertEqual(len(seams.ran), 2)
         self.assertEqual(seams.restarts, 1)
 

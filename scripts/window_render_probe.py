@@ -68,8 +68,8 @@ macOS withholds Accessibility or Input Monitoring:
 
     uv run scripts/window_render_probe.py --permissions [output-dir]
 
-It writes permissions-{both,accessibility,input-monitoring,confirm,failed}-
-{light,dark}.png. The window's seams are fakes here: nothing opens System
+It writes permissions-{both,accessibility,input-monitoring,suspect,stale,
+confirm,failed}-{light,dark}.png. The window's seams are fakes here: nothing opens System
 Settings and nothing touches a privacy setting.
 
 Pass ``--overlay`` to review the recording overlay instead of the window:
@@ -351,6 +351,8 @@ def render_permissions(out: Path) -> int:
         ("both", ("accessibility", "input_monitoring"), "missing"),
         ("accessibility", ("accessibility",), "missing"),
         ("input-monitoring", ("input_monitoring",), "missing"),
+        ("suspect", ("input_monitoring",), "suspect"),
+        ("stale", ("accessibility", "input_monitoring"), "stale"),
         ("confirm", ("accessibility", "input_monitoring"), "confirm"),
         ("failed", ("accessibility", "input_monitoring"), "failed"),
     )
@@ -360,7 +362,9 @@ def render_permissions(out: Path) -> int:
             flow = gui.PermissionHelpFlow(
                 missing=missing, opener=refuse, runner=refuse,
                 restart=refuse, record=lambda _line: None)
-            flow.stage = stage
+            # "suspect": switched on in Settings long ago and still off.
+            flow.suspected = stage == "suspect"
+            flow.stage = "missing" if stage == "suspect" else stage
             controller = gui.PermissionHelpWindowController.alloc() \
                 .initWithFlow_(flow)
             controller.window.setAppearance_(
