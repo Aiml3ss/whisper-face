@@ -9030,6 +9030,9 @@ def ensure_single_instance():
     return fd                               # keep the fd (and lock) alive
 
 
+# main() opens the microphone and starts the hotkey listener on this thread,
+# beside the event loop, so nothing that waits can hold the menu bar blank.
+STARTUP_THREAD_NAME = "whisper-face-startup"
 PERMISSION_ATTEMPT_ENV = "WHISPER_FACE_PERMISSION_ATTEMPT"
 PERMISSION_RECHECK_ENV = "WHISPER_FACE_PERMISSION_RECHECK_SECONDS"
 PERMISSION_RECHECK_SECONDS = 3.0        # a grant should start the app at once
@@ -16881,30 +16884,36 @@ def main():
         except Exception:
             print("! Automatic microphone recovery notifications unavailable")
 
-    # Open and exercise both reusable streams before enabling the hotkey. This
-    # deliberately pays CoreAudio's cold-start cost at launch, never after the
-    # user has heard the recording cue and begun speaking.
-    try:
-        trace_operation("warmup_audio_pool", AUDIO_POOL.warm)
-    except Exception as e:
-        print(f"! Microphone unavailable: {e}")
-        if IS_MACOS:
-            print("  Enable 'Whisper Face' under System Settings -> Privacy &"
-                  " Security -> Microphone. A keypress will retry"
-                  " initialization.")
-        else:
-            print("  Enable microphone access under Windows Settings -> "
-                  "Privacy & security. A keypress will retry initialization.")
-    if PREFERENCES["flight_recorder"]:
+    def open_microphone():
+        # Open and exercise both reusable streams before enabling the hotkey.
+        # This deliberately pays CoreAudio's cold-start cost at launch, never
+        # after the user has heard the recording cue and begun speaking. It
+        # runs on the startup thread, never the main one: the first open on a
+        # new Mac waits for the person to answer macOS's microphone question,
+        # and the menu-bar face is drawn and clickable only while the main
+        # thread runs its event loop.
         try:
-            FLIGHT.enable()
-            print("[flight] active: 20s RAM-only buffer; tap "
-                  f"{hotkey_label_for(HOTKEY_NAME)} after speaking")
-            STATUS["bar"].setState_("idle")
+            trace_operation("warmup_audio_pool", AUDIO_POOL.warm)
         except Exception as e:
-            PREFERENCES["flight_recorder"] = False
-            save_preferences()
-            print(f"! Flight Recorder could not start: {e}")
+            print(f"! Microphone unavailable: {e}")
+            if IS_MACOS:
+                print("  Enable 'Whisper Face' under System Settings -> "
+                      "Privacy & Security -> Microphone. A keypress will "
+                      "retry initialization.")
+            else:
+                print("  Enable microphone access under Windows Settings -> "
+                      "Privacy & security. A keypress will retry "
+                      "initialization.")
+        if PREFERENCES["flight_recorder"]:
+            try:
+                FLIGHT.enable()
+                print("[flight] active: 20s RAM-only buffer; tap "
+                      f"{hotkey_label_for(HOTKEY_NAME)} after speaking")
+                AppHelper.callAfter(STATUS["bar"].setState_, "idle")
+            except Exception as e:
+                PREFERENCES["flight_recorder"] = False
+                save_preferences()
+                print(f"! Flight Recorder could not start: {e}")
 
     threading.Thread(target=warmup, daemon=True).start()
     threading.Thread(target=learn_scheduler, daemon=True).start()
@@ -17147,17 +17156,26 @@ def main():
             key_down, key_lock, events, modifiers,
             lambda: physical_key_is_down(HOTKEY), time.perf_counter())
 
-    LISTENER["make"] = make_listener
-    LISTENER["l"] = make_listener()
-    threading.Thread(
-        target=hotkey_watchdog_loop,
-        args=(recover_listener_state,),
-        daemon=True,
-    ).start()
-    threading.Thread(
-        target=hold_supervisor_loop, args=(supervise_hold,), daemon=True,
-    ).start()
+    def enable_hotkey():
+        open_microphone()
+        LISTENER["make"] = make_listener
+        LISTENER["l"] = make_listener()
+        threading.Thread(
+            target=hotkey_watchdog_loop,
+            args=(recover_listener_state,),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=hold_supervisor_loop, args=(supervise_hold,), daemon=True,
+        ).start()
 
+    # The menu-bar face was created above, but AppKit draws it and answers a
+    # click on it only once the event loop runs. Anything that can wait,
+    # such as the first microphone open after a permission grant restarted
+    # this process, runs beside the loop, so the face is never left blank.
+    threading.Thread(
+        target=enable_hotkey, name=STARTUP_THREAD_NAME, daemon=True,
+    ).start()
     AppHelper.runEventLoop(installInterrupt=True)
 
 
