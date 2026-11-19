@@ -10,6 +10,7 @@
   "recent_dictations": false,
   "self_correction": false,
   "remove_repeats": true,
+  "favor_my_words": true,
   "new_speech_runtime": false,
   "language": "en"
 }

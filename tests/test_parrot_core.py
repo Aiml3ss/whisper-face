@@ -36,6 +36,9 @@ from parrot_core import (  # noqa: E402
     hypothesis_agreement,
     parakeet_confidence_from_agreement,
     should_escalate_uncertain,
+    words_settle_route,
+    CONFIDENT_WORD,
+    CROSSCHECK_SKIP_CONFIDENCE,
     normalize_spacing,
     confidence_from_segments,
     recognition_words_from_segments,
@@ -1272,6 +1275,39 @@ class AgreementConfidenceTests(unittest.TestCase):
         self.assertFalse(should_escalate_uncertain(0.5, 5.0))
         self.assertFalse(should_escalate_uncertain(0.2, 30.0))
         self.assertFalse(should_escalate_uncertain(0.2, 0.0))
+    def test_only_native_words_all_at_the_floor_settle_the_route(self):
+        sure = (RecognitionWord("ship", 0, 0.2, 0.99),
+                RecognitionWord("it", 0.2, 0.4, CROSSCHECK_SKIP_CONFIDENCE))
+        unsure = sure + (RecognitionWord(
+            "now", 0.4, 0.6, CROSSCHECK_SKIP_CONFIDENCE - 0.001),)
+        self.assertTrue(words_settle_route(sure, "native"))
+        self.assertFalse(words_settle_route(unsure, "native"))
+        self.assertFalse(words_settle_route((), "native"))
+        for status in ("misaligned", "rejected", "v1-helper", "absent"):
+            self.assertFalse(words_settle_route(sure, status))
+        self.assertFalse(words_settle_route(
+            (RecognitionWord("x", 0, 0.1, None),), "native"))
+        # The review flag's line is lower; a word between the two is
+        # confident enough to need no flag and not enough to skip the check.
+        between = (RecognitionWord("ship", 0, 0.2, CONFIDENT_WORD),)
+        self.assertFalse(words_settle_route(between, "native"))
+        self.assertTrue(words_settle_route(between, "native",
+                                           floor=CONFIDENT_WORD))
+
+    def test_the_cross_check_line_is_the_calibrated_one(self):
+        # E3 on the owner's recordings (2026-11-17): every sentence Turbo
+        # would have improved had a lowest word confidence of at most
+        # 0.867. A line at or below it lets one of them skip the check.
+        self.assertEqual(CROSSCHECK_SKIP_CONFIDENCE, 0.90)
+        self.assertGreater(CROSSCHECK_SKIP_CONFIDENCE, 0.867)
+        self.assertGreater(CROSSCHECK_SKIP_CONFIDENCE, CONFIDENT_WORD)
+
+    def test_the_floor_is_the_compilers_word_confidence_line(self):
+        source = (ROOT / "voice_compiler.py").read_text(encoding="utf-8")
+        self.assertIn("< CONFIDENT_WORD:", source)
+        self.assertNotIn("< 0.78", source)
+
+
 class NonEnglishCleanupTests(unittest.TestCase):
     """Every rule in compile_cleanup is English by construction."""
 
@@ -1444,6 +1480,26 @@ class HelperProtocolTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertEqual(helper_protocol(status), 1)
 
+    def test_protocol_3_needs_words_and_sessions(self):
+        self.assertEqual(helper_protocol(
+            {"ready": True, "protocol": 3,
+             "capabilities": ["words", "sessions"]}), 3)
+        for status in (
+                {"ready": True, "protocol": 3, "capabilities": ["sessions"]},
+                {"ready": True, "protocol": 3, "capabilities": ["words"]},
+                {"ready": True, "protocol": 3.0,
+                 "capabilities": ["words", "sessions"]},
+                {"ready": True, "protocol": "3",
+                 "capabilities": ["words", "sessions"]},
+                {"ready": True, "protocol": 4,
+                 "capabilities": ["words", "sessions"]}):
+            with self.subTest(status=status):
+                self.assertEqual(helper_protocol(status), 1)
+        # A protocol 2 line that also lists sessions is still protocol 2.
+        self.assertEqual(helper_protocol(
+            {"ready": True, "protocol": 2,
+             "capabilities": ["words", "sessions"]}), 2)
+
     def test_a_result_is_the_protocol_1_pair_with_evidence_attached(self):
         result = parakeet_result(
             "Hello world.", 0.15,
@@ -1522,6 +1578,99 @@ class HelperProtocolTests(unittest.TestCase):
             combine_word_evidence_status(["unknown"]), "absent")
         self.assertEqual(Recognition("x").word_evidence_status, "absent")
         self.assertEqual(RecognitionWord("x").source, "")
+
+
+class VocabularyReportTests(unittest.TestCase):
+    """The speech runtime's term-pass report is untrusted input."""
+
+    @staticmethod
+    def detour(**changes):
+        detour = {
+            "term": "Priyanka", "written": "Priyanka", "heard": "Prea ka",
+            "heard_word_starts": [1.2, 1.52], "end": 1.76, "debt": 2.5,
+            "max_step_gap": 1.5, "heard_min_prob": 0.55,
+            "steps": [{"frame": 15, "piece": "\u2581Pri", "rank": 2,
+                       "gap": 1.0},
+                      {"frame": 18, "piece": "yanka", "rank": 0,
+                       "gap": 0.0}]}
+        detour.update(changes)
+        return detour
+
+    def test_a_valid_report_is_read_whole(self):
+        from parrot_core import parse_vocabulary_report
+        found = parse_vocabulary_report(
+            {"version": 3, "detours": [self.detour()]}, 3)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].term, "Priyanka")
+        self.assertEqual(found[0].heard_word_starts, (1.2, 1.52))
+        self.assertEqual([step.rank for step in found[0].steps], [2, 0])
+        self.assertEqual(parse_vocabulary_report(
+            {"version": 3, "detours": []}, 3), ())
+
+    def test_every_piece_must_be_among_its_steps_candidates(self):
+        # A rank outside the joint network's 64 candidates is a piece the
+        # model never offered there: the whole report is refused.
+        from parrot_core import parse_vocabulary_report
+        for step in ({"frame": 15, "piece": "\u2581Pri", "rank": 64,
+                      "gap": 1.0},
+                     {"frame": 15, "piece": "\u2581Pri", "rank": -1,
+                      "gap": 1.0},
+                     {"frame": 15, "piece": "\u2581Pri", "rank": 1,
+                      "gap": -0.5},
+                     {"frame": 15, "piece": "", "rank": 1, "gap": 0.5},
+                     {"frame": 15.0, "piece": "x", "rank": 1, "gap": 0.5}):
+            with self.subTest(step=step):
+                self.assertIsNone(parse_vocabulary_report(
+                    {"version": 1, "detours": [self.detour(steps=[step])]},
+                    1))
+
+    def test_a_malformed_or_stale_report_is_no_evidence(self):
+        from parrot_core import parse_vocabulary_report
+        for raw, version in (
+                ({"version": 2, "detours": [self.detour()]}, 1),
+                ({"version": 1, "detours": [self.detour()]}, None),
+                ({"version": 1, "detours": "x"}, 1),
+                ({"version": 1, "detours": [self.detour(debt=-1)]}, 1),
+                ({"version": 1, "detours": [self.detour(
+                    heard_min_prob=1.5)]}, 1),
+                ({"version": 1, "detours": [self.detour(
+                    heard_word_starts=[2.0, 1.0])]}, 1),
+                ({"version": 1, "detours": [self.detour(term="")]}, 1),
+                ({"version": 1, "detours": [self.detour()] * 65}, 1),
+                ("bias", 1)):
+            with self.subTest(raw=str(raw)[:60]):
+                self.assertIsNone(parse_vocabulary_report(raw, version))
+
+    def test_only_a_helper_offering_vocabulary_is_sent_a_frame(self):
+        from parrot_core import helper_takes_vocabulary
+        self.assertTrue(helper_takes_vocabulary(
+            {"protocol": 2, "capabilities": ["words", "vocabulary"]}))
+        for status in ({"protocol": 2, "capabilities": ["words"]},
+                       {"protocol": 1, "capabilities": ["vocabulary"]},
+                       {"ready": True}, None):
+            with self.subTest(status=status):
+                self.assertFalse(helper_takes_vocabulary(status))
+
+    def test_the_control_frame_is_flagged_and_sized(self):
+        import struct
+        from parrot_core import vocabulary_control_frame
+        frame = vocabulary_control_frame([("Qwen", "typed")], 9, 5.0)
+        header = struct.unpack("<Q", frame[:8])[0]
+        self.assertEqual(header >> 63, 1)
+        self.assertEqual(header & ~(1 << 63), len(frame) - 8)
+        self.assertEqual(json.loads(frame[8:]), {
+            "op": "vocabulary", "version": 9, "max_debt": 5.0,
+            "terms": [{"text": "Qwen", "source": "typed"}]})
+
+    def test_a_report_moves_with_its_chunk(self):
+        from parrot_core import (parse_vocabulary_report,
+                                 shift_vocabulary_evidence)
+        found = parse_vocabulary_report(
+            {"version": 1, "detours": [self.detour()]}, 1)[0]
+        moved = shift_vocabulary_evidence(found, 10.0)
+        self.assertEqual(moved.heard_word_starts, (11.2, 11.52))
+        self.assertEqual(moved.end, 11.76)
+        self.assertEqual(moved.steps, found.steps)
 
 
 if __name__ == "__main__":

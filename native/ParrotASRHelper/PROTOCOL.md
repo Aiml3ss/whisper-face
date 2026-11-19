@@ -6,17 +6,19 @@ programs that run the Parakeet Unified model:
 - the FluidAudio helper, `Sources/parrot-asr-helper/main.swift` here, built
   on the FluidAudio 0.15.5 package. It speaks protocol 1 and is the default;
 - Whisper Face's own runtime, `native/ParrotSpeechRuntime`, which loads the
-  same model files with no package dependencies. It speaks protocols 1 and
-  2 and is used when `PARROT_ASR_RUNTIME=own` ("Which program answers",
+  same model files with no package dependencies. It speaks protocols 1, 2
+  and 3 and is used when `PARROT_ASR_RUNTIME=own` ("Which program answers",
   below).
 
 Each is a long-lived child process; audio crosses one pipe in RAM and never
 touches disk.
 
-Two protocols are defined. Protocol 1 is what the FluidAudio helper speaks.
-Protocol 2 adds each word's time and confidence. The client asks every
-program for protocol 2 and reads, reshapes and records the words of one
-that answers it.
+Three protocols are defined. Protocol 1 is what the FluidAudio helper
+speaks. Protocol 2 adds each word's time and confidence. Protocol 3 adds
+sessions: a long take's audio sent while it is captured, decoded window by
+window, and answered at release. The client asks every program for
+protocol 3; it reads, reshapes and records the words of one that answers
+2 or 3, and streams long takes only to one that answers 3.
 
 ## Process modes
 
@@ -43,14 +45,14 @@ Arguments after the mode:
   ignores it and uses FluidAudio's default folder, which is the same
   folder.
 
-`dictate.py` launches either program as `<program> --server --protocol 2
+`dictate.py` launches either program as `<program> --server --protocol 3
 --models <dir>`, with every `FLUID_*` variable removed from its environment
 (FluidAudio reads tuning overrides from them). `setup.sh` runs the
 FluidAudio helper with `--preload` and `--verify`, and the runtime with
-`--preload` and `--verify`, each followed by `--protocol 2 --models <dir>`.
+`--preload` and `--verify`, each followed by `--protocol 3 --models <dir>`.
 The runtime is optional while it is off by default: a runtime that does not
 build or preload is removed and the install goes on. `--verify` passes when
-it is absent and fails when one is present and does not answer protocol 2.
+it is absent and fails when one is present and does not answer protocol 3.
 
 Ready line (server mode), one JSON object terminated by `\n`:
 
@@ -121,13 +123,14 @@ Protocol 2 adds three keys to the ready line and to the `--preload` /
 `--verify` line:
 
 ```json
-{"capabilities":["words"],"engine":"parrot-speech-runtime-1","load_s":0.14,"model":"parakeet-unified","protocol":2,"ready":true}
+{"capabilities":["words","vocabulary"],"engine":"parrot-speech-runtime-1","load_s":0.14,"model":"parakeet-unified","protocol":2,"ready":true}
 ```
 
 Python treats a helper as protocol 2 only when `protocol` is the integer 2
 and `capabilities` is a list containing `"words"`; anything else is
 protocol 1 (`parrot_core.helper_protocol`). `engine` names the program and
-its version; Python records nothing from it.
+its version; Python records nothing from it. `"vocabulary"` means the
+program takes the control frame below (`parrot_core.helper_takes_vocabulary`).
 
 A model folder that is missing or damaged makes the runtime print
 `{"error":"model load failed","ok":false}` and exit 1, in every mode and
@@ -175,12 +178,123 @@ Error responses are as in protocol 1. The runtime launched without
 `--protocol 2` answers exactly as protocol 1 does: the same ready line, and
 responses with exactly the keys `ok`, `processing_s` and `text`.
 
+### Control frames and the term pass (`"vocabulary"`)
+
+A request header whose top bit is set is a control frame: the low 63 bits
+are the length of a UTF-8 JSON object that follows (at most 256 KiB). Only
+a protocol 2 program that lists `"vocabulary"` reads one; a protocol 1
+program, or the runtime launched without `--protocol 2`, reads the header
+as a sample count and answers `invalid sample count`, so the client never
+sends one there. One operation exists:
+
+```json
+{"op":"vocabulary","version":81726354,"max_debt":5.0,
+ "terms":[{"text":"Priyanka","source":"typed"},{"text":"Qwen","source":"corrected"}]}
+```
+
+Reply: `{"ok":true,"op":"vocabulary","version":81726354,"terms":2,"dropped":0}`.
+A malformed frame gets `{"ok":false,"error":"invalid control frame"}` and
+changes nothing; a frame longer than 256 KiB, or cut off, ends the process.
+The runtime keeps at most 200 terms of at most 64 characters with a letter
+in them, splits each (as written, in lower case, and capitalised) into the
+model's vocabulary pieces, and holds them until the next frame. No terms, or
+a `max_debt` of 0, switches the term pass off; `max_debt` is clamped to 20.
+
+With terms set, after each window's normal decode the runtime runs the term
+pass (`TermBias.swift`): at each word the decode began, where a term's first
+piece was among that step's 64 candidates, it replays the same encoder
+output from the decoder state at that word and finds the cheapest way to
+emit a whole term, each step paying the gap between the joint network's top
+logit and the piece or blank taken, a piece outside the 64 candidates being
+impossible, the total ("debt") at most `max_debt`, and the term closed by a
+blank or a word-starting piece. Every response then carries a `bias` object:
+
+```json
+"bias":{"version":81726354,"terms":2,"added_ms":3.1,"forks":4,"joint_calls":41,
+        "decoder_calls":9,"stopped":false,
+        "detours":[{"term":"Priyanka","written":"Priyanka","heard":"Prea ka",
+                    "heard_word_starts":[1.2,1.52],"end":1.76,"debt":2.41,
+                    "max_step_gap":1.38,"heard_min_prob":0.552,
+                    "steps":[{"frame":15,"piece":"▁Pri","rank":2,"gap":1.38},
+                             {"frame":19,"piece":"yanka","rank":0,"gap":0}]}]}
+```
+
+- `text` and `words` are the normal decode's, byte for byte: the pass reads
+  the decode and reports; it never changes a transcript.
+- `heard_word_starts` are the `start`s of the words a detour would replace;
+  `end` is its last piece's time; `steps[].rank` is the piece's place among
+  that step's candidates (always below 64).
+- `stopped` is true when the pass stopped at its call limit (1,500 joint
+  and decoder calls a request); `added_ms` is its own time.
+- At most 64 detours, lowest debt first, one per term and place.
+
+Python reads the report with `parrot_core.parse_vocabulary_report` (any
+malformed field, a rank of 64 or more, or another list's `version` drops it
+whole) and decides with `voice_compiler.apply_vocabulary_evidence`, which in
+this version applies nothing.
+
+## Protocol 3: sessions
+
+Asked with `--protocol 3`, the runtime's ready and status lines say
+`"protocol":3` and `"capabilities":["words","vocabulary","sessions"]`; asked with
+`--protocol 2` it answers exactly as protocol 2 does. Python treats a
+program as protocol 3 only when `protocol` is the integer 3 and
+`capabilities` lists both `"words"` and `"sessions"`.
+
+Batch requests and their answers are exactly protocol 2's. A session is a
+recording sent in pieces while it is captured. Its messages share the
+request header: the operation in the top byte of the little-endian UInt64,
+a count in the low 56 bits. A batch request's count, ten minutes at most,
+never reaches the top byte, so for protocols 1 and 2 a session header is
+only an invalid sample count, as it always was.
+
+| Operation | Header | Followed by | Answer |
+| --- | --- | --- | --- |
+| batch | `N` (top byte 0) | `N` samples | as protocol 2 |
+| control frame | top bit set, JSON length | the JSON | as protocol 2 ("Control frames") |
+| begin | `1 << 56` | nothing | none; any unfinished session is dropped |
+| append | `2 << 56 \| n`, `0 < n <= 9_600_000` | `n` samples | none |
+| finish | `3 << 56` | nothing | as a batch request for the whole session, plus `samples` (and `bias_at_finish_ms` with terms) |
+| cancel | `4 << 56` | nothing | none |
+
+The runtime decodes each 15 s window the moment the session's audio covers
+it (14.96 s of audio, then every 12.96 s) and merges it onto the windows
+before it, exactly as a batch request merges them. `finish` decodes what is
+left, at most one window, so its time does not grow with the length of the
+take. Its answer is what one batch request with the whole recording would
+answer: the same windows, decoded the same way, merged in the same order
+(`scripts/speech_runtime_parity.py --session` measures every key but the
+timings on every clip, with and without a term list). `samples` is the
+number of samples the session was given; the client drops an answer whose
+count is not the take's.
+
+A session runs the term pass with the list the program held when it began
+(the client sends any changed list just before `begin`, as it does before a
+request). The pass runs over each window as that window is decoded, during
+the hold, so `finish` runs it only over the last window; its `bias` report
+is the one a single request for the whole recording gives, `added_ms`
+counting every window, and `bias_at_finish_ms` says how much of that was
+spent at release. With no term list a session runs no pass and its answer
+has neither key.
+
+A session longer than ten minutes, or one whose window fails to decode, is
+marked failed and its `finish` answers `{"ok": false, "error": "session
+failed: ..."}`; a `finish` with no session answers `{"ok": false, "error":
+"no session"}`. An unknown operation, or a count that does not fit its
+operation, answers `{"ok": false, "error": "invalid request"}`. Batch
+requests may come between a session's messages and do not touch it. As
+with every error, the client closes the program after one.
+
+The runtime keeps only the audio it has not decoded yet: at most one window
+and one append.
+
 ### Compatibility
 
-| Program \ client | Old client (`--server`) | Current client (`--server --protocol 2 --models DIR`) |
+| Program \ client | Old client (`--server`) | Current client (`--server --protocol 3 --models DIR`) |
 | --- | --- | --- |
-| FluidAudio helper (protocol 1) | Protocol 1. | The helper reads only its mode and answers protocol 1; the client sees no `protocol` key and records `v1-helper`. |
-| The runtime (protocol 2) | Protocol 1, with exactly the protocol 1 keys. | Protocol 2. |
+| FluidAudio helper (protocol 1) | Protocol 1. | The helper reads only its mode and answers protocol 1; the client sees no `protocol` key and records `v1-helper`, and never begins a session. |
+| A runtime built before sessions (protocol 2) | Protocol 1, with exactly the protocol 1 keys. | Protocol 2: words, and no session is begun. |
+| The runtime (protocol 3) | Protocol 1, with exactly the protocol 1 keys. | Protocol 3. |
 
 `tests/test_dictate.py` (`HelperProtocolCompatibilityTests`) pins all four
 cells with the fake helper of `tests/fake_platform.py` behind real pipes,
@@ -208,12 +322,32 @@ contract in its Swift sources. On a Mac with the model,
   must be strictly ordered, at least 1 ms long, and spell exactly the
   text's lexical tokens; otherwise the decode keeps no words. Times stay
   labelled `native`.
+- `ParakeetClient.begin_session`, `append_session`, `finish_session` and
+  `cancel_session` speak protocol 3 to the loaded runtime, and never start
+  one. `dictate.SpeechSession` streams a take once it is longer than one
+  window (14.96 s), from the take's own captured audio, half a second at a
+  time, on a pool of its own, off the audio thread. At release the session's
+  answer stands for the take only when the cross-check has nothing left to
+  do (`dictate.session_recognition`): the take needs no gain, every rolling
+  chunk the cross-check checked during the hold came back from Parakeet,
+  and every word after the last cut clears `CROSSCHECK_SKIP_CONFIDENCE`.
+  Otherwise, and on any failure, the take is decoded as it was without a
+  session: rolling chunks and the remainder, joined.
 - Each dictation records `word_evidence` (a count) and
   `word_evidence_status` in its transcript metrics: `native`, `v1-helper`,
   `rejected` (malformed words), `misaligned` (words that do not spell the
   text), or `absent` (no words expected or sent). Several decodes in one
   dictation report the worst. `acoustic_confidence` records the lowest
   `avg_confidence`; it is never the route confidence.
+- `PARAKEET_CONFIDENT_SKIPS_ESCALATION` (`True`) uses the words for one
+  thing only: a decode whose every word scores at least
+  `parrot_core.CROSSCHECK_SKIP_CONFIDENCE` (0.90) is never escalated to
+  Whisper Turbo before the paste. Tiny's cross-check still runs beside it
+  and still sets the route confidence. The line was calibrated on the
+  owner's 40 recorded sentences (experiment E3): every sentence Turbo would
+  have transcribed better scored a lowest word below 0.867, and the
+  escalation never fired on any of them. A decode with one word under the
+  line, or without words, is escalated exactly as before.
 - Two switches in `dictate.py` decide what the words may do, both `False`:
   `PROSODY_FORMATTING` (pauses between the helper's timed words may add
   commas and paragraphs) and `PARAKEET_WORD_CONFIDENCE_ROUTING` (a word's

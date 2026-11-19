@@ -33,7 +33,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import math
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 import types
 import unittest
 from unittest import mock
@@ -48,6 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
+    CleanupEdit,
     HELPER_WORD_SOURCE,
     NUMBER_WORDS,
     ParakeetResult,
@@ -58,12 +62,15 @@ from parrot_core import (  # noqa: E402
     parakeet_result,
     can_reuse_speculation,
     compile_cleanup,
+    finish_cleanup,
     infer_revised_insertion,
     mode_from_modifiers,
     should_start_speculation,
+    words_settle_route,
 )
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
+    apply_dictionary_spelling,
     ContextPack,
     EditProposal,
     RecognitionHypothesis,
@@ -94,6 +101,8 @@ from compatibility_fingerprint import (  # noqa: E402
 )
 from measurement_mode import MeasurementMode  # noqa: E402
 import insertion_integrity  # noqa: E402
+import parrot_core  # noqa: E402
+import voice_compiler  # noqa: E402
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
     InsertionCoordinator,
@@ -136,6 +145,13 @@ TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
 # if production changes them, but no test has to name them to get a language
 # code or an autorelease pool.
 BASELINE_DEFINITIONS = (
+    # The term pass's list, its version, and the shadow policy's recorder,
+    # which refresh_glossary, ParakeetClient and the pipeline call.
+    "vocabulary_version",
+    "vocabulary_bias_state",
+    "record_vocabulary_shadow",
+    # "Favor my words": what writes the policy's accepted decisions.
+    "apply_favored_words",
     "normalize_language",
     "join_recognized_parts",
     "current_language",
@@ -151,6 +167,16 @@ BASELINE_DEFINITIONS = (
     "position_check_applies",
     "position_readback",
     "_ax_character_count",
+    # How finish_and_process ends a take and times its release path, so
+    # every harness that finishes a take runs the real ones.
+    "capture_release",
+    "release_tail_is_silent",
+    "release_path_metrics",
+    "session_recognition",
+    # The pipe writes every helper request and session message makes.
+    "_write_helper_chunks",
+    "bounded_helper_write",
+    "speech_session_header",
 )
 BASELINE_ASSIGNMENTS = (
     "IS_MACOS",
@@ -169,13 +195,26 @@ BASELINE_ASSIGNMENTS = (
     "GLOSSARY_MAX_TERMS",
     # The helper word-evidence switches: the compiler and the assembly read
     # them on every dictation.
+    # The wait before the paste keystroke, read by every paste.
+    "PASTE_SETTLE_SECONDS",
     "PROSODY_FORMATTING",
     "PARAKEET_WORD_CONFIDENCE_ROUTING",
+    "PARAKEET_CONFIDENT_SKIPS_ESCALATION",
     "PARAKEET_PROTOCOL",
+    # Protocol 3 sessions: the switch, the append size and the headers.
+    "SPEECH_SESSION_DECODE",
+    "SPEECH_SESSION_APPEND_SAMPLES",
+    "SPEECH_SESSION_BEGIN",
+    "SPEECH_SESSION_APPEND",
+    "SPEECH_SESSION_FINISH",
+    "SPEECH_SESSION_CANCEL",
+    "SPEECH_SESSION_OPERATION_SHIFT",
     # bounded_helper_exchange's bound for a start, and the runtime's client.
     "PARAKEET_RUNTIME_START_ALLOWANCE",
     # The window a check by position waits for the cursor to move.
     "POSITION_CHECK_TIMEOUT",
+    # Why a "Favor my words" change was made, in the evidence inspector.
+    "VOCABULARY_EDIT_REASON",
 )
 
 try:  # pragma: no cover - depends on the runner
@@ -233,7 +272,9 @@ def load_definitions(*names, assignments=(), extra=None):
         raise AssertionError(f"production definitions missing: {sorted(missing)}")
     namespace = {
         "json": json,
+        "math": math,
         "re": re,
+        "time": time,
         "threading": threading,
         "contextlib": contextlib,
         "functools": functools,
@@ -242,11 +283,35 @@ def load_definitions(*names, assignments=(), extra=None):
         # Pure helpers the assembly and the compiler call on every decode.
         "HELPER_WORD_SOURCE": HELPER_WORD_SOURCE,
         "combine_word_evidence_status": combine_word_evidence_status,
+        # The clean-up's dictionary spelling rule, and the edit it records.
+        "apply_dictionary_spelling": apply_dictionary_spelling,
+        "CleanupEdit": CleanupEdit,
+        # The term pass: its list, its control frame and the shadow policy.
+        **{name: getattr(voice_compiler, name) for name in (
+            "VOCABULARY_REPORT_DEBT", "apply_vocabulary_evidence",
+            "vocabulary_alternative", "vocabulary_terms",
+            "VOCABULARY_EDIT_KIND", "apply_vocabulary_decisions")},
+        **{name: getattr(parrot_core, name) for name in (
+            "helper_takes_vocabulary", "shift_vocabulary_evidence",
+            "vocabulary_control_frame")},
+        "hashlib": hashlib,
+        # Whether the runtime is sure of every word: _parakeet_crosschecked
+        # asks on every Parakeet decode.
+        "words_settle_route": words_settle_route,
+        # quick_clean's finish, which voice_check.py replays too.
+        "finish_cleanup": finish_cleanup,
         # The pure readback comparisons dictate.py imports from
         # insertion_integrity, so a selected readback runs the real ones.
         **{name: getattr(insertion_integrity, name) for name in (
             "position_check", "position_count", "readback_difference",
-            "readback_stage", "same_but_whitespace_form", "utf16_units")},
+            "readback_stage", "review_selection_drift",
+            "same_but_whitespace_form", "user_input_since", "utf16_units")},
+        # finish_and_process journals every dictation before its paste. A
+        # harness about something else gets a journal that keeps nothing;
+        # DeliveryJournalTests load the real ones, which replace these.
+        "journal_dictation": lambda *_args, **_kwargs: False,
+        "settle_journaled_dictation": lambda *_args, **_kwargs: None,
+        "recover_journaled_dictations": lambda *_args, **_kwargs: 0,
     }
     # Shared constants come first so an explicit `extra` still overrides them
     # (tests pin IS_MACOS both ways), and a per-call copy keeps one test's
@@ -678,7 +743,8 @@ class PhoneEndpointRequestTests(unittest.TestCase):
                 "extract_tone_override": lambda raw: (raw, None),
                 "needs_llm_cleanup": lambda *args, **kwargs: False,
                 "quick_clean": lambda raw, verbatim=False, language="en": raw,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text, edits=None, evidence=(): text,
                 "TONE": {"default": ""},
             },
         )["phone_clean"]
@@ -730,7 +796,8 @@ class PhoneEndpointRequestTests(unittest.TestCase):
                 "needs_llm_cleanup": lambda *args, **kwargs: False,
                 "quick_clean": lambda raw, verbatim=False, language="en": raw,
                 "llm_clean": lambda raw, tone: raw,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text, edits=None, evidence=(): text,
                 "TONE": {"default": ""},
                 "append_transcript": lambda *args, **kwargs:
                     logged.append(args),
@@ -2535,6 +2602,180 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertEqual(len(payload), 8 + 2 * 4)
         self.assertAlmostEqual(requests[1][1], 3.0, places=4)
 
+    def test_the_term_list_reaches_only_a_runtime_that_offers_it(self):
+        from voice_compiler import VocabularyTerm
+
+        class FakeProcess:
+            stdin = stdout = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        bias = {"version": 7, "detours": [{
+            "term": "Priyanka", "written": "Priyanka", "heard": "Prea ka",
+            "heard_word_starts": [0.0, 0.32], "end": 0.56, "debt": 1.5,
+            "max_step_gap": 1.0, "heard_min_prob": 0.6, "steps": [
+                {"frame": 1, "piece": "\u2581Pri", "rank": 1, "gap": 1.0}]}]}
+        words = [{"word": "Prea", "start": 0.0, "end": 0.3,
+                  "confidence": 0.6},
+                 {"word": "ka", "start": 0.32, "end": 0.5,
+                  "confidence": 0.7}]
+
+        def run(capabilities, state, reply_ok=True):
+            requests = []
+
+            def exchange(_process, chunks, *, timeout):
+                payload = b"".join(bytes(chunk) for chunk in chunks)
+                requests.append(payload)
+                if not chunks:
+                    return {"ready": True, "load_s": 0.1, "protocol": 2,
+                            "capabilities": capabilities}
+                header = struct.unpack("<Q", payload[:8])[0]
+                if header >> 63:
+                    frame = json.loads(payload[8:])
+                    return {"ok": reply_ok, "op": "vocabulary",
+                            "version": frame["version"]}
+                return {"ok": True, "text": "Prea ka", "processing_s": 0.02,
+                        "words": words, "bias": bias}
+
+            with tempfile.TemporaryDirectory() as directory:
+                helper = Path(directory) / "parrot-speech-runtime"
+                helper.write_bytes(b"helper")
+                ns = load_definitions("ParakeetClient", extra={
+                    "PARAKEET_HELPER": helper, "PARAKEET_ENABLED": True,
+                    "Path": Path, "subprocess": subprocess,
+                    "threading": threading, "struct": struct, "time": time,
+                    "json": json, "np": np, "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                    "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                    "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                    "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                    **PARAKEET_CLIENT_NAMES,
+                    "mark_model_warm_path_observed": lambda _provider: True,
+                })
+                client = ns["ParakeetClient"](
+                    helper=helper, exchange=exchange,
+                    process_factory=lambda *_a, **_k: FakeProcess(),
+                    vocabulary=lambda: state)
+                audio = np.zeros(16_000, dtype=np.float32)
+                results = [client.transcribe(audio) for _ in range(2)]
+            frames = [json.loads(request[8:]) for request in requests
+                      if request and struct.unpack(
+                          "<Q", request[:8])[0] >> 63]
+            return results, frames
+
+        terms = (VocabularyTerm("Priyanka"),)
+        # Offered: the list is sent once, before the first request, and the
+        # report for that version rides on the result as evidence.
+        results, frames = run(["words", "vocabulary"], (terms, 7))
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["terms"],
+                         [{"text": "Priyanka", "source": "typed"}])
+        self.assertEqual(frames[0]["version"], 7)
+        self.assertEqual(results[0].text, "Prea ka")
+        self.assertEqual(
+            [c.term for c in results[0].vocabulary_evidence], ["Priyanka"])
+        # A report for another list is not evidence.
+        results, frames = run(["words", "vocabulary"], (terms, 8))
+        self.assertEqual(results[0].vocabulary_evidence, ())
+        # Not offered: never a frame, and no evidence.
+        results, frames = run(["words"], (terms, 7))
+        self.assertEqual(frames, [])
+        self.assertEqual(results[0].vocabulary_evidence, ())
+        # No terms: nothing is sent.
+        results, frames = run(["words", "vocabulary"], ((), 3))
+        self.assertEqual(frames, [])
+        # A refusal stops the sending, not the dictation.
+        results, frames = run(["words", "vocabulary"], (terms, 7),
+                              reply_ok=False)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual([result.text for result in results],
+                         ["Prea ka", "Prea ka"])
+        self.assertEqual(results[0].vocabulary_evidence, ())
+
+    def test_a_session_carries_the_term_list_it_began_with(self):
+        # Protocol 3: the list is sent before the session begins, as before
+        # a request, and the finish's report is evidence for that version.
+        from voice_compiler import VocabularyTerm
+
+        class FakeProcess:
+            stdin = stdout = None
+
+            def poll(self):
+                return None
+
+        bias = {"version": 7, "detours": [{
+            "term": "Priyanka", "written": "Priyanka", "heard": "Prea ka",
+            "heard_word_starts": [0.0, 0.32], "end": 0.56, "debt": 1.5,
+            "max_step_gap": 1.0, "heard_min_prob": 0.6, "steps": [
+                {"frame": 1, "piece": "\u2581Pri", "rank": 1, "gap": 1.0}]}]}
+        words = [{"word": "Prea", "start": 0.0, "end": 0.3,
+                  "confidence": 0.6},
+                 {"word": "ka", "start": 0.32, "end": 0.5,
+                  "confidence": 0.7}]
+        sent = []
+
+        def exchange(_process, chunks, *, timeout):
+            payload = b"".join(bytes(chunk) for chunk in chunks)
+            if not chunks:
+                return {"ready": True, "load_s": 0.1, "protocol": 3,
+                        "capabilities": ["words", "vocabulary", "sessions"]}
+            header = struct.unpack("<Q", payload[:8])[0]
+            sent.append(("exchange", header >> 56))
+            if header >> 63:
+                frame = json.loads(payload[8:])
+                return {"ok": True, "op": "vocabulary",
+                        "version": frame["version"]}
+            if header >> 56 == 3:
+                return {"ok": True, "text": "Prea ka", "processing_s": 0.02,
+                        "samples": 48_000, "words": words, "bias": bias,
+                        "bias_at_finish_ms": 0.4}
+            return {"ok": True, "text": "Prea ka", "processing_s": 0.02,
+                    "words": words}
+
+        def write(_process, chunks, *, timeout):
+            payload = b"".join(bytes(chunk) for chunk in chunks)
+            sent.append(("write", struct.unpack("<Q", payload[:8])[0] >> 56))
+
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "parrot-speech-runtime"
+            helper.write_bytes(b"helper")
+            ns = load_definitions("ParakeetClient", extra={
+                "PARAKEET_HELPER": helper, "PARAKEET_ENABLED": True,
+                "Path": Path, "subprocess": subprocess,
+                "threading": threading, "struct": struct, "time": time,
+                "json": json, "np": np, "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                **PARAKEET_CLIENT_NAMES,
+                "mark_model_warm_path_observed": lambda _provider: True,
+            })
+            client = ns["ParakeetClient"](
+                helper=helper, exchange=exchange,
+                process_factory=lambda *_a, **_k: FakeProcess(),
+                vocabulary=lambda: ((VocabularyTerm("Priyanka"),), 7))
+            client.write = write
+            client._start()
+            self.assertEqual(client.protocol, 3)
+            self.assertTrue(client.takes_vocabulary)
+            token = client.begin_session()
+            self.assertTrue(client.append_session(
+                token, np.zeros(48_000, dtype=np.float32)))
+            result = client.finish_session(token, 48_000)
+        # The control frame (top bit set) went first, then begin, append
+        # and finish.
+        self.assertEqual(sent, [("exchange", 0x80), ("write", 1),
+                                ("write", 2), ("exchange", 3)])
+        self.assertEqual(result.text, "Prea ka")
+        self.assertEqual(
+            [c.term for c in result.vocabulary_evidence], ["Priyanka"])
+
     @unittest.skipIf(os.name == "nt", "select() cannot wait on Windows pipes")
     def test_bounded_helper_exchange_times_out_without_a_response(self):
         input_read, input_write = os.pipe()
@@ -2974,6 +3215,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "recent_dictations": False,
                 "self_correction": False,
                 "remove_repeats": True,
+                "favor_my_words": True,
                 "new_speech_runtime": False,
                 "language": "en",
             })
@@ -3054,7 +3296,8 @@ class FacePreferenceTests(unittest.TestCase):
                     "is_hallucination": lambda *_args: False,
                     "looks_like_prompt_echo": lambda _raw: False,
                     "apply_learned_fixes": lambda raw: raw,
-                    "apply_vocabulary_casing": lambda text: text,
+                    "apply_vocabulary_casing":
+                        lambda text, edits=None, evidence=(): text,
                 },
             )
             spoken = "I thought it was Tuesday, actually Wednesday."
@@ -3095,6 +3338,56 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertEqual(ns["quick_clean"](spoken), spoken)
             self.assertEqual(ns["phone_clean"](spoken), spoken)
 
+    def test_favor_my_words_is_on_unless_the_file_says_false(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme", "set_favor_my_words",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                },
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                },
+            )
+            self.assertIs(ns["PREFERENCES"]["favor_my_words"], True)
+            # An install updated from before the key existed, and every
+            # value that is not the JSON literal false, has it on.
+            for stored in ({}, {"remove_repeats": False},
+                           {"favor_my_words": "false"},
+                           {"favor_my_words": 0},
+                           {"favor_my_words": None},
+                           {"favor_my_words": True}):
+                with self.subTest(stored=stored):
+                    ns["PREFERENCES"]["favor_my_words"] = False
+                    preferences.write_text(
+                        json.dumps(stored), encoding="utf-8")
+                    ns["load_preferences"]()
+                    self.assertIs(ns["PREFERENCES"]["favor_my_words"], True)
+            preferences.write_text(
+                json.dumps({"favor_my_words": False}), encoding="utf-8")
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["favor_my_words"], False)
+            self.assertIs(ns["set_favor_my_words"](True), True)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["favor_my_words"], True)
+            self.assertIs(ns["set_favor_my_words"](False), False)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["favor_my_words"], False)
+            ns["PREFERENCES"]["favor_my_words"] = True
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["favor_my_words"], False)
+
     def test_remove_repeats_is_on_unless_the_file_says_false(self):
         with tempfile.TemporaryDirectory() as directory:
             preferences = Path(directory) / "preferences.json"
@@ -3123,7 +3416,8 @@ class FacePreferenceTests(unittest.TestCase):
                     "is_hallucination": lambda *_args: False,
                     "looks_like_prompt_echo": lambda _raw: False,
                     "apply_learned_fixes": lambda raw: raw,
-                    "apply_vocabulary_casing": lambda text: text,
+                    "apply_vocabulary_casing":
+                        lambda text, edits=None, evidence=(): text,
                 },
             )
             spoken = "Of course I can. I have nothing I have nothing going on"
@@ -4884,6 +5178,54 @@ class AudioPoolTests(unittest.TestCase):
         ns["AUDIO_POOL"].warm()
         return ns
 
+    def test_a_finishing_take_does_not_wait_for_its_stream_to_stop(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        later = []
+        ns["release_stream_later"] = (
+            lambda slot, delivered=True: later.append((slot, delivered)))
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        block = np.full((512, 1), 0.05, dtype=np.float32)
+        recorder._callback(block, 512, None, None)
+
+        audio = recorder.stop(wait_for_stream=False)
+
+        self.assertEqual(len(audio), 512)
+        # Handed off, not stopped here: the slot stays busy until then.
+        self.assertEqual(streams[0].stops, 1)       # the warm-up's stop
+        self.assertEqual(len(later), 1)
+        self.assertIn(later[0][0], ns["AUDIO_POOL"].busy)
+        # The take ended when stop() returned: a block the still-running
+        # stream delivers afterwards is not part of it.
+        recorder._callback(block, 512, None, None)
+        self.assertEqual(len(recorder.frames.array()), 512)
+        ns["AUDIO_POOL"].release(later[0][0])
+        self.assertEqual(streams[0].stops, 2)
+
+    def test_stopping_in_place_still_stops_the_stream_before_returning(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        recorder.stop()
+        self.assertEqual(streams[0].stops, 2)
+        self.assertEqual(ns["AUDIO_POOL"].busy, set())
+
     def test_a_stream_that_delivers_nothing_is_detected_and_replaced(self):
         streams = []
         clock = {"now": 100.0}
@@ -5923,7 +6265,7 @@ class FlightRecorderTests(unittest.TestCase):
             press_at = 42.0
             source = "hold"
 
-            def stop(self):
+            def stop(self, wait_for_stream=True):
                 calls.append(("stop",))
                 # Detach would run pending recovery and clear the real Flight
                 # Recorder's frames at this point.
@@ -6117,7 +6459,8 @@ class CleanupGuardTests(unittest.TestCase):
                 "NUMBER_WORDS": NUMBER_WORDS,
                 "is_hallucination": lambda *_args: False,
                 "apply_learned_fixes": lambda raw: raw,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text, edits=None, evidence=(): text,
             },
         )
         clean = ns["phone_clean"]
@@ -6536,6 +6879,48 @@ class CleanupGuardTests(unittest.TestCase):
             "stable words provisional tail"))
         ns["_caption_add"](future)
         self.assertEqual(caption["text"], "stable words")
+
+    def test_a_decode_from_the_start_of_the_take_replaces_the_caption(self):
+        caption = {"text": "Ship the"}
+        ns = load_definitions(
+            "_caption_add",
+            extra={
+                "Recognition": Recognition,
+                "CAPTION": caption,
+                "compile_voice_evidence": lambda result, *_args, **_kw: (
+                    None, SimpleNamespace(stable_prefix=result.text)),
+                "is_hallucination": lambda *_args: False,
+            },
+        )
+        whole = SimpleNamespace(result=lambda: Recognition("Ship the notes"))
+        ns["_caption_add"](whole, replace=True)
+        self.assertEqual(caption["text"], "Ship the notes")
+        later = SimpleNamespace(result=lambda: Recognition("today"))
+        ns["_caption_add"](later)
+        self.assertEqual(caption["text"], "Ship the notes today")
+
+    def test_only_the_current_whole_take_speculation_sets_the_caption(self):
+        shown = []
+        ns = load_definitions(
+            "CapturedAudio", "Recorder",
+            assignments={"CAPTURE_BLOCK_SECONDS", "SAMPLE_RATE"},
+            extra={"np": np, "ContextPack": SimpleNamespace,
+                   "_caption_add": lambda done, *_args, **kwargs:
+                       shown.append((done, kwargs))})
+        recorder = ns["Recorder"]()
+        current, stale = object(), object()
+        recorder.recording = True
+        recorder.speculative_future = current
+        recorder._caption_whole_take(stale)
+        recorder.speculative_invalid = True
+        recorder._caption_whole_take(current)
+        recorder.speculative_invalid = False
+        recorder.recording = False
+        recorder._caption_whole_take(current)
+        self.assertEqual(shown, [])
+        recorder.recording = True
+        recorder._caption_whole_take(current)
+        self.assertEqual(shown, [(current, {"replace": True})])
 
     def test_live_caption_follows_the_silent_audio_rule_of_final_text(self):
         def caption_after(recognition):
@@ -7448,8 +7833,8 @@ class TranscriptRetentionTests(unittest.TestCase):
     NOW = 1_800_000_000.0
     DAY = 24 * 3600.0
     NAMES = (
-        "append_transcript", "transcript_app_identity",
-        "_transcript_entry_time", "retained_transcript_lines",
+        "append_transcript", "_append_transcript_entry",
+        "transcript_app_identity", "_transcript_entry_time", "retained_transcript_lines",
         "_trim_transcripts_locked", "_rebase_learned_processed",
         "prune_transcripts", "clear_transcript_history",
         "load_learned", "save_learned",
@@ -8003,7 +8388,7 @@ class LearningTests(unittest.TestCase):
                 "PERSONAL_GLOBAL_MIN_COUNT", "ANCHOR_MAX_TERMS",
                 "CORRECTION_DELAY", "CORRECTION_POLL_INTERVAL",
                 "CORRECTION_MAX_LEARN", "CORRECTION_STABLE_POLLS",
-                "VOCAB_WORD_RE", "MIN_SECONDS", "GATE_PEAK_RMS", "CONT_END",
+                "MIN_SECONDS", "GATE_PEAK_RMS", "CONT_END",
             },
             extra={
                 "Path": Path,
@@ -8123,7 +8508,7 @@ class LearningTests(unittest.TestCase):
                 raise AssertionError(f"pipeline stopped early: {log}")
 
             rec = SimpleNamespace(
-                released_at=clock[0], stop=lambda: np.zeros(
+                released_at=clock[0], stop=lambda **_kwargs: np.zeros(
                     16_000, dtype=np.float32),
                 cut_samples=0, chunks=[], speculative_future=None,
                 speculative_invalid=False, speculative_start=0,
@@ -8161,11 +8546,16 @@ class LearningTests(unittest.TestCase):
             }
             # Every other collaborator of the pipeline is inert here: it is
             # called, returns nothing, and so takes no branch of its own.
-            pipeline_node = next(
+            # capture_release is the pipeline's own first step, so its
+            # collaborators are the pipeline's too.
+            pipeline_nodes = [
                 node for node in TREE.body
                 if isinstance(node, ast.FunctionDef)
-                and node.name == "finish_and_process")
-            for node in ast.walk(pipeline_node):
+                and node.name in {"finish_and_process", "capture_release"}]
+            assert len(pipeline_nodes) == 2, pipeline_nodes
+            for node in (
+                    inner for pipeline_node in pipeline_nodes
+                    for inner in ast.walk(pipeline_node)):
                 if isinstance(node, ast.Name) and node.id not in ns \
                         and node.id not in fakes \
                         and not hasattr(builtins, node.id):
@@ -9114,6 +9504,38 @@ class LearningTests(unittest.TestCase):
 
 
 class InsertionAdapterTests(unittest.TestCase):
+    def test_the_input_signature_counts_in_the_order_drift_reads_it(self):
+        # A selection drift is renewed only when no key or click came in
+        # between, read from these counters by position: the signature has
+        # to write them in exactly the order insertion_integrity names.
+        definition = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "user_input_signature")
+        written = next(
+            [element.id for element in node.value.elts]
+            for node in ast.walk(definition)
+            if isinstance(node, ast.Assign)
+            and any(getattr(target, "id", None) == "event_types"
+                    for target in node.targets))
+        names = {
+            "kCGEventKeyDown": "key-down",
+            "kCGEventLeftMouseDown": "left-down",
+            "kCGEventLeftMouseUp": "left-up",
+            "kCGEventRightMouseDown": "right-down",
+            "kCGEventRightMouseUp": "right-up",
+            "kCGEventOtherMouseDown": "other-down",
+            "kCGEventOtherMouseUp": "other-up",
+            "kCGEventMouseMoved": "moved",
+            "kCGEventLeftMouseDragged": "left-dragged",
+            "kCGEventRightMouseDragged": "right-dragged",
+            "kCGEventOtherMouseDragged": "other-dragged",
+            "kCGEventScrollWheel": "scroll",
+        }
+        self.assertEqual(
+            tuple(names[name] for name in written),
+            insertion_integrity.USER_INPUT_EVENTS)
+
     def test_no_ax_element_fails_closed_instead_of_pasting_by_window(self):
         coordinator = InsertionCoordinator()
         pasted = []
@@ -10062,10 +10484,17 @@ class ElectronAccessibilityTests(unittest.TestCase):
     def _wake_retry(self):
         # electron_wake_retry binds its detector/waker/text_reader defaults at
         # def-execution time, so those module globals must exist in the
-        # namespace even though every test overrides them per call.
+        # namespace even though every test overrides them per call. Each
+        # namespace has its own record of woken processes.
         return load_definitions(
             "electron_wake_retry", "_focus_read_is_empty",
+            "take_electron_wake_note",
+            assignments={
+                "ELECTRON_WAKE_TIMEOUT", "ELECTRON_WAKE_POLL",
+                "_ELECTRON_WOKEN_PIDS", "_ELECTRON_WAKE_LOCK",
+                "ELECTRON_WAKE_OUTCOMES", "_ELECTRON_WAKE_NOTE"},
             extra={
+                "os": os, "time": time,
                 "is_electron_app": lambda app: False,
                 "wake_electron_accessibility": lambda pid: True,
                 "_ax_text": lambda element: None,
@@ -10081,6 +10510,44 @@ class ElectronAccessibilityTests(unittest.TestCase):
             return reads[min(len(calls) - 1, len(reads) - 1)]
 
         return reader, calls
+
+    @staticmethod
+    def _clock():
+        """A clock that moves only when the code under test sleeps.
+
+        A wait that ignored its deadline would spin here forever, so the
+        fake refuses a step that does not move the clock and gives up
+        after a long run of steps: a broken wait fails, it never hangs.
+        """
+        now = [100.0]
+        sleeps = []
+
+        def sleeper(seconds):
+            if seconds <= 0 or len(sleeps) >= 1000:
+                raise AssertionError("the wait ran past its deadline")
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        return (lambda: now[0]), sleeper, sleeps
+
+    def _retry(self, ns, reader, pid=4242, *, electron=True, waker=None,
+               readable=("field",), own_pid=1, timeout=None):
+        clock, sleeper, sleeps = self._clock()
+        woken = []
+
+        def default_waker(target):
+            woken.append(target)
+            return True
+
+        result = ns["electron_wake_retry"](
+            reader, SimpleNamespace(processIdentifier=lambda: pid),
+            detector=lambda _app: electron,
+            waker=waker or default_waker,
+            text_reader=lambda element: (
+                "text" if element in readable else None),
+            clock=clock, sleeper=sleeper, own_pid=own_pid,
+            timeout=timeout)
+        return result, woken, sleeps, ns["take_electron_wake_note"]()
 
     def test_allowlisted_bundle_is_electron_without_touching_the_filesystem(
             self):
@@ -10149,58 +10616,189 @@ class ElectronAccessibilityTests(unittest.TestCase):
         )
         self.assertTrue(ns["is_electron_app"](cached_app))
 
-    def test_empty_electron_read_wakes_once_and_reads_again(self):
+    EMPTY = (-25212, None)   # kAXErrorNoValue: no focused element
+
+    def test_the_first_empty_read_wakes_and_waits_for_the_field(self):
         ns = self._wake_retry()
-        reader, calls = self._reader((0, "first-el"), (0, "second-el"))
-        waker_pids = []
+        reader, calls = self._reader(
+            self.EMPTY, self.EMPTY, self.EMPTY, (0, "field"))
+
+        result, woken, sleeps, note = self._retry(ns, reader)
+
+        # The tree arrives asynchronously, so the read straight after the
+        # wake is not the last word: it keeps reading until the field is
+        # there, in short steps.
+        self.assertEqual(result, (0, "field"))
+        self.assertEqual(woken, [4242])
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(sleeps), 2)
+        self.assertTrue(all(
+            0 < step <= ns["ELECTRON_WAKE_POLL"] for step in sleeps))
+        self.assertEqual(note, "woke-read")
+        self.assertIn(note, ns["ELECTRON_WAKE_OUTCOMES"])
+
+    def test_the_wait_after_a_wake_is_bounded(self):
+        ns = self._wake_retry()
+        reader, calls = self._reader(self.EMPTY)
+
+        result, woken, sleeps, note = self._retry(ns, reader)
+
+        self.assertEqual(result, self.EMPTY)
+        self.assertEqual(woken, [4242])
+        self.assertAlmostEqual(sum(sleeps), ns["ELECTRON_WAKE_TIMEOUT"])
+        self.assertLessEqual(
+            len(calls),
+            2 + ns["ELECTRON_WAKE_TIMEOUT"] / ns["ELECTRON_WAKE_POLL"])
+        self.assertEqual(note, "woke-empty")
+        self.assertIn(note, ns["ELECTRON_WAKE_OUTCOMES"])
+        # It stays short: this runs on the hotkey worker at key-down.
+        self.assertLessEqual(ns["ELECTRON_WAKE_TIMEOUT"], 0.5)
+
+    def test_an_app_process_is_woken_once(self):
+        ns = self._wake_retry()
+        self._retry(ns, self._reader(self.EMPTY)[0])
+
+        reader, calls = self._reader(self.EMPTY)
+        result, woken, sleeps, note = self._retry(ns, reader)
+
+        # The same process empty again: no second set, no second wait.
+        self.assertEqual(result, self.EMPTY)
+        self.assertEqual(woken, [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(note, "woken-earlier-empty")
+        self.assertIn(note, ns["ELECTRON_WAKE_OUTCOMES"])
+
+        # The app relaunched is a new process, and is woken again.
+        reader, _calls = self._reader(self.EMPTY, (0, "field"))
+        result, woken, _sleeps, note = self._retry(ns, reader, pid=4343)
+        self.assertEqual(woken, [4343])
+        self.assertEqual(note, "woke-read")
+
+    def test_a_wake_the_app_reports_as_an_error_still_waits_once(self):
+        ns = self._wake_retry()
+        refused = []
 
         def waker(pid):
-            waker_pids.append(pid)
-            return True
+            refused.append(pid)
+            return False
 
-        app = SimpleNamespace(processIdentifier=lambda: 4242)
-        err, focused = ns["electron_wake_retry"](
-            reader, app,
-            detector=lambda a: True,
-            waker=waker,
-            text_reader=lambda element: None,
-        )
+        result, _woken, sleeps, note = self._retry(
+            ns, self._reader(self.EMPTY, (0, "field"))[0], waker=waker)
+        self.assertEqual(result, (0, "field"))
+        self.assertEqual(note, "woke-read")
 
-        self.assertEqual(waker_pids, [4242])
-        self.assertEqual(len(calls), 2)
-        self.assertEqual((err, focused), (0, "second-el"))
+        result, _woken, sleeps, note = self._retry(
+            ns, self._reader(self.EMPTY)[0], pid=4343, waker=waker)
+        self.assertEqual(result, self.EMPTY)
+        self.assertEqual(note, "wake-refused")
+        self.assertIn(note, ns["ELECTRON_WAKE_OUTCOMES"])
+        self.assertEqual(refused, [4242, 4343])
+        # Refused is still once per process.
+        _result, _woken, sleeps, note = self._retry(
+            ns, self._reader(self.EMPTY)[0], pid=4343, waker=waker)
+        self.assertEqual(refused, [4242, 4343])
+        self.assertEqual((sleeps, note), ([], "woken-earlier-empty"))
+
+    def test_this_process_is_never_woken(self):
+        ns = self._wake_retry()
+        reader, calls = self._reader(self.EMPTY)
+
+        result, woken, sleeps, note = self._retry(
+            ns, reader, pid=4242, own_pid=4242)
+
+        self.assertEqual(result, self.EMPTY)
+        self.assertEqual((woken, sleeps, len(calls)), ([], [], 1))
+        self.assertIsNone(note)
 
     def test_empty_non_electron_read_does_not_wake(self):
         ns = self._wake_retry()
         reader, calls = self._reader((0, "only-el"))
-        waker_pids = []
-        app = SimpleNamespace(processIdentifier=lambda: 9)
-        err, focused = ns["electron_wake_retry"](
-            reader, app,
-            detector=lambda a: False,
-            waker=lambda pid: waker_pids.append(pid),
-            text_reader=lambda element: None,
-        )
 
-        self.assertEqual(waker_pids, [])
-        self.assertEqual(len(calls), 1)
-        self.assertEqual((err, focused), (0, "only-el"))
+        result, woken, sleeps, note = self._retry(
+            ns, reader, electron=False, readable=())
+
+        self.assertEqual(result, (0, "only-el"))
+        self.assertEqual((woken, sleeps, len(calls)), ([], [], 1))
+        self.assertIsNone(note)
 
     def test_non_empty_read_returns_without_waking(self):
         ns = self._wake_retry()
         reader, calls = self._reader((0, "editor"))
-        waker_pids = []
-        app = SimpleNamespace(processIdentifier=lambda: 9)
-        err, focused = ns["electron_wake_retry"](
-            reader, app,
-            detector=lambda a: True,
-            waker=lambda pid: waker_pids.append(pid),
-            text_reader=lambda element: "typed text",
-        )
 
-        self.assertEqual(waker_pids, [])
-        self.assertEqual(len(calls), 1)
-        self.assertEqual((err, focused), (0, "editor"))
+        result, woken, sleeps, note = self._retry(
+            ns, reader, readable=("editor",))
+
+        self.assertEqual(result, (0, "editor"))
+        self.assertEqual((woken, sleeps, len(calls)), ([], [], 1))
+        self.assertIsNone(note)
+
+    def test_the_note_is_taken_once(self):
+        ns = self._wake_retry()
+        self._retry(ns, self._reader(self.EMPTY, (0, "field"))[0])
+        # _retry took it; a second take finds nothing left behind.
+        self.assertIsNone(ns["take_electron_wake_note"]())
+
+    def test_only_manual_accessibility_is_set_on_the_application(self):
+        ns = load_definitions(
+            "wake_electron_accessibility", extra={"IS_MACOS": True})
+        calls = []
+        services = types.ModuleType("ApplicationServices")
+        services.AXUIElementCreateApplication = lambda pid: ("app", pid)
+        services.AXUIElementSetAttributeValue = (
+            lambda element, attribute, value:
+            calls.append((element, attribute, value)) or 0)
+        foundation = types.ModuleType("CoreFoundation")
+        foundation.kCFBooleanTrue = True
+        with mock.patch.dict(sys.modules, {
+                "ApplicationServices": services,
+                "CoreFoundation": foundation}):
+            self.assertTrue(ns["wake_electron_accessibility"](4242))
+        self.assertEqual(
+            calls, [(("app", 4242), "AXManualAccessibility", True)])
+
+    def test_enhanced_user_interface_is_never_set(self):
+        # AXEnhancedUserInterface also changes AppKit window animation and
+        # some apps' layout, so it may be named in prose but never used.
+        used = [
+            node for node in ast.walk(TREE)
+            if isinstance(node, ast.Constant)
+            and node.value == "AXEnhancedUserInterface"]
+        self.assertEqual(used, [])
+        # The one Accessibility write to an application element is the wake.
+        setters = [
+            node for node in ast.walk(TREE)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None)
+            == "AXUIElementSetAttributeValue"]
+        app_writes = [
+            node for node in setters
+            if isinstance(node.args[0], ast.Call)
+            and getattr(node.args[0].func, "id", None)
+            == "AXUIElementCreateApplication"]
+        self.assertEqual(len(app_writes), 1)
+        self.assertEqual(app_writes[0].args[1].value, "AXManualAccessibility")
+
+    def test_the_runtime_records_the_wake_at_key_down(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "                        take_electron_wake_note()\n"
+            "                        (rec.focus_at_press, rec.context_terms,\n"
+            "                         rec.context_pack) = "
+            "capture_recognition_context(\n"
+            "                             rec.bundle_at_press)\n", source)
+        self.assertIn(
+            "                        rec.insertion_ax_wake = "
+            "take_electron_wake_note()\n", source)
+        recorder = next(
+            node for node in TREE.body
+            if isinstance(node, ast.ClassDef) and node.name == "Recorder")
+        for method in ("__init__", "start"):
+            body = ast.unparse(next(
+                node for node in recorder.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == method))
+            self.assertIn("self.insertion_ax_wake = None", body)
 
     def test_focus_read_emptiness_covers_error_missing_and_unreadable(self):
         ns = self._wake_retry()
@@ -10787,7 +11385,7 @@ class ReleasePlanTests(unittest.TestCase):
             released_at = 1.0
             recording = False
 
-            def stop(self):
+            def stop(self, wait_for_stream=True):
                 raise RuntimeError("private device detail")
 
         ns["finish_and_process"](
@@ -11279,6 +11877,69 @@ class ReleasePlanTests(unittest.TestCase):
             skipped_peak=ns["peak_rms"](audio[~covered]),
             gate=ns["GATE_PEAK_RMS"], reused=reused)
 
+    def whole_take(self, segments, whole_take_seconds, block=1024):
+        """The rolling plan's chunk ranges over synthetic audio, with the
+        whole-take bound set as the hotkey worker sets it."""
+        class Pending:
+            def cancel(self):
+                return False
+
+            def done(self):
+                return False
+
+            def add_done_callback(self, _callback):
+                pass
+
+        ns = load_definitions(
+            "CapturedAudio", "BoundedRecognitionFuture", "Recorder",
+            "peak_rms",
+            assignments={
+                "SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS", "SILENCE_RMS",
+                "GATE_PEAK_RMS", "CHUNK_MIN_SECONDS", "CHUNK_CUT_SILENCE",
+                "SPECULATIVE_MIN_SECONDS", "SPECULATIVE_SILENCE",
+                "NO_AUDIO_SECONDS",
+            },
+            extra={
+                "dataclass": dataclass, "np": np, "time": time,
+                "ContextPack": SimpleNamespace, "LEVELS": [],
+                "should_start_speculation": should_start_speculation,
+                "can_reuse_speculation": can_reuse_speculation,
+                "CHUNK_PREP_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: Pending()),
+                "_speculative_frames": object(),
+                "_transcribe_frames": object(),
+                "_caption_add": lambda *_args, **_kwargs: None,
+            },
+        )
+        ns["calibrated_vad_threshold"] = lambda: ns["SILENCE_RMS"]
+        recorder = ns["Recorder"]()
+        recorder.recording = True
+        recorder.whole_take_samples = int(whole_take_seconds * 16_000)
+        rng = np.random.default_rng(0)
+        for seconds, rms in segments:
+            for _ in range(int(seconds * 16_000 / block)):
+                noise = rng.standard_normal((block, 1)).astype(np.float32)
+                recorder._callback(
+                    noise * (rms / float(np.sqrt(np.mean(noise ** 2)))),
+                    block, None, None)
+        return [(chunk.start_sample, chunk.end_sample)
+                for chunk in recorder.chunks]
+
+    def test_no_rolling_chunk_is_cut_within_the_whole_take_bound(self):
+        take = [(4.5, 0.05), (0.8, 0.0), (4.5, 0.05), (0.8, 0.0),
+                (2.0, 0.05), (0.3, 0.0)]
+        # The rolling plan cuts at both pauses...
+        self.assertEqual(len(self.whole_take(take, 0)), 2)
+        # ...and none while the take is still one window long.
+        self.assertEqual(self.whole_take(take, 14.96), [])
+
+    def test_past_the_bound_the_first_chunk_starts_at_the_beginning(self):
+        take = [(15.5, 0.05), (0.8, 0.0), (2.0, 0.05), (0.3, 0.0)]
+        chunks = self.whole_take(take, 14.96)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0][0], 0)
+        self.assertGreater(chunks[0][1], 15.5 * 16_000)
+
     def test_quiet_speech_after_a_pause_is_decoded_at_release(self):
         # Loud opening, a short pause, then speech under the rolling silence
         # threshold (0.008) but well above the speech gate (0.002).
@@ -11364,7 +12025,7 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.stopped = False
 
-            def stop(self):
+            def stop(self, wait_for_stream=True):
                 self.stopped = True
                 return audio
 
@@ -11399,13 +12060,14 @@ class ReleasePlanTests(unittest.TestCase):
 
     def _release(self, mode, language, spoken, selected="Hallo zusammen",
                  field=None, recognition=None, rewrite=None,
-                 model_installed=False):
+                 model_installed=False, overrides=None):
         """Drive finish_and_process from a decoded take to its insertion.
 
         ``field`` is the text already before the cursor. ``recognition``
         replaces the default confident decode of ``spoken``. ``rewrite``
         stands in for the cleanup model call, on an install where the model
-        is or is not on disk.
+        is or is not on disk. ``overrides`` replaces names in the selected
+        code's namespace.
         """
         pasted = []
         problems = []
@@ -11474,7 +12136,8 @@ class ReleasePlanTests(unittest.TestCase):
                 "is_verbatim_app": lambda _bundle: False,
                 "cursor_context": lambda: field,
                 "tone_for": lambda _bundle: "default",
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text, edits=None, evidence=(): text,
                 "focused_snapshot": lambda: SimpleNamespace(),
                 "make_paste_receipt": lambda *_args: SimpleNamespace(),
                 "commit_insertion": commit,
@@ -11513,15 +12176,125 @@ class ReleasePlanTests(unittest.TestCase):
             focus_at_press=SimpleNamespace(
                 selected_text=selected, text=selected,
                 selection=(0, len(selected))),
-            stop=lambda: np.ones(16_000, dtype=np.float32),
+            stop=lambda **_kwargs: np.ones(16_000, dtype=np.float32),
             cut_samples=8_000,
             chunks=[],
         )
         if rewrite is not None:
             ns["llm_clean_with_edits"] = rewrite
             ns["cleanup_model_installed"] = lambda: model_installed
+        ns.update(overrides or {})
         ns["finish_and_process"](recorder, SimpleNamespace(), {})
         return pasted, problems
+
+    def _favored(self, *, favor=True, mode="capture", language="en",
+                 verbatim=False, evidence=True, rank=1, spoken=None,
+                 heard=("Prea", "ka")):
+        """A take whose term pass found "Priyanka" over ``heard``, released
+        through the real pipeline with the compiler and clean-up reading
+        the recognition they are given. What was pasted, the words commands
+        were matched on, and the pipeline's state."""
+        from voice_compiler import VocabularyTerm
+        from parrot_core import VocabularyCandidate, VocabularyStep
+        words = ("Ask", *heard, "about", "it")
+        spoken = spoken or " ".join(words) + "."
+        timed = tuple(RecognitionWord(word, 0.4 * index, 0.4 * index + 0.3,
+                                      0.6, "native", HELPER_WORD_SOURCE)
+                      for index, word in enumerate(words))
+        candidate = VocabularyCandidate(
+            "Priyanka", "Priyanka", " ".join(heard),
+            tuple(0.4 * index for index in range(1, 1 + len(heard))),
+            0.4 * len(heard) + 0.3, 1.5, 1.0, 0.6,
+            (VocabularyStep(1, "\u2581Pri", rank, 1.0),))
+        recognition = Recognition(
+            spoken, confidence=0.93, engine="parakeet-unified",
+            audio_duration=2.0, words=timed,
+            word_evidence_status="native",
+            vocabulary_evidence=(candidate,) if evidence else ())
+        state = {"vocab_candidates": 0, "vocab_shadow_accepts": 0,
+                 "vocab_applied": 0, "last_vocabulary_applied": 0,
+                 "last_vocabulary_alternative": None}
+        matched = []
+
+        def compile_voice_evidence(recognition, *_args, **_kwargs):
+            return (SimpleNamespace(context=SimpleNamespace(candidates=())),
+                    SimpleNamespace(text=recognition.text, confidence=0.93,
+                                    decisions=(), anchors=(),
+                                    stable_prefix=""))
+
+        pasted, _problems = self._release(
+            mode, language, spoken, recognition=recognition,
+            overrides={
+                "PREFERENCES": {**BASELINE_VALUES["PREFERENCES"],
+                                "favor_my_words": favor},
+                "PIPELINE_STATE": state,
+                "GLOSS": {"lock": threading.Lock(),
+                          "vocabulary_terms": (VocabularyTerm("Priyanka"),),
+                          "vocabulary_version": 1},
+                "compile_voice_evidence": compile_voice_evidence,
+                "is_verbatim_app": lambda _bundle: verbatim,
+                "queue_voice_object_command":
+                    lambda text, *_args: matched.append(text) and False,
+                "compile_code_dictation": lambda text, *_args:
+                    SimpleNamespace(text=text, edits=[],
+                                    needs_semantic_cleanup=False),
+            })
+        return pasted, matched, state
+
+    def test_favor_my_words_writes_the_term_and_keeps_what_was_heard(self):
+        pasted, matched, state = self._favored()
+        self.assertEqual(pasted, ["Ask Priyanka about it."])
+        # Commands, the history's raw and "Replace with What You Said" get
+        # the words as heard.
+        self.assertEqual(matched, ["Ask Prea ka about it."])
+        # A recorded edit of its own kind, ahead of the clean-up's.
+        self.assertEqual(state["last_cleanup_edits"][0], "vocabulary_term")
+        self.assertEqual((state["vocab_shadow_accepts"],
+                          state["vocab_applied"],
+                          state["last_vocabulary_applied"]), (1, 1, 1))
+
+    def test_what_you_said_is_the_words_heard_before_favor_my_words(self):
+        # "Replace with What You Said" offers the raw transcript, taken
+        # before "Favor my words" writes into the recognition, so it puts
+        # the heard words back over a term the switch wrote.
+        source = ast.get_source_segment(
+            (ROOT / "dictate.py").read_text(encoding="utf-8"), next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "finish_and_process"))
+        heard = source.index("recognized_raw = raw\n")
+        favored = source.index("favored_edits = apply_favored_words(")
+        self.assertLess(heard, favored)
+        self.assertEqual(source.count("recognized_raw = "), 1)
+        self.assertIn('said=recognized_raw if rec.mode == "capture"', source)
+
+    def test_favor_my_words_off_is_the_shadow_as_before(self):
+        pasted, _matched, state = self._favored(favor=False)
+        self.assertEqual(pasted, ["Ask Prea ka about it."])
+        self.assertEqual(state["last_vocabulary_alternative"],
+                         "Ask Priyanka about it.")
+        self.assertEqual((state["vocab_shadow_accepts"],
+                          state["vocab_applied"]), (1, 0))
+        self.assertNotIn("vocabulary_term", state["last_cleanup_edits"])
+
+    def test_favor_my_words_rails_write_nothing(self):
+        for name, options in (
+                ("code mode", {"mode": "code"}),
+                ("verbatim app", {"verbatim": True}),
+                ("spoken verbatim", {
+                    "spoken": "Verbatim mode, Ask Prea ka about it."}),
+                ("another language", {"language": "de"}),
+                ("no report: the FluidAudio helper or Whisper",
+                 {"evidence": False}),
+                ("a piece the model did not offer", {"rank": 64}),
+        ):
+            with self.subTest(name):
+                pasted, _matched, state = self._favored(**options)
+                self.assertEqual(len(pasted), 1)
+                self.assertNotIn("Priyanka", pasted[0])
+                self.assertEqual(state["vocab_applied"], 0)
+                self.assertNotIn("vocabulary_term",
+                                 state.get("last_cleanup_edits", ()))
 
     def test_rewrite_modes_never_paste_the_instruction_without_the_model(self):
         # The cleanup model is English-only. In another language Edit used
@@ -11988,7 +12761,7 @@ class AcousticTimeMachineRuntimeTests(unittest.TestCase):
             def __init__(self):
                 self.stopped = False
 
-            def stop(self):
+            def stop(self, wait_for_stream=True):
                 self.stopped = True
 
         class FakeTimer:
@@ -12289,7 +13062,8 @@ class CustomVocabularyTests(unittest.TestCase):
                 "load_learned": lambda: {
                     "counts": {"swift": 3}, "fixes": {}, "confusions": {}},
                 "write_auto_section": lambda _promoted: None,
-                "personal_regression_lab": lambda _state: object(),
+                "personal_regression_lab":
+                    lambda _state: PersonalRegressionLab(),
                 "ContextPack": ContextPack,
                 "ContextCandidate": ContextCandidate,
                 "GLOSS": gloss,
@@ -12327,13 +13101,62 @@ class CustomVocabularyTests(unittest.TestCase):
         for candidate in gloss["anchor_pack"].candidates:
             self.assertEqual(candidate.weight, 3.5)
             self.assertEqual(candidate.source, "dictionary")
+        # Terms with a digit stay out of the term pass's first version.
+        self.assertEqual(gloss["vocabulary_terms"], ())
+
+    def test_refresh_glossary_scopes_the_term_pass_list(self):
+        manual = ["GitHub", "AI", "Mark", "Qwen3", "Priyanka", "-banned"]
+        gloss = {"lock": threading.Lock()}
+        ns = load_definitions(
+            "refresh_glossary", "corrected_away_words", "term_occurs",
+            extra={
+                "parse_dictionary": lambda: (
+                    [term for term in manual if not term.startswith("-")],
+                    {"banned"}),
+                "PersonalRegressionLab": PersonalRegressionLab,
+                "load_learned": lambda: {
+                    "counts": {}, "fixes": {}, "confusions": {}},
+                "write_auto_section": lambda _promoted: None,
+                "personal_regression_lab":
+                    lambda _state: PersonalRegressionLab(),
+                "ContextPack": ContextPack,
+                "ContextCandidate": ContextCandidate,
+                "GLOSS": gloss,
+                "PROMOTE_MIN_COUNT": 2,
+                "PERSONAL_GLOBAL_MIN_COUNT": 3,
+                "GLOSSARY_MAX_TERMS": 60,
+                "GLOSSARY_MAX_CHARS": 700,
+                "ANCHOR_MAX_TERMS": 256,
+                "ACOUSTIC_KEYWORD_MEMORY_LOCK": threading.Lock(),
+                "_load_acoustic_keyword_memory":
+                    lambda: (AcousticKeywordMemory(), "missing"),
+                "active_acoustic_keywords":
+                    lambda _path, _memory: ((), "missing"),
+                "measured_keyword_hints": tuple,
+                "ACOUSTIC_KEYWORD_ACTIVATION_FILE":
+                    Path("acoustic_keyword_activation.json"),
+            },
+        )
+        ns["refresh_glossary"]()
+        # Short, ordinary, and digit-bearing terms are left out
+        # (DESIGN-accuracy.md 3.0); what is left is typed.
+        self.assertEqual(
+            [(term.text, term.source) for term in gloss["vocabulary_terms"]],
+            [("GitHub", "typed"), ("Priyanka", "typed")])
+        first = gloss["vocabulary_version"]
+        self.assertEqual(first, ns["vocabulary_version"](
+            gloss["vocabulary_terms"]))
+        manual.append("Kubernetes")
+        ns["refresh_glossary"]()
+        self.assertNotEqual(gloss["vocabulary_version"], first)
+        self.assertEqual(ns["vocabulary_bias_state"](), (
+            gloss["vocabulary_terms"], gloss["vocabulary_version"]))
 
     def test_apply_vocabulary_casing_is_whole_word_and_additive(self):
         gloss = {"lock": threading.Lock(),
                  "vocabulary": {"github": "GitHub"}}
         ns = load_definitions(
             "apply_vocabulary_casing",
-            assignments={"VOCAB_WORD_RE"},
             extra={"GLOSS": gloss},
         )
         casing = ns["apply_vocabulary_casing"]
@@ -12352,6 +13175,44 @@ class CustomVocabularyTests(unittest.TestCase):
         self.assertEqual(
             casing("Kubectl is installed. Github and GITHUB. Iphone, iphone."),
             "Kubectl is installed. GitHub and GITHUB. Iphone, iPhone.")
+
+    def test_dictionary_spelling_is_recorded_as_its_own_clean_up_edit(self):
+        gloss = {"lock": threading.Lock(),
+                 "vocabulary": {"github": "GitHub", "mark": "Mark"}}
+        ns = load_definitions("apply_vocabulary_casing",
+                              extra={"GLOSS": gloss})
+        edits = []
+        self.assertEqual(
+            ns["apply_vocabulary_casing"]("push to git hub, mark", edits),
+            "push to GitHub, mark")
+        self.assertEqual(edits, [CleanupEdit(
+            "dictionary_spelling", "push to git hub, mark",
+            "push to GitHub, mark")])
+        # Nothing changed, nothing recorded.
+        edits.clear()
+        self.assertEqual(ns["apply_vocabulary_casing"]("mark it", edits),
+                         "mark it")
+        self.assertEqual(edits, [])
+        # A join over an ordinary word needs the term pass's report.
+        gloss["vocabulary"]["tailscale"] = "Tailscale"
+        from parrot_core import VocabularyCandidate, VocabularyStep
+        found = (VocabularyCandidate(
+            "Tailscale", "Tailscale", "tail scale", (0.0, 0.4), 0.7, 1.5,
+            1.0, 0.4, (VocabularyStep(1, "x", 0, 0.5),)),)
+        self.assertEqual(ns["apply_vocabulary_casing"](
+            "over tail scale", None), "over tail scale")
+        self.assertEqual(ns["apply_vocabulary_casing"](
+            "over tail scale", None, found), "over Tailscale")
+        # The shipped clean-up records it with the other clean-up edits.
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "text = apply_vocabulary_casing(\n"
+            "            text, vocabulary_edits,\n"
+            "            getattr(recognition, \"vocabulary_evidence\", ()))",
+            source)
+        self.assertIn('PIPELINE_STATE["last_cleanup_edits"].extend(\n'
+                      '            edit.kind for edit in vocabulary_edits)',
+                      source)
 
 
 class DelayedCleanupRuntimeTests(unittest.TestCase):
@@ -12635,7 +13496,8 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
                 ),
                 "quick_clean": lambda text, **_kwargs: text,
                 "strip_casual_period": lambda text: text,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text, edits=None, evidence=(): text,
                 "_restore_snippet_sentinels": lambda text, _restore: text,
             },
         )
@@ -12672,7 +13534,8 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
                 "compile_cleanup": compile_cleanup,
                 "LANGUAGE_DEFAULT": "en",
                 "strip_casual_period": lambda text: text,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text, edits=None, evidence=(): text,
                 "_restore_snippet_sentinels": lambda text, _restore: text,
             },
         )
@@ -12711,7 +13574,8 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
                     "tomorrow works for me", ()),
                 "quick_clean": lambda text, **_kwargs: text,
                 "strip_casual_period": lambda text: text,
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text, edits=None, evidence=(): text,
                 "_restore_snippet_sentinels": lambda text, _restore: text,
             },
         )
@@ -13381,18 +14245,347 @@ class TailSilencePollTests(unittest.TestCase):
         self.assertLess(waited, 0.05)
 
 
+class ReleasePathMetricsTests(unittest.TestCase):
+    """The release-path trace: contiguous stages from monotonic marks."""
+
+    MARKS = (10.0, 10.001, 10.001, 10.003, 10.043, 10.043, 10.048,
+             10.049, 10.100, 10.130)
+
+    def metrics(self, marks=MARKS, recognition=None, seconds=3.0):
+        ns = load_definitions("release_path_metrics")
+        return ns["release_path_metrics"](
+            marks, recognition or Recognition(
+                "x", native_processing_s=0.035, crosscheck_s=0.02),
+            seconds)
+
+    def test_stages_add_up_to_release_to_paste(self):
+        metrics = self.metrics()
+        schema = load_definitions(
+            assignments={"PERFORMANCE_TRACE_SCHEMAS"})[
+                "PERFORMANCE_TRACE_SCHEMAS"]["release_path"]
+        self.assertEqual(tuple(metrics), schema)
+        stages = schema[:schema.index("release_to_paste_ms")]
+        self.assertAlmostEqual(
+            sum(metrics[stage] for stage in stages),
+            metrics["release_to_paste_ms"], delta=0.01)
+        self.assertAlmostEqual(metrics["release_to_paste_ms"], 100.0, 3)
+        self.assertAlmostEqual(metrics["asr_ms"], 40.0, 3)
+        self.assertAlmostEqual(metrics["pre_paste_ms"], 51.0, 3)
+        self.assertAlmostEqual(metrics["receipt_ms"], 30.0, 3)
+        self.assertEqual(
+            (metrics["asr_native_ms"], metrics["crosscheck_ms"],
+             metrics["escalation_ms"], metrics["audio_ms"]),
+            (35.0, 20.0, 0.0, 3000.0))
+
+    def test_no_paste_or_a_broken_clock_gives_no_numbers(self):
+        no_paste = list(self.MARKS)
+        no_paste[8] = None
+        backwards = list(self.MARKS)
+        backwards[4] = 9.0
+        for marks in (no_paste, backwards, self.MARKS[:9],
+                      [*self.MARKS[:9], float("nan")]):
+            with self.subTest(marks=marks):
+                self.assertIsNone(self.metrics(marks))
+
+    def test_every_value_is_one_the_closed_trace_accepts(self):
+        ns = load_definitions(
+            "emit_performance_trace", "release_path_metrics",
+            assignments={"PERFORMANCE_TRACE_SCHEMAS",
+                         "PERFORMANCE_TRACE_PREFIX",
+                         "PERFORMANCE_TRACE_SCHEMA_VERSION"},
+            extra={"print": lambda *_args: None})
+        metrics = ns["release_path_metrics"](
+            self.MARKS, Recognition("x"), 0.0)
+        self.assertTrue(ns["emit_performance_trace"]("release_path", metrics))
+
+
+class SpeechSessionTests(unittest.TestCase):
+    """A long take streamed to the runtime while it is captured, and when
+    its answer stands for the take at release (session_recognition)."""
+
+    from concurrent.futures import Future
+
+    class Pool:
+        """Runs each job at once, in order, and records it."""
+
+        def __init__(self):
+            self.jobs = []
+
+        def submit(self, fn, *args):
+            self.jobs.append(fn.__name__)
+            future = SpeechSessionTests.Future()
+            try:
+                future.set_result(fn(*args))
+            except Exception as error:      # pragma: no cover - reported
+                future.set_exception(error)
+            return future
+
+    class Client:
+        """The runtime's client, recording what a session sent."""
+
+        def __init__(self, begin=True, answer=None):
+            self.begin = begin
+            self.answer = answer
+            self.appended = []
+            self.finished = []
+            self.cancelled = 0
+
+        def begin_session(self):
+            return "token" if self.begin else None
+
+        def append_session(self, token, audio):
+            self.appended.append(np.array(audio))
+            return True
+
+        def finish_session(self, token, expected):
+            self.finished.append(expected)
+            return self.answer
+
+        def cancel_session(self, token):
+            self.cancelled += 1
+
+    def setUp(self):
+        self.ns = load_definitions(
+            "SpeechSession", "CapturedAudio",
+            extra={"np": np, "SPEECH_SESSION_POOL": None,
+                   "time": time, "FIRST_COMPLETED": FIRST_COMPLETED,
+                   "wait_for_futures": wait_for_futures,
+                   "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                   "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                   "CAPTURE_BLOCK_SECONDS": 8, "SAMPLE_RATE": 16_000,
+                   "print": lambda *args, **kwargs: None})
+
+    def capture(self, client, total, *, start_after=1_000, block=512):
+        frames = self.ns["CapturedAudio"]()
+        pool = self.Pool()
+        session = self.ns["SpeechSession"](client, frames, start_after, pool)
+        audio = np.random.default_rng(3).normal(
+            0, 0.1, total).astype(np.float32)
+        captured = 0
+        while captured < total:
+            part = audio[captured:captured + block]
+            frames.append(part)
+            captured += len(part)
+            session.captured(captured)
+        return session, frames, audio, pool
+
+    def test_nothing_is_sent_until_the_take_outgrows_one_window(self):
+        client = self.Client()
+        session, _frames, _audio, pool = self.capture(
+            client, 1_000, start_after=1_000)
+        self.assertFalse(session.begun)
+        self.assertEqual(pool.jobs, [])
+        self.assertIsNone(session.finish(_frames, 1_000))
+        self.assertEqual(client.finished, [])
+
+    def test_the_take_is_sent_sample_for_sample_in_bounded_pieces(self):
+        client = self.Client(answer=("text", 0.01))
+        session, frames, audio, pool = self.capture(client, 50_000)
+        self.assertEqual(pool.jobs[0], "_begin")
+        self.assertEqual(session.finish(frames, len(audio)), ("text", 0.01))
+        self.assertEqual(client.finished, [len(audio)])
+        sent = np.concatenate(client.appended)
+        np.testing.assert_array_equal(sent, audio)
+        # Handed over at most once per SPEECH_SESSION_APPEND_SAMPLES of
+        # new audio (plus the first, and the rest at release), never per
+        # audio block.
+        self.assertLessEqual(len(client.appended), 50_000 // 8_000 + 2)
+
+    def test_the_usual_path_ending_first_is_not_kept_waiting(self):
+        import threading
+        client = self.Client(answer=("text", 0.01))
+        hold = threading.Event()
+        finish_session = client.finish_session
+        client.finish_session = lambda token, expected: (
+            hold.wait(5.0), finish_session(token, expected))[1]
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        session.pool = ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(session.pool.shutdown, wait=True)
+        self.addCleanup(hold.set)
+        usual = self.Future()
+        threading.Timer(0.05, usual.set_result, ("done",)).start()
+        # The usual path's last decode ends while the runtime is still
+        # finishing the session: nothing waits for the session's answer.
+        self.assertIsNone(session.finish(frames, len(audio), unless=[usual]))
+        hold.set()
+        # Without anything to race, the answer is waited for as before.
+        client = self.Client(answer=("text", 0.01))
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        session.pool = ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(session.pool.shutdown, wait=True)
+        self.assertEqual(session.finish(frames, len(audio), unless=[]),
+                         ("text", 0.01))
+
+    def test_a_session_that_did_not_begin_sends_nothing(self):
+        client = self.Client(begin=False, answer=("text", 0.01))
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        self.assertIsNone(session.finish(frames, len(audio)))
+        self.assertEqual(client.appended, [])
+        self.assertEqual(client.finished, [])
+
+    def test_other_audio_is_never_finished(self):
+        client = self.Client(answer=("text", 0.01))
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        # A take whose audio was replaced, or a different length.
+        other = self.ns["CapturedAudio"](audio)
+        self.assertIsNone(session.finish(other, len(audio)))
+        self.assertEqual(client.cancelled, 1)
+        client = self.Client(answer=("text", 0.01))
+        session, frames, audio, _pool = self.capture(client, 30_000)
+        self.assertIsNone(session.finish(frames, len(audio) - 1))
+        self.assertEqual(client.finished, [])
+
+    # ---- session_recognition
+
+    SPOKEN = "Alpha beta gamma delta."
+
+    def recognize(self, *, words, chunks=(), cut=0, audio=None,
+                  crosscheck=True, skip_escalation=True, answer=True,
+                  last_part_decoded=False):
+        """session_recognition over a session whose answer has these word
+        confidences, one word a second; what it returned and the session.
+        The last part's usual decode is still running unless
+        ``last_part_decoded``."""
+        from parrot_core import HelperWord
+        from voice_compiler import project_word_evidence
+        tokens = self.SPOKEN.split()
+        result = ParakeetResult(
+            self.SPOKEN, 0.05, avg_confidence=0.9,
+            word_evidence_status="native",
+            words=tuple(HelperWord(token, float(index), index + 0.8, conf)
+                        for index, (token, conf)
+                        in enumerate(zip(tokens, words))))
+        audio = (np.full(16_000 * 5, 0.3, dtype=np.float32)
+                 if audio is None else audio)
+        session = SimpleNamespace(
+            begun=True, finished=[], cancelled=[],
+            finish=lambda frames, expected, unless=(): (
+                session.finished.append(expected) or (
+                    result if answer else None)),
+            cancel=lambda: session.cancelled.append(True))
+        rec = SimpleNamespace(session=session, frames=object(), prompt=None)
+        ns = load_definitions(
+            "session_recognition", "usual_decode_ready", "usual_decodes",
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s", "crosscheck_agreement",
+            "prepare_asr_audio",
+            assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
+            extra={
+                "PARAKEET_CROSSCHECK": crosscheck,
+                "PARAKEET_CONFIDENT_SKIPS_ESCALATION": skip_escalation,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "SAMPLE_RATE": 16_000,
+                "np": np,
+                "active_calibration_settings": lambda: None,
+                "CalibrationSettings": type("CalibrationSettings", (), {}),
+                "project_word_evidence": project_word_evidence,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            })
+        chunk_futs = []
+        for engine, confidence in chunks:
+            future = self.Future()
+            future.set_result(Recognition(
+                "Alpha.", confidence, engine=engine))
+            chunk_futs.append(SimpleNamespace(future=future))
+        last_part = self.Future()
+        if last_part_decoded:
+            last_part.set_result(Recognition("Delta.", 0.9))
+        recognition = ns["session_recognition"](
+            rec, audio, cut, chunk_futs, SimpleNamespace(future=last_part))
+        self.assertIsNone(rec.session)
+        return recognition, session
+
+    def test_a_take_decoded_during_the_hold_never_finishes_its_session(self):
+        # A speculation of the last part stood and every chunk is back, so
+        # the usual path only joins; finishing the session would decode
+        # the last window at release for nothing.
+        recognition, session = self.recognize(
+            words=(0.99,) * 4, cut=16_000,
+            chunks=(("parakeet-unified", 0.9),), last_part_decoded=True)
+        self.assertIsNone(recognition)
+        self.assertEqual(session.finished, [])
+        self.assertEqual(session.cancelled, [True])
+        # A chunk still decoding, or the last part, keeps the session.
+        recognition, session = self.recognize(
+            words=(0.99,) * 4, cut=16_000,
+            chunks=(("parakeet-unified", 0.9),))
+        self.assertEqual(recognition.text, self.SPOKEN)
+        self.assertEqual(session.finished, [16_000 * 5])
+
+    def test_a_sure_take_is_the_sessions_whole_decode(self):
+        recognition, session = self.recognize(words=(0.95, 0.99, 0.9, 0.97))
+        self.assertEqual(recognition.text, self.SPOKEN)
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertAlmostEqual(recognition.confidence, 0.84)
+        self.assertEqual(session.finished, [16_000 * 5])
+        self.assertEqual(session.cancelled, [])
+
+    def test_only_words_after_the_last_cut_must_be_sure(self):
+        # The first two words were in a rolling chunk that the cross-check
+        # already checked during the hold; the last two were not.
+        recognition, _session = self.recognize(
+            words=(0.3, 0.5, 0.95, 0.99), cut=2 * 16_000,
+            chunks=(("parakeet-unified", 0.9),))
+        self.assertEqual(recognition.text, self.SPOKEN)
+        recognition, session = self.recognize(
+            words=(0.99, 0.99, 0.89, 0.99), cut=2 * 16_000,
+            chunks=(("parakeet-unified", 0.9),))
+        self.assertIsNone(recognition)
+        self.assertEqual(session.cancelled, [True])
+
+    def test_the_route_confidence_is_the_lowest_checked_chunks(self):
+        recognition, _session = self.recognize(
+            words=(0.99,) * 4, cut=16_000,
+            chunks=(("parakeet-unified", 0.62),))
+        self.assertAlmostEqual(recognition.confidence, 0.62)
+
+    def test_a_chunk_turbo_replaced_keeps_the_chunked_path(self):
+        recognition, session = self.recognize(
+            words=(0.99,) * 4, cut=16_000, chunks=(("turbo", 0.9),))
+        self.assertIsNone(recognition)
+        self.assertEqual(session.cancelled, [True])
+
+    def test_a_take_that_needs_gain_keeps_the_chunked_path(self):
+        # prepare_asr_audio lifts a quiet take, so the session's raw audio
+        # is not what one request would send; it is not even finished.
+        recognition, session = self.recognize(
+            words=(0.99,) * 4,
+            audio=np.full(16_000 * 5, 0.05, dtype=np.float32))
+        self.assertIsNone(recognition)
+        self.assertEqual(session.finished, [])
+
+    def test_switched_off_or_unanswered_keeps_the_chunked_path(self):
+        for changes in ({"skip_escalation": False}, {"answer": False}):
+            with self.subTest(**changes):
+                recognition, session = self.recognize(
+                    words=(0.99,) * 4, **changes)
+                self.assertIsNone(recognition)
+                self.assertEqual(session.cancelled, [True])
+
+    def test_with_the_cross_check_off_the_session_always_stands(self):
+        recognition, _session = self.recognize(
+            words=(0.2,) * 4, crosscheck=False, cut=16_000,
+            chunks=(("turbo", 0.9),))
+        self.assertEqual(recognition.text, self.SPOKEN)
+
+
 class ParakeetCrosscheckTests(unittest.TestCase):
     """Agreement-derived route confidence on the Parakeet primary path."""
 
     @staticmethod
     def crosschecked(*, parakeet_result, tiny_text=None, fallback=None,
                      crosscheck_enabled=True, tiny_cached=True,
-                     calls=None):
+                     calls=None, routing=False, skip_escalation=True,
+                     crosscheck_text=None):
         from parrot_core import (
             hypothesis_agreement,
             parakeet_confidence_from_agreement,
             should_escalate_uncertain,
+            words_settle_route,
         )
+        from voice_compiler import project_word_evidence
         calls = calls if calls is not None else []
 
         class ImmediatePool:
@@ -13434,12 +14627,139 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                 "parakeet_confidence_from_agreement":
                     parakeet_confidence_from_agreement,
                 "should_escalate_uncertain": should_escalate_uncertain,
+                "words_settle_route": words_settle_route,
+                "project_word_evidence": project_word_evidence,
+                "PARAKEET_WORD_CONFIDENCE_ROUTING": routing,
+                "PARAKEET_CONFIDENT_SKIPS_ESCALATION": skip_escalation,
                 "Recognition": Recognition,
                 "print": lambda *args, **kwargs: None,
             },
         )
         audio = np.zeros(16_000 * 4, dtype=np.float32)
-        return ns["_parakeet_crosschecked"](audio, None, verify=True), calls
+        return ns["_parakeet_crosschecked"](
+            audio, None, verify=True,
+            crosscheck_text=crosscheck_text), calls
+
+    @staticmethod
+    def worded(text, *confidences):
+        """A protocol 2 answer whose words carry these confidences."""
+        from parrot_core import HelperWord
+        tokens = text.split()
+        return ParakeetResult(
+            text, 0.05, avg_confidence=0.9, word_evidence_status="native",
+            words=tuple(
+                HelperWord(token, 0.5 * index, 0.5 * index + 0.4, confidence)
+                for index, (token, confidence)
+                in enumerate(zip(tokens, confidences))))
+
+    def test_off_the_crosscheck_runs_and_its_time_is_recorded(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=self.worded("Ship it today.", 0.99, 0.99, 0.99),
+            tiny_text="ship it today")
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo"])
+        self.assertAlmostEqual(recognition.confidence, 0.93)
+        self.assertGreaterEqual(recognition.crosscheck_s, 0.0)
+        self.assertIsNone(recognition.escalation_s)
+
+    def test_routing_on_sure_words_need_no_crosscheck_before_the_paste(self):
+        fallback = Recognition(
+            text="One two three.", confidence=0.2, engine="turbo")
+        # Every word at or above CROSSCHECK_SKIP_CONFIDENCE (0.90).
+        recognition, calls = self.crosschecked(
+            parakeet_result=self.worded("Alpha beta gamma.", 0.99, 0.95, 0.9),
+            tiny_text="one two three", fallback=fallback, routing=True)
+        # Neither Tiny nor a Turbo escalation ran; the text is Parakeet's.
+        self.assertEqual(calls, [])
+        self.assertEqual(recognition.text, "Alpha beta gamma.")
+        self.assertEqual(recognition.confidence, 0.84)
+        self.assertIsNone(recognition.alternative)
+        self.assertIsNone(recognition.crosscheck_s)
+
+    def test_a_sure_decode_is_never_escalated_and_tiny_still_runs(self):
+        # Tiny hears something else entirely (agreement 0): today that buys
+        # a Turbo decode before the paste. Every word at or above the
+        # calibrated line skips it; Tiny still ran beside the decode and
+        # still sets the route confidence and the alternative.
+        fallback = Recognition(
+            text="One two three.", confidence=0.2, engine="turbo")
+        for given in (None, "one two three"):
+            with self.subTest(tiny_from_speculation=given is not None):
+                recognition, calls = self.crosschecked(
+                    parakeet_result=self.worded(
+                        "Alpha beta gamma.", 0.99, 0.95, 0.9),
+                    tiny_text="one two three", fallback=fallback,
+                    crosscheck_text=given)
+                self.assertEqual(
+                    [repo for repo, _skip, _lang in calls],
+                    [] if given else ["tiny-repo"])
+                self.assertEqual(recognition.text, "Alpha beta gamma.")
+                self.assertEqual(recognition.engine, "parakeet-unified")
+                self.assertAlmostEqual(recognition.confidence, 0.45)
+                self.assertEqual(recognition.alternative, "one two three")
+                self.assertIsNone(recognition.escalation_s)
+
+    def test_one_word_under_the_line_escalates_exactly_as_before(self):
+        def run(**switches):
+            fallback = Recognition(
+                text="One two three.", confidence=0.2, engine="turbo")
+            return self.crosschecked(
+                parakeet_result=self.worded(
+                    "Alpha beta gamma.", 0.99, 0.899, 0.99),
+                tiny_text="one two three", fallback=fallback, **switches)
+
+        (recognition, calls), (before, before_calls) = (
+            run(), run(skip_escalation=False))
+        self.assertEqual(calls, before_calls)
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo", "turbo-repo"])
+        self.assertEqual(
+            (recognition.text, recognition.engine, recognition.verified,
+             recognition.alternative),
+            (before.text, before.engine, before.verified, before.alternative))
+        self.assertEqual(recognition.engine, "turbo")
+
+    def test_switched_off_a_sure_decode_escalates_as_before(self):
+        fallback = Recognition(
+            text="One two three.", confidence=0.2, engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=self.worded("Alpha beta gamma.", 0.99, 0.99, 0.99),
+            tiny_text="one two three", fallback=fallback,
+            skip_escalation=False)
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo", "turbo-repo"])
+        self.assertEqual(recognition.engine, "turbo")
+
+    def test_routing_on_one_unsure_word_keeps_the_whole_crosscheck(self):
+        def run(routing):
+            fallback = Recognition(
+                text="One two three.", confidence=0.2, engine="turbo")
+            return self.crosschecked(
+                parakeet_result=self.worded(
+                    "Alpha beta gamma.", 0.99, 0.77, 0.99),
+                tiny_text="one two three", fallback=fallback,
+                routing=routing)
+
+        (recognition, calls), (unrouted, _calls) = run(True), run(False)
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo", "turbo-repo"])
+        # Exactly what the cross-check gives with routing off.
+        self.assertEqual(
+            (recognition.text, recognition.engine, recognition.verified,
+             recognition.alternative),
+            (unrouted.text, unrouted.engine, unrouted.verified,
+             unrouted.alternative))
+        self.assertEqual(recognition.engine, "turbo")
+        self.assertGreaterEqual(recognition.escalation_s, 0.0)
+        self.assertGreaterEqual(recognition.crosscheck_s, 0.0)
+
+    def test_routing_on_without_native_words_keeps_the_crosscheck(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("Ship it today.", 0.05),
+            tiny_text="ship it today", routing=True)
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo"])
+        self.assertAlmostEqual(recognition.confidence, 0.93)
 
     def test_full_agreement_yields_high_confidence_and_no_alternative(self):
         recognition, _ = self.crosschecked(
@@ -14220,8 +15540,11 @@ class RecentDictationTests(unittest.TestCase):
         return load_definitions(
             "recent_dictation_metadata", "recent_dictation_menu_title",
             "describe_dictation_age", "undo_menu_title",
-            assignments={"RECENT_DICTATION_LIMIT"},
+            "transcript_receipt",
+            assignments={"RECENT_DICTATION_LIMIT", "TRANSCRIPT_RECEIPTS"},
             extra={"time": SimpleNamespace(time=lambda: 3700.0),
+                   "ReceiptReason": ReceiptReason,
+                   "ReceiptState": ReceiptState,
                    "math": __import__("math"),
                    "TRANSCRIPTS_LOCK": threading.Lock(),
                    "app_display_name":
@@ -14247,6 +15570,52 @@ class RecentDictationTests(unittest.TestCase):
         # A blank transcript and a corrupt line are simply not offered.
         self.assertEqual(len(ns["recent_dictation_metadata"](
             lines=self.LOG, now=3700.0)), 3)
+
+    def receipt(self, **metrics):
+        return self.namespace()["transcript_receipt"](
+            {"clean": "x", "metrics": metrics})
+
+    def test_each_dictation_says_what_became_of_it(self):
+        opaque = {"insertion_opaque_reason": "value-unsupported"}
+        for expected, metrics in (
+            ("proven", {"insertion_state": "verified",
+                        "insertion_reason": "commit_verified",
+                        "paste_attempted": True}),
+            ("proven", {"insertion_state": "verified",
+                        "insertion_reason": "commit_verified_whitespace_form",
+                        "paste_attempted": True}),
+            ("position", {"insertion_state": "verified",
+                          "insertion_reason": "commit_verified_position",
+                          "paste_attempted": True}),
+            ("unchecked", {"insertion_state": "unverifiable",
+                           "insertion_reason": "readback_unavailable",
+                           "paste_attempted": True, **opaque}),
+            ("unchecked", {"insertion_state": "legacy",
+                           "insertion_reason": "unsupported_field",
+                           "paste_attempted": True}),
+            # A field that could be read and went quiet is not "unchecked".
+            ("unconfirmed", {"insertion_state": "unverifiable",
+                             "insertion_reason": "readback_unavailable",
+                             "paste_attempted": True,
+                             "insertion_opaque_reason": None}),
+            ("unconfirmed", {"insertion_state": "conflict",
+                             "insertion_reason": "readback_conflict",
+                             "paste_attempted": True}),
+            ("not_pasted", {"insertion_state": "conflict",
+                            "insertion_reason": "focus_drift",
+                            "paste_attempted": False}),
+            ("interrupted", {"insertion_state": "unresolved",
+                             "insertion_reason": "interrupted",
+                             "paste_attempted": True}),
+        ):
+            with self.subTest(expected=expected, metrics=metrics):
+                self.assertEqual(self.receipt(**metrics), expected)
+        ns = self.namespace()
+        self.assertEqual(ns["transcript_receipt"]({"clean": "x"}), "unknown")
+        entries = ns["recent_dictation_metadata"](lines=self.LOG, now=3700.0)
+        self.assertEqual({entry["receipt"] for entry in entries}, {"unknown"})
+        for entry in entries:
+            self.assertIn(entry["receipt"], ns["TRANSCRIPT_RECEIPTS"])
 
     def test_older_entries_without_an_id_stay_addressable_by_position(self):
         ns = self.namespace()
@@ -14427,6 +15796,138 @@ class UndoLastDictationTests(unittest.TestCase):
 
         self.assertTrue(result["undone"])
         self.assertEqual(ns["_state"]["pasted"], ["hello"])
+
+    SAID = "um thanks for the note"
+
+    def _said_record(self, ns, said=None):
+        return ns["UndoableInsertion"](
+            element=ns["_element"],
+            bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-1",
+            inserted=self.INSERTED,
+            before=self.BEFORE,
+            selection=(len(self.BEFORE), 0),
+            said=self.SAID if said is None else said,
+        )
+
+    def test_replace_with_what_you_said_puts_the_raw_words_in_place(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._said_record(ns))
+        self.assertTrue(ns["undoable_insertion_status"]()["said_available"])
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), said=True)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE + self.SAID)
+        # Selected exactly the cleaned text, then pasted the raw words in
+        # one step: nothing was deleted on its own.
+        self.assertEqual(ns["_state"]["keys"].count(("shift", "left")),
+                         len(self.INSERTED))
+        self.assertNotIn(("backspace",), ns["_state"]["keys"])
+        self.assertEqual(ns["_state"]["pasted"], [self.SAID])
+        # The correction watcher must not learn from it.
+        self.assertTrue(ns["utterance_was_undone"]("utterance-1"))
+        # The raw words are now the undoable insertion, with nothing more
+        # to put back, and one more undo takes the dictation away.
+        status = ns["undoable_insertion_status"]()
+        self.assertTrue(status["available"])
+        self.assertFalse(status["said_available"])
+        again = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(
+                ns, caret=(len(self.BEFORE + self.SAID), 0)))
+        self.assertTrue(again["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_replace_with_what_you_said_refuses_when_nothing_differs(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._said_record(ns, said=""))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), said=True)
+
+        self.assertEqual(result, {"undone": False,
+                                  "reason": "nothing_to_change"})
+        self.assertEqual(ns["_state"]["keys"], [])
+        # The ordinary undo is still there.
+        self.assertTrue(ns["undoable_insertion_status"]()["available"])
+
+    def test_replace_with_what_you_said_is_held_to_undos_checks(self):
+        for reason, reader, bundle in (
+                ("selection_drift",
+                 lambda ns: self._snapshot(ns, caret=(3, 0)),
+                 "com.apple.mail"),
+                ("focus_drift", lambda ns: self._snapshot(ns),
+                 "com.tinyspeck.slackmacgap"),
+                ("target_unreadable", lambda ns: None, "com.apple.mail")):
+            with self.subTest(reason=reason):
+                ns = self.namespace()
+                record = self._said_record(ns)
+                ns["record_undoable_insertion"](record)
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=lambda: reader(ns),
+                    bundle_reader=lambda: bundle, said=True)
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual(ns["_state"]["text"],
+                                 self.BEFORE + self.INSERTED)
+                self.assertEqual(ns["_state"]["keys"], [])
+                self.assertIs(ns["UNDOABLE_INSERTION"]["record"], record)
+
+    def test_the_raw_words_keep_the_insertions_join_and_differ_from_it(self):
+        ns = self.namespace()
+        build = ns["build_undoable_insertion"]
+        snapshot = ns["FocusSnapshot"](
+            element=ns["_element"], text="Dear Ada,", selection=(9, 0))
+        ns["focus_destination_id"] = lambda *_args: "mail:field-1"
+        rec = SimpleNamespace(committed_text=" Thanks for the note.")
+        record = build(rec, snapshot, "com.apple.mail", "u-1",
+                       said="um thanks for the note")
+        self.assertEqual(record.said, " um thanks for the note")
+        same = build(rec, snapshot, "com.apple.mail", "u-1",
+                     said="Thanks for the note.")
+        self.assertEqual(same.said, "")
+        self.assertEqual(build(rec, snapshot, "com.apple.mail", "u-1").said,
+                         "")
+
+    def test_a_refusal_is_said_in_plain_words_and_logged_without_text(self):
+        ns = load_definitions(
+            "replace_with_what_you_said", "said_undo_refusal_text",
+            assignments=("SAID_UNDO_REASONS", "SAID_UNDO_UNCHECKED"))
+        logs, shown = [], []
+        ns["print"] = lambda *args: logs.append(" ".join(map(str, args)))
+        ns["AppHelper"] = SimpleNamespace(
+            callAfter=lambda function, *args: function(*args))
+        for reason in ("nothing_to_change", "selection_drift",
+                       "focus_drift", "surrounding_text_drift",
+                       "target_unreadable", "readback_conflict"):
+            with self.subTest(reason=reason):
+                ns["replace_with_what_you_said"](
+                    shown.append,
+                    undo=lambda said: {"undone": False, "reason": reason})
+                self.assertTrue(shown[-1])
+                self.assertNotIn("_", shown[-1])
+        self.assertIn("Nothing was changed", ns["said_undo_refusal_text"](
+            "selection_drift"))
+        self.assertIn("could not check", ns["said_undo_refusal_text"](
+            "readback_conflict"))
+        before = len(shown)
+        ns["replace_with_what_you_said"](
+            shown.append, undo=lambda said: {"undone": True, "reason": "x"})
+        self.assertEqual(len(shown), before)
+        for line in logs:
+            self.assertRegex(line, r"^\[undo\] what was said was not put "
+                                   r"back \([a-z_]+\)$")
+
+    def test_the_said_row_names_why_it_is_dimmed(self):
+        title = load_definitions(
+            "said_menu_title",
+            assignments=("SAID_MENU_TITLE",))["said_menu_title"]
+        self.assertEqual(title({"available": True, "said_available": True}),
+                         "Replace with What You Said")
+        self.assertEqual(
+            title({"available": True, "said_available": False}),
+            "Replace with What You Said — clean-up changed nothing")
+        self.assertEqual(title({"available": False}),
+                         "Replace with What You Said")
 
     def test_undo_refuses_when_focus_moved(self):
         ns = self.namespace()
@@ -15275,13 +16776,15 @@ class HelperProtocolCompatibilityTests(unittest.TestCase):
             helper_words_override=words_override, parakeet_requests=[],
             recognize=lambda audio, _engine: heard)
 
-    def client(self, desktop, *, arguments=None):
+    def client(self, desktop, *, arguments=None, program=None):
         if os.name == "nt":
             self.skipTest("select() cannot wait on Windows pipes")
         spawned = []
 
         def factory(argv, **kwargs):
             spawned.append((list(argv), kwargs))
+            if program is not None:
+                argv = [program, *argv[1:]]
             if arguments is not None:
                 argv = [argv[0], *arguments]
             process = self.fake.HelperProcess(desktop, argv)
@@ -15327,7 +16830,7 @@ class HelperProtocolCompatibilityTests(unittest.TestCase):
     def test_old_helper_with_new_client_stays_protocol_1(self):
         client, spawned = self.client(self.desktop(1))
         result = client.transcribe(np.full(16_000, 0.1, dtype=np.float32))
-        self.assertEqual(spawned[0][0][1:4], ["--server", "--protocol", "2"])
+        self.assertEqual(spawned[0][0][1:4], ["--server", "--protocol", "3"])
         self.assertEqual(client.protocol, 1)
         self.assertEqual(result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
         self.assertEqual(
@@ -15364,6 +16867,105 @@ class HelperProtocolCompatibilityTests(unittest.TestCase):
                     result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
                 self.assertEqual(result.word_evidence_status, "rejected")
                 self.assertIsNone(result.words)
+
+    # ---- protocol 3: the runtime's sessions
+
+    def runtime(self, **changes):
+        """A client of the fake runtime, which speaks protocol 3."""
+        desktop = self.desktop(2)
+        desktop.runtime_requests = []
+        desktop.runtime_sessions = []
+        desktop.runtime_failure = None
+        for name, value in changes.items():
+            setattr(desktop, name, value)
+        client, _spawned = self.client(desktop,
+                                       program=self.fake.RUNTIME_NAME)
+        client.write = load_definitions(
+            "bounded_helper_write",
+            extra={"PARAKEET_MAX_REQUEST_TIMEOUT": 10.0, "os": os,
+                   "select": select, "time": time},
+        )["bounded_helper_write"]
+        client.retry_after_failure = True
+        return client, desktop
+
+    def test_a_session_is_decoded_beside_batch_requests(self):
+        client, desktop = self.runtime()
+        audio = np.full(48_000, 0.1, dtype=np.float32)
+        # A session never starts a program: none is loaded yet.
+        self.assertIsNone(client.begin_session())
+        self.assertIsNotNone(client.transcribe(audio[:16_000]))
+        self.assertEqual(client.protocol, 3)
+        token = client.begin_session()
+        self.assertIsNotNone(token)
+        self.assertTrue(client.append_session(token, audio[:20_000]))
+        # A batch request between two appends is answered as ever, and is
+        # not part of the session.
+        self.assertIsNotNone(client.transcribe(audio[:16_000]))
+        self.assertTrue(client.append_session(token, audio[20_000:]))
+        result = client.finish_session(token, len(audio))
+        self.assertEqual(result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
+        self.assertEqual(result.word_evidence_status, "native")
+        self.assertEqual(desktop.runtime_sessions, [len(audio)])
+        self.assertEqual(desktop.runtime_requests, [16_000, 16_000])
+        # Spent: the same token gets nothing more.
+        self.assertIsNone(client.finish_session(token, len(audio)))
+        self.assertFalse(client.append_session(token, audio))
+        self.assertIsNotNone(client.process)
+
+    def test_an_answer_for_other_audio_is_dropped_and_the_program_closed(self):
+        client, desktop = self.runtime()
+        audio = np.full(24_000, 0.1, dtype=np.float32)
+        client.transcribe(audio)
+        token = client.begin_session()
+        self.assertTrue(client.append_session(token, audio))
+        self.assertIsNone(client.finish_session(token, len(audio) + 1))
+        self.assertIsNone(client.process)
+        self.assertEqual(client.failed_starts, 1)
+
+    def test_a_failed_session_closes_and_benches_the_runtime(self):
+        client, desktop = self.runtime()
+        audio = np.full(24_000, 0.1, dtype=np.float32)
+        client.transcribe(audio)
+        token = client.begin_session()
+        self.assertTrue(client.append_session(token, audio))
+        desktop.runtime_failure = "session"
+        self.assertIsNone(client.finish_session(token, len(audio)))
+        self.assertIsNone(client.process)
+        self.assertEqual(client.failed_starts, 1)
+
+    def test_a_cancelled_session_cannot_be_finished(self):
+        client, desktop = self.runtime()
+        audio = np.full(24_000, 0.1, dtype=np.float32)
+        client.transcribe(audio)
+        token = client.begin_session()
+        self.assertTrue(client.append_session(token, audio))
+        client.cancel_session(token)
+        self.assertIsNone(client.finish_session(token, len(audio)))
+        self.assertEqual(desktop.runtime_sessions, [])
+        # Cancelling is not a failure: the runtime stays loaded.
+        self.assertIsNotNone(client.process)
+        self.assertIsNotNone(client.transcribe(audio))
+
+    def test_a_program_below_protocol_3_never_gets_a_session(self):
+        client, _spawned = self.client(self.desktop(2))
+        client.transcribe(np.full(16_000, 0.1, dtype=np.float32))
+        self.assertEqual(client.protocol, 2)
+        self.assertIsNone(client.begin_session())
+        self.assertFalse(client.append_session(
+            client.process, np.ones(8, dtype=np.float32)))
+        self.assertIsNone(client.finish_session(client.process, 8))
+
+    def test_a_session_header_puts_the_operation_above_any_count(self):
+        header = load_definitions(
+            "speech_session_header", extra={"struct": struct},
+        )["speech_session_header"]
+        (value,) = struct.unpack("<Q", header(2, 8_000))
+        self.assertEqual(value >> 56, 2)
+        self.assertEqual(value & ((1 << 56) - 1), 8_000)
+        # A batch request's count, ten minutes at most, never reaches the
+        # operation byte, so a protocol 1 or 2 program sees an invalid
+        # count, never a session.
+        self.assertLess(16_000 * 600, 1 << 56)
 
     def test_the_shipped_helper_reads_only_its_first_argument(self):
         # What lets a new client ask an old helper for protocol 2: the
@@ -16537,12 +18139,13 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
         self.assertEqual(set(self.files), {
             "main.swift", "Wire.swift", "Recognizer.swift",
             "MelFeatures.swift", "TransducerDecoder.swift",
-            "Vocabulary.swift", "WindowMerge.swift", "WordEvidence.swift"})
+            "Vocabulary.swift", "WindowMerge.swift", "WordEvidence.swift",
+            "TermBias.swift"})
 
     def test_launched_the_old_way_it_answers_protocol_1(self):
         wire = self.code(self.source("Wire.swift"))
         main = self.code(self.source("main.swift"))
-        self.assertIn("static let supportedProtocol = 2", wire)
+        self.assertIn("static let supportedProtocol = 3", wire)
         # No --protocol, or an unreadable one, is protocol 1.
         self.assertIn('arguments.firstIndex(of: "--protocol")', wire)
         self.assertIn("let requested = Int(arguments[flag + 1]) else { return 1 }",
@@ -16559,13 +18162,31 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
         between = main[literal.end():main.index("Wire.emit(response)")]
         self.assertEqual(between.count('response["'), 0)
         self.assertIn("if wire >= 2 {\n            WordEvidence.add(", main)
+        # The term pass's report rides only on protocol 2, under one key,
+        # and only when a vocabulary frame set terms (Transcript.termList).
+        self.assertIn("vocabulary: recognizer.vocabulary.pieces, to: &response)\n"
+                      "            TermBias.add(transcript, recognizer: "
+                      "recognizer, to: &response)\n        }", main)
+        bias = self.code(self.source("TermBias.swift"))
+        add = bias[bias.index("static func add("):]
+        self.assertEqual(sorted(set(re.findall(r'response\["(\w+)"\]', add))),
+                         ["bias"])
+        self.assertIn("guard let list = transcript.termList else { return }",
+                      add)
+        # A control frame is read only in protocol 2; in protocol 1 its
+        # header is a bad sample count, as it always was.
+        self.assertIn("if wire >= 2, header & Wire.controlFlag != 0 {\n"
+                      "        return serveControl(", main)
+        # Read before any session operation, so the top bit is never one.
+        self.assertLess(main.index("header & Wire.controlFlag != 0"),
+                        main.index("Wire.Operation(rawValue:"))
         words = self.code(self.source("WordEvidence.swift"))
         add = words[words.index("static func add("):
                     words.index("static func group(")]
         self.assertEqual(sorted(set(re.findall(r'response\["(\w+)"\]', add))),
                          ["avg_confidence", "words"])
         self.assertIn('if wire >= 2 {\n    status["protocol"] = wire\n'
-                      '    status["capabilities"] = ["words"]\n'
+                      '    status["capabilities"] = ["words", "vocabulary"]\n'
                       '    status["engine"] = Wire.engine', main)
         # Ready and status lines carry the keys the FluidAudio helper's do.
         self.assertIn('"model": Wire.model', main)
@@ -16581,6 +18202,58 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
         self.assertIn('"error": "invalid sample count"', main)
         self.assertIn("sampleRate * 10 * 60", helper)
         self.assertIn("static let maximumSamples = sampleRate * 10 * 60", wire)
+
+    def test_protocol_3_sessions_are_what_the_python_half_sends(self):
+        wire = self.code(self.source("Wire.swift"))
+        main = self.code(self.source("main.swift"))
+        recognizer = self.code(self.source("Recognizer.swift"))
+        names = load_definitions(assignments={
+            "SPEECH_SESSION_BEGIN", "SPEECH_SESSION_APPEND",
+            "SPEECH_SESSION_FINISH", "SPEECH_SESSION_CANCEL",
+            "SPEECH_SESSION_OPERATION_SHIFT"})
+        # The same operation codes and header layout on both sides.
+        for case, name in (("begin", "BEGIN"), ("append", "APPEND"),
+                           ("finish", "FINISH"), ("cancel", "CANCEL")):
+            with self.subTest(operation=case):
+                self.assertIn(
+                    f"case {case} = {names['SPEECH_SESSION_' + name]}", wire)
+        self.assertIn("case batch = 0", wire)
+        self.assertIn("static let operationShift: UInt64 = "
+                      f"{names['SPEECH_SESSION_OPERATION_SHIFT']}", wire)
+        self.assertIn("static let countMask: UInt64 = (1 << 56) - 1", wire)
+        # Below protocol 3 every header is a sample count, as it was: a
+        # session header is only an invalid count there.
+        self.assertIn("let operation: Wire.Operation? = wire >= 3\n"
+                      "        ? Wire.Operation(rawValue: header >> "
+                      "Wire.operationShift) : .batch", main)
+        self.assertIn("let requested = wire >= 3 ? header & Wire.countMask "
+                      ": header", main)
+        self.assertIn('if wire >= 3 {\n    status["capabilities"] = '
+                      '["words", "vocabulary", "sessions"]', main)
+        # A finish answers what a batch request answers, plus the count.
+        finish = main[main.index("func answerFinish("):]
+        literal = re.search(r"var answer: \[String: Any\] = \[\n(.*?)\n"
+                            r"\s*\]\n", finish, re.S)
+        self.assertEqual(re.findall(r'^\s*"(\w+)":', literal.group(1),
+                                    re.MULTILINE),
+                         ["ok", "text", "processing_s", "samples"])
+        # A session decodes the windows transcribe() decodes, with the same
+        # functions, merged in the same order: the parity script's session
+        # mode measures that the text and words are the same.
+        transcribe = recognizer[recognizer.index("func transcribe("):
+                                recognizer.index("func merge(")]
+        session = recognizer[recognizer.index("final class Session"):]
+        for call in ("layout.chunkStarts(totalSamples:",
+                     "transcribeWindow(", "merge(merged, windowTokens)",
+                     "finished(merged, terms: terms)"):
+            with self.subTest(call=call):
+                self.assertIn(call, transcribe)
+                self.assertIn(call, session)
+        # Only a complete window is decoded before finish.
+        self.assertIn("guard start + layout.chunkSamples <= total else "
+                      "{ break }", session)
+        self.assertIn("guard samples.count <= Wire.maximumSamples - total",
+                      session)
 
     def test_protocol_2_is_what_the_python_half_reads(self):
         wire = self.code(self.source("Wire.swift"))
@@ -16699,24 +18372,69 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
         self.assertIn("let secondsPerEncoderFrame: Double = 1280.0 / 16_000.0",
                       merge)
 
-    def test_the_decoder_takes_the_models_own_choice(self):
-        # The joint network's top candidates are kept reachable for later
-        # work; nothing in this slice may let them change a transcript.
+    def test_the_runtime_reports_and_only_python_may_apply(self):
+        # The joint network's candidates now feed the term pass, which
+        # reports where a listed term could have been heard. Nothing in the
+        # runtime lets them change a transcript: the decode takes the model's
+        # own choice, the text is built before the pass's report is attached,
+        # and the pass builds no text. Only voice_compiler's policy may
+        # decide what to do with a report.
         decoder = self.code(self.source("TransducerDecoder.swift"))
         loop = decoder[decoder.index("func decode("):
-                       decoder.index("private struct DecoderStep")]
+                       decoder.index("struct DecoderStep")]
         self.assertIn('featureValue(for: "token_id")', loop)
         self.assertIn("let tokenId = Self.firstInt32(tokenArray)", loop)
         self.assertIn("if tokenId == Int32(blankId) {\n                    break",
                       loop)
         self.assertIn("token: Int(tokenId), frame: globalFrameOffset + t", loop)
         self.assertIn("decoderStep = try runDecoder(token: tokenId,", loop)
+        # The trace records what the decode did and nothing feeds back.
+        self.assertIn("trace.steps.append(GreedyTrace.Step(", loop)
+        self.assertIn("trace?.states.append(decoderStep)", loop)
+        self.assertNotIn("trace.steps[", loop)
+        self.assertNotIn("trace?.steps[", loop)
         # The observer sees a copy and returns nothing.
         self.assertIn("var stepObserver: ((DecodeStep) -> Void)?", decoder)
         self.assertNotIn("var candidates", decoder)
+        # The text is the normal pass's, built before the report is added.
+        recognizer = self.code(self.source("Recognizer.swift"))
+        built = recognizer.index(
+            "var transcript = Transcript(text: vocabulary.decode(ids: "
+            "merged.map(\\.token)), tokens: merged)")
+        self.assertLess(built, recognizer.index("transcript.detours ="))
+        self.assertIn("let text: String\n    let tokens: [TokenWindow]",
+                      recognizer)
+        bias = self.code(self.source("TermBias.swift"))
+        for forbidden in ("Transcript(", ".text =", ".tokens =",
+                          "stepObserver", "decode(encoded"):
+            with self.subTest(term_pass=forbidden):
+                self.assertNotIn(forbidden, bias)
+        # Every piece a detour takes is one of that step's candidates: the
+        # only way to a child node is through the candidates' ids, and the
+        # rank recorded is the candidate's own.
+        self.assertIn("for (rank, id) in candidates.ids.enumerated() {", bias)
+        self.assertIn("guard let child = list.nodes[node].children[id] else "
+                      "{ continue }", bias)
+        self.assertIn("back[key(t, child)] = (key(t, node), id, rank, gap)",
+                      bias)
+        self.assertEqual(bias.count("Detour.Step("), 1)
+        self.assertIn("piece: link.piece, rank: link.rank, gap: link.gap",
+                      bias)
+        # With no terms the pass does not run and nothing is recorded.
+        self.assertIn("let trace = terms.list == nil ? nil : GreedyTrace()",
+                      recognizer)
+        # A request and a session read the list once, when they start, and
+        # pass the same state through every window.
+        self.assertIn("var terms = TermPassState(list: termList)", recognizer)
+        self.assertIn("self.terms = TermPassState(list: recognizer.termList)",
+                      recognizer)
+        self.assertEqual(recognizer.count("terms: &terms)"), 2)
+        self.assertIn("if usable.isEmpty || self.maxDebt <= 0 { return nil }",
+                      bias)
         for name, text in self.files.items():
             code = self.code(text)
-            if name in ("TransducerDecoder.swift", "main.swift"):
+            if name in ("TransducerDecoder.swift", "main.swift",
+                        "TermBias.swift"):
                 continue
             with self.subTest(file=name):
                 self.assertNotIn("candidates", code)
@@ -16795,7 +18513,7 @@ class ParakeetWordEvidenceRuntimeTests(unittest.TestCase):
                              ("hi", 0.1))
         argv, kwargs = spawned[0]
         self.assertEqual(argv[1:], [
-            "--server", "--protocol", "2",
+            "--server", "--protocol", "3",
             "--models", str(PARAKEET_CLIENT_NAMES["PARAKEET_MODEL_DIR"])])
         self.assertIn("KEEP_ME", kwargs["env"])
         self.assertFalse(any(key.startswith("FLUID_")
@@ -16808,7 +18526,9 @@ class ParakeetWordEvidenceRuntimeTests(unittest.TestCase):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
         for line in ("PROSODY_FORMATTING = False",
                      "PARAKEET_WORD_CONFIDENCE_ROUTING = False",
-                     "PARAKEET_PROTOCOL = 2",
+                     "PARAKEET_CONFIDENT_SKIPS_ESCALATION = True",
+                     "SPEECH_SESSION_DECODE = True",
+                     "PARAKEET_PROTOCOL = 3",
                      "PARAKEET_MAX_RESPONSE_BYTES = 1024 * 1024"):
             with self.subTest(line=line):
                 self.assertIn("\n" + line + "\n", source)
@@ -16935,6 +18655,317 @@ class ParakeetWordEvidenceRuntimeTests(unittest.TestCase):
         self.assertTrue(voice.pause_punctuation)
 
 
+class ProcessStopped(BaseException):
+    """Raised by a test to stop a dictation the way a kill does: nothing in
+    the dictation path catches it, so no outcome is recorded."""
+
+
+class DeliveryJournalTests(unittest.TestCase):
+    """Never lose a word: a dictation is on disk before its paste.
+
+    The journal functions run for real against a temporary folder, with the
+    real atomic writer, so the file's mode and contents are what the app
+    would leave behind. Only the history log is a list.
+    """
+
+    NAMES = (
+        "journal_dictation", "settle_journaled_dictation",
+        "recover_journaled_dictations", "_read_delivery_journal_locked",
+        "_write_delivery_journal_locked", "transcript_app_identity",
+        "atomic_write_text",
+    )
+
+    def journal(self, folder, *, coordinator=None, history=None):
+        history = [] if history is None else history
+        ns = load_definitions(
+            *self.NAMES, assignments=("DELIVERY_JOURNAL_MAX",),
+            extra={
+                "hashlib": hashlib, "os": os, "tempfile": tempfile,
+                "time": time, "Path": Path, "LANGUAGE_DEFAULT": "en",
+                "ReceiptState": ReceiptState,
+                "ReceiptReason": ReceiptReason,
+                "_append_transcript_entry": history.append,
+                "print": lambda *_args: None,
+            })
+        ns.update({
+            "DELIVERY_JOURNAL_FILE": Path(folder) / "delivery_journal.json",
+            "DELIVERY_JOURNAL_LOCK": threading.Lock(),
+            "INSERTION_COORDINATOR": coordinator or InsertionCoordinator(),
+        })
+        return ns, history
+
+    @staticmethod
+    def entries(ns):
+        path = ns["DELIVERY_JOURNAL_FILE"]
+        if not path.exists():
+            return []
+        return json.loads(path.read_text(encoding="utf-8"))["entries"]
+
+    def test_the_words_are_on_disk_owner_only_before_the_paste(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            self.assertTrue(ns["journal_dictation"](
+                "take-1", raw="meet me at the station", text="",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="recognized"))
+            path = ns["DELIVERY_JOURNAL_FILE"]
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            [first] = self.entries(ns)
+            self.assertEqual(
+                (first["raw"], first["clean"], first["stage"]),
+                ("meet me at the station", "", "recognized"))
+            # The final text replaces the raw words in the same entry and
+            # keeps the time they were said.
+            ns["journal_dictation"](
+                "take-1", raw="meet me at the station",
+                text="Meet me at the station.", bundle="com.apple.Notes",
+                mode="capture", language="en", stage="pasting")
+            [second] = self.entries(ns)
+            self.assertEqual(second["clean"], "Meet me at the station.")
+            self.assertEqual(second["stage"], "pasting")
+            self.assertEqual(second["ts"], first["ts"])
+            ns["settle_journaled_dictation"]("take-1")
+            self.assertFalse(path.exists())
+
+    def test_a_window_title_never_reaches_the_journal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["journal_dictation"](
+                "take-1", raw="hello", text="Hello.",
+                bundle="windows:Q3 layoffs plan.docx - Word",
+                mode="capture", language="en", stage="pasting")
+            written = ns["DELIVERY_JOURNAL_FILE"].read_text(encoding="utf-8")
+        self.assertNotIn("layoffs", written)
+        self.assertRegex(json.loads(written)["entries"][0]["app"],
+                         r"^windows:[0-9a-f]{16}$")
+
+    def test_recovery_gives_back_every_word_once(self):
+        coordinator = InsertionCoordinator()
+        with tempfile.TemporaryDirectory() as folder:
+            ns, history = self.journal(folder, coordinator=coordinator)
+            # One stopped during the clean-up, one during the paste.
+            ns["journal_dictation"](
+                "take-1", raw="call dana back", text="",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="recognized")
+            ns["journal_dictation"](
+                "take-2", raw="ship it friday", text="Ship it Friday.",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="pasting")
+            self.assertEqual(ns["recover_journaled_dictations"](), 2)
+            self.assertFalse(ns["DELIVERY_JOURNAL_FILE"].exists())
+            # A second start finds nothing more to give back.
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+        kept = coordinator.recoverable()
+        self.assertEqual([item.text for item in kept],
+                         ["call dana back", "Ship it Friday."])
+        self.assertEqual({item.receipt.reason for item in kept},
+                         {ReceiptReason.INTERRUPTED})
+        self.assertEqual([item.receipt.paste_attempted for item in kept],
+                         [False, True])
+        self.assertFalse(any(item.receipt.pasted_unchecked for item in kept))
+        self.assertEqual([line["id"] for line in history],
+                         ["take-1", "take-2"])
+        for line in history:
+            self.assertEqual(line["path"], "outbox/recovered")
+            self.assertIs(line["metrics"]["insertion_verified"], False)
+            self.assertEqual(line["metrics"]["insertion_reason"],
+                             "interrupted")
+        # Recovering an id the outbox already holds makes no second copy.
+        coordinator.keep("take-2", "Ship it Friday.", paste_attempted=True)
+        self.assertEqual(coordinator.recoverable_count(), 2)
+
+    def test_an_entry_that_cannot_be_recorded_stays_journaled(self):
+        coordinator = InsertionCoordinator()
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder, coordinator=coordinator)
+
+            def full_disk(_entry):
+                raise OSError("no space left on device")
+
+            ns["_append_transcript_entry"] = full_disk
+            ns["journal_dictation"](
+                "take-1", raw="keep me", text="Keep me.", bundle="app",
+                mode="capture", language="en", stage="pasting")
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+            self.assertEqual(len(self.entries(ns)), 1)
+        self.assertEqual(coordinator.recoverable_count(), 0)
+
+    def test_recovery_of_one_dictation_leaves_the_others(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            for event_id in ("take-1", "take-2"):
+                ns["journal_dictation"](
+                    event_id, raw=event_id, text="", bundle="app",
+                    mode="capture", language="en", stage="recognized")
+            self.assertEqual(
+                ns["recover_journaled_dictations"](only="take-2"), 1)
+            self.assertEqual([entry["id"] for entry in self.entries(ns)],
+                             ["take-1"])
+
+    def test_a_damaged_journal_never_stops_a_dictation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["DELIVERY_JOURNAL_FILE"].write_text("{not json", "utf-8")
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+            self.assertTrue(ns["journal_dictation"](
+                "take-1", raw="still here", text="", bundle="app",
+                mode="capture", language="en", stage="recognized"))
+            self.assertEqual(len(self.entries(ns)), 1)
+
+    def test_the_journal_stays_bounded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["DELIVERY_JOURNAL_MAX"] = 3
+            for index in range(5):
+                ns["journal_dictation"](
+                    f"take-{index}", raw="x", text="", bundle="app",
+                    mode="capture", language="en", stage="recognized")
+            self.assertEqual([entry["id"] for entry in self.entries(ns)],
+                             ["take-2", "take-3", "take-4"])
+
+
+class StartupRecoveryTests(unittest.TestCase):
+    """What a stop left in the journal is given back before anything can
+    dictate again."""
+
+    def test_main_recovers_the_journal_before_dictation_can_start(self):
+        main = next(node for node in TREE.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "main")
+        calls = [node.func.id for node in ast.walk(main)
+                 if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)]
+        self.assertIn("recover_journaled_dictations", calls)
+        source = ast.unparse(main)
+        recover = source.index("recover_journaled_dictations()")
+        for later in ("apply_speech_runtime()", "SERVER_ONLY",
+                      "hotkey_worker"):
+            with self.subTest(later=later):
+                self.assertLess(recover, source.index(later))
+        self.assertGreater(recover, source.index("ensure_single_instance()"))
+
+
+class DictationKillTests(unittest.TestCase):
+    """A stop at any stage of a dictation loses no words.
+
+    The real ``finish_and_process`` runs over the real commit path with a
+    real journal in a temporary folder. A step is made to stop the process
+    the way a kill does; the next start's recovery must then give the words
+    back. A dictation that finishes leaves nothing behind.
+    """
+
+    def run_dictation(self, folder, *, stop_at=None, fail_at=None):
+        coordinator = InsertionCoordinator()
+        journal, history = DeliveryJournalTests().journal(
+            folder, coordinator=coordinator)
+
+        def stop(*_args, **_kwargs):
+            raise ProcessStopped()
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("synthetic failure")
+
+        overrides = {name: journal[name] for name in (
+            "journal_dictation", "settle_journaled_dictation",
+            "recover_journaled_dictations")}
+        step = {"cleanup": "apply_vocabulary_casing", "paste": "paste",
+                "history": "append_transcript"}
+        if stop_at:
+            overrides[step[stop_at]] = stop
+        if fail_at:
+            overrides[step[fail_at]] = fail
+        seen = UncheckedPasteDeliveryTests().deliver(
+            "verified", coordinator=coordinator, overrides=overrides,
+            expect_failure=bool(fail_at))
+        return seen, journal, history, coordinator
+
+    def test_a_finished_dictation_leaves_the_journal_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            seen, journal, _history, _coordinator = self.run_dictation(folder)
+            self.assertEqual(len(seen.records), 1)
+            self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+
+    def test_a_stop_at_any_stage_loses_no_words(self):
+        spoken = UncheckedPasteDeliveryTests.SPOKEN
+        for stage, attempted in (("cleanup", False), ("paste", True),
+                                 ("history", True)):
+            with self.subTest(stage=stage), \
+                    tempfile.TemporaryDirectory() as folder:
+                seen, journal, history, _old = self.run_dictation(
+                    folder, stop_at=stage)
+                self.assertTrue(seen.stopped)
+                self.assertEqual(seen.records, [])
+                [entry] = DeliveryJournalTests.entries(journal)
+                self.assertIn("station", entry["clean"] or entry["raw"])
+                # The next start: a new process with an empty outbox.
+                coordinator = InsertionCoordinator()
+                journal["INSERTION_COORDINATOR"] = coordinator
+                self.assertEqual(journal["recover_journaled_dictations"](), 1)
+                [kept] = coordinator.recoverable()
+                self.assertEqual(kept.text.strip(" ."), spoken.strip(" ."))
+                self.assertEqual(kept.receipt.paste_attempted, attempted)
+                self.assertEqual(history[-1]["path"], "outbox/recovered")
+                self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+
+    def test_a_failure_before_the_paste_keeps_the_words_now(self):
+        with tempfile.TemporaryDirectory() as folder:
+            seen, journal, history, coordinator = self.run_dictation(
+                folder, fail_at="cleanup")
+            self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+        self.assertEqual(seen.caption.get("text"),
+                         "Dictation failed — saved in Voice Outbox")
+        [kept] = coordinator.recoverable()
+        self.assertIn("station", kept.text)
+        self.assertEqual(history[-1]["path"], "outbox/recovered")
+
+
+class SaidWordsDeliveryTests(unittest.TestCase):
+    """A proven plain dictation keeps its raw words for "Replace with What
+    You Said"; one whose clean-up changed nothing has none to offer."""
+
+    def test_a_cleaned_dictation_offers_its_raw_words(self):
+        seen = UncheckedPasteDeliveryTests().deliver(
+            "verified", spoken="um, meet me at the station")
+        [record] = [item for item in seen.undoable if item is not None]
+        self.assertNotEqual(record.inserted.strip(),
+                            "um, meet me at the station")
+        self.assertEqual(record.said.strip(), "um, meet me at the station")
+
+    def test_an_unchanged_dictation_has_nothing_to_offer(self):
+        seen = UncheckedPasteDeliveryTests().deliver("verified")
+        [record] = [item for item in seen.undoable if item is not None]
+        self.assertEqual(record.said, "")
+
+
+class HistoryReceiptTests(unittest.TestCase):
+    """The receipt the history shows is read from what the real delivery
+    path wrote, so the two cannot drift apart."""
+
+    def test_each_delivery_outcome_reaches_the_history_as_its_receipt(self):
+        classify = load_definitions(
+            "transcript_receipt",
+            extra={"ReceiptReason": ReceiptReason,
+                   "ReceiptState": ReceiptState})["transcript_receipt"]
+        for outcome, expected in (
+                ("verified", "proven"),
+                ("position-exact", "position"),
+                ("unchecked", "unchecked"),
+                ("conflict", "unconfirmed"),
+                ("readback-empty", "unconfirmed"),
+                ("destination-changed", "not_pasted")):
+            with self.subTest(outcome=outcome):
+                seen = UncheckedPasteDeliveryTests().deliver(outcome)
+                [record] = seen.records
+                self.assertEqual(
+                    classify({"metrics": record.metrics}), expected)
+        windows = UncheckedPasteDeliveryTests().deliver(
+            "verified", is_macos=False)
+        self.assertEqual(
+            classify({"metrics": windows.records[0].metrics}), "unchecked")
+
+
 class UncheckedPasteDeliveryTests(unittest.TestCase):
     """A paste that was sent and could not be read back is not an error.
 
@@ -16951,12 +18982,20 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
     def deliver(self, outcome, *, snippet=None, is_macos=True,
                 paused=False, route="standard", spoken=None,
                 coordinator=None, utterance="take-1", recording=None,
-                spoken_edits=False, force_position=False):
+                spoken_edits=False, force_position=False, overrides=None,
+                expect_failure=False, ax_wake=None, drift=None):
         """One dictation with a named delivery outcome; what it did.
 
         ``force_position`` makes the commit report a check by position
         whatever the field is, so that what a check by position may not
         unlock is seen even where the text could have been read.
+        ``overrides`` replaces collaborators by name once the rest is
+        built: a real delivery journal, or a step that stops the process.
+
+        ``drift`` makes the key-down read lag the field by its last
+        keystroke, so the caret has moved by commit, and names what the
+        input counters saw in between: "untouched", "typed", "clicked" or
+        "uncounted".
         """
         spoken = self.SPOKEN if spoken is None else spoken
         seen = SimpleNamespace(
@@ -17048,7 +19087,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
             "FocusSnapshot", "UndoableInsertion", "build_undoable_insertion",
             "PasteReceipt", "make_paste_receipt", "committed_paste_receipt",
             "paste_snippet_and_watch", "opaque_destination_evidence",
-            "ax_value_kind", "ax_role_name",
+            "ax_value_kind", "ax_role_name", "review_lease_drift",
             "collapse_repeats", "extract_tone_override", "needs_llm_cleanup",
             "quick_clean", "is_hallucination", "weak_whisper_evidence",
             "strip_context_echo",
@@ -17117,7 +19156,8 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 "is_verbatim_app": lambda _bundle: False,
                 "cursor_context": lambda: None,
                 "tone_for": lambda _bundle: "default",
-                "apply_vocabulary_casing": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text, edits=None, evidence=(): text,
                 "delayed_cleanup_scheduling_enabled": lambda: True,
                 "schedule_delayed_cleanup": lambda *args, **_kwargs: (
                     seen.delayed.append(args[0]) or True),
@@ -17159,6 +19199,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         ns["_ax_character_count"] = lambda _element: field["count"]
         ns["PREFERENCES"]["spoken_edit_commands"] = spoken_edits
         ns["LAST_INSERTION"] = None
+        ns.update(overrides or {})
         if force_position:
             ns["position_check_applies"] = lambda *_args: True
             ns["position_readback"] = lambda *_args: (
@@ -17180,6 +19221,24 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 window_title="Notes"),
             "target-unreadable": None,
         }.get(outcome, at_press)
+        signatures = (None, None)
+        if drift is not None:
+            # Read at key-down before the field caught up with the space
+            # just typed: one character short, its caret one to the left.
+            lagging = self.BEFORE.rstrip()
+            at_press = snapshot(
+                element=element, text=lagging,
+                selection=(len(lagging), 0), window_title="Chat")
+            press = ":".join(["10"] * 12)
+            signatures = (press, {
+                # The pointer moved and the page scrolled; nothing more.
+                "untouched": ":".join(["10"] * 7 + ["55"] + ["10"] * 3
+                                      + ["14"]),
+                "typed": ":".join(["11"] + ["10"] * 11),
+                "clicked": ":".join(["10", "11", "11"] + ["10"] * 9),
+                "uncounted": None,
+            }[drift])
+        ns["user_input_signature"] = lambda: signatures[1]
         ns["focused_snapshot"] = lambda: at_release
         # Every other collaborator is inert: called, returns nothing, and
         # so takes no branch of its own.
@@ -17214,18 +19273,26 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                     focused=lambda: (0, element))
                 if is_macos else None),
             focus_at_press=at_press if is_macos else None,
-            input_signature_at_press=None,
-            stop=lambda: np.ones(16_000, dtype=np.float32),
+            insertion_ax_wake=ax_wake,
+            input_signature_at_press=signatures[0],
+            stop=lambda **_kwargs: np.ones(16_000, dtype=np.float32),
             cut_samples=8_000, chunks=[],
         )
         hud = SimpleNamespace(showMode_=seen.modes.append)
         # ``recording`` is a newer take the hotkey worker is recording
         # while this one finishes.
-        ns["finish_and_process"](recorder, hud, {"rec": recording})
+        seen.stopped = False
+        try:
+            ns["finish_and_process"](recorder, hud, {"rec": recording})
+        except ProcessStopped:
+            # A step an override made stop the process, as a kill would.
+            seen.stopped = True
         for log in seen.logs:
-            # The harness must never pass by the pipeline falling over.
+            # The harness must never pass by the pipeline falling over,
+            # unless the test made it fall over on purpose.
             self.assertNotIn("follow-up failed", log)
-            self.assertNotIn("dictation failed during", log)
+            if not expect_failure:
+                self.assertNotIn("dictation failed during", log)
         seen.recorder = recorder
         seen.receipt = recorder.insertion_receipt
         seen.text = getattr(recorder, "committed_text", None)
@@ -17540,6 +19607,14 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         written = json.dumps(metrics)
         self.assertNotIn("Chat", written)
         self.assertNotIn(self.SPOKEN, written)
+        # No Electron app was woken for this take.
+        self.assertIsNone(metrics["insertion_ax_wake"])
+
+    def test_the_record_says_whether_key_down_woke_an_electron_app(self):
+        seen = self.deliver("verified", ax_wake="woke-read")
+
+        self.assertEqual(
+            seen.records[0].metrics["insertion_ax_wake"], "woke-read")
 
     def test_five_in_a_row_are_five_calm_copies(self):
         coordinator = InsertionCoordinator()
@@ -17768,6 +19843,83 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                     ["[insertion] paste attempted but unverified "
                      f"(readback_conflict; difference {difference}; "
                      f"stage {stage}); saved in Voice Outbox"])
+
+    DRIFT_METRICS = tuple(f"insertion_drift_{field}" for field in (
+        "direction", "distance", "selection", "text", "input", "stage"))
+
+    def test_a_caret_nobody_moved_is_not_a_changed_destination(self):
+        seen = self.deliver("verified", drift="untouched")
+
+        # Pasted once, where the caret is now, and read back there.
+        self.assertEqual(seen.pasted, [self.SPOKEN])
+        self.assertEqual(seen.receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(seen.modes, [])
+        self.assertEqual(seen.sounds, ["Pop"])
+        self.assertEqual(len(seen.undoable), 1)
+        self.assertEqual(seen.coordinator.recoverable(), ())
+        self.assertEqual(seen.recorder.insertion_lease.selection,
+                         (len(self.BEFORE), 0))
+        metrics = seen.records[0].metrics
+        self.assertEqual(metrics["insertion_reason"], "commit_verified")
+        self.assertEqual(
+            [metrics[key] for key in self.DRIFT_METRICS],
+            ["forward", "1", "cursor-to-cursor", "changed", "none",
+             "renewed"])
+
+    def test_a_caret_moved_by_a_key_or_a_click_still_refuses(self):
+        for drift in ("typed", "clicked", "uncounted"):
+            with self.subTest(drift=drift):
+                seen = self.deliver("verified", drift=drift)
+
+                self.assertEqual(seen.pasted, [])
+                self.assertEqual(seen.receipt.reason.value,
+                                 "selection_drift")
+                self.assertEqual(seen.modes, ["error"])
+                self.assertEqual(seen.sounds, ["Funk"])
+                self.assertEqual(
+                    seen.caption["text"],
+                    "Destination changed — saved in Voice Outbox")
+                self.assert_unverified_everywhere(seen)
+                since = {"typed": "keys", "clicked": "clicks",
+                         "uncounted": "unavailable"}[drift]
+                metrics = seen.records[0].metrics
+                self.assertIs(metrics["paste_attempted"], False)
+                self.assertEqual(
+                    [metrics[key] for key in self.DRIFT_METRICS],
+                    ["forward", "1", "cursor-to-cursor", "changed", since,
+                     "refused"])
+                self.assertEqual(
+                    [log for log in seen.logs
+                     if log.startswith("[insertion]")],
+                    ["[insertion] destination changed (selection_drift; "
+                     "drift forward 1; selection cursor-to-cursor; "
+                     f"text changed; input {since}; refused); text saved "
+                     "in Voice Outbox"])
+
+    def test_a_renewed_lease_still_fails_a_short_or_misplaced_paste(self):
+        for outcome, difference in (
+                ("truncated", "leading-part"), ("missing", "unchanged"),
+                ("misplaced", "elsewhere"), ("conflict", "absent")):
+            with self.subTest(outcome=outcome):
+                seen = self.deliver(outcome, drift="untouched")
+
+                self.assertEqual(seen.pasted, [self.SPOKEN])
+                self.assertEqual(seen.receipt.state, ReceiptState.CONFLICT)
+                self.assertEqual(seen.modes, ["error"])
+                self.assert_unverified_everywhere(seen)
+                metrics = seen.records[0].metrics
+                self.assertEqual(
+                    metrics["insertion_reason"], "readback_conflict")
+                self.assertEqual(
+                    metrics["insertion_readback_difference"], difference)
+                self.assertEqual(metrics["insertion_drift_stage"], "renewed")
+
+    def test_no_drift_records_no_drift(self):
+        for outcome in ("verified", "conflict", "destination-changed"):
+            with self.subTest(outcome=outcome):
+                metrics = self.deliver(outcome).records[0].metrics
+                for key in self.DRIFT_METRICS:
+                    self.assertIsNone(metrics[key], key)
 
     def test_the_new_record_is_categories_only(self):
         from insertion_integrity import (

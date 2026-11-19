@@ -11,9 +11,12 @@
 // offline path reset it before every window anyway), input arrays are
 // reused between steps instead of reallocated, and the joint model's top
 // candidates are kept reachable at each step (`JointCandidates`,
-// `stepObserver`) where the library discarded them. The token chosen at
-// every step is still the joint model's own `token_id`, and a step observer
-// cannot change it.
+// `stepObserver`, `GreedyTrace`) where the library discarded them, and the
+// joint and prediction networks can be asked about a path the decode did
+// not take (`jointCandidates`, `advance`), which the term pass in
+// TermBias.swift uses. The token chosen at every step is still the joint
+// model's own `token_id`: neither a step observer nor a trace can change
+// it.
 
 import CoreML
 import Foundation
@@ -43,6 +46,26 @@ struct DecodeStep {
     let candidates: JointCandidates
 }
 
+/// What the normal pass saw, kept only for a request when the user has
+/// terms (TermBias.swift): every joint step's candidates, and the decoder
+/// state after each emitted token. Recording it reads arrays the model
+/// already filled; it changes nothing the decode does.
+final class GreedyTrace {
+    struct Step {
+        /// Window-local encoder frame.
+        let t: Int
+        /// How many tokens the window had emitted before this step: the
+        /// decoder state the step ran from is `states[emitted]`.
+        let emitted: Int
+        let candidates: JointCandidates
+    }
+
+    var steps: [Step] = []
+    /// `states[k]` is the decoder state after the window's first k tokens;
+    /// `states[0]` is the window's starting state.
+    var states: [TransducerDecoder.DecoderStep] = []
+}
+
 final class TransducerDecoder {
     struct Emission {
         /// Emitted (non-blank) token id.
@@ -68,8 +91,8 @@ final class TransducerDecoder {
     /// joint network offered. It is read-only by construction: the decoder
     /// has already taken the model's own choice, and it continues with that
     /// choice whatever the observer does. Nothing in a release build sets
-    /// it; the debug candidate dump does, and later work that favours the
-    /// user's vocabulary will start here.
+    /// it; the debug candidate dump does. (The term pass reads a
+    /// `GreedyTrace` instead.)
     var stepObserver: ((DecodeStep) -> Void)?
 
     init(
@@ -109,11 +132,13 @@ final class TransducerDecoder {
     func decode(
         encoded: MLMultiArray,
         frameRange: Range<Int>,
-        globalFrameOffset: Int
+        globalFrameOffset: Int,
+        trace: GreedyTrace? = nil
     ) throws -> [Emission] {
         var emissions: [Emission] = []
         var decoderStep = try runDecoder(
             token: Int32(blankId), h: try zeroState(), c: try zeroState())
+        trace?.states.append(decoderStep)
 
         let dim = encoded.shape[1].intValue
         let encoderStep = try MLMultiArray(shape: [1, NSNumber(value: dim), 1], dataType: .float32)
@@ -140,6 +165,12 @@ final class TransducerDecoder {
                         candidates: Self.candidates(jointOutput)))
                 }
 
+                if let trace {
+                    trace.steps.append(GreedyTrace.Step(
+                        t: t, emitted: emissions.count,
+                        candidates: Self.candidates(jointOutput)))
+                }
+
                 if tokenId == Int32(blankId) {
                     break
                 }
@@ -147,15 +178,35 @@ final class TransducerDecoder {
                     token: Int(tokenId), frame: globalFrameOffset + t,
                     prob: Self.probability(jointOutput)))
                 decoderStep = try runDecoder(token: tokenId, h: decoderStep.h, c: decoderStep.c)
+                trace?.states.append(decoderStep)
             }
         }
         return emissions
     }
 
-    private struct DecoderStep {
+    /// The prediction network's output and LSTM state after a token.
+    struct DecoderStep {
         let output: MLMultiArray
         let h: MLMultiArray
         let c: MLMultiArray
+    }
+
+    /// The state after taking `token` from `state`: what the decode would
+    /// hold had it emitted `token` there. Used only by the term pass.
+    func advance(_ token: Int, from state: DecoderStep) throws -> DecoderStep {
+        try runDecoder(token: Int32(token), h: state.h, c: state.c)
+    }
+
+    /// The joint network's candidates at window-local frame `t` from
+    /// `state`, read into `scratch` ([1, D, 1]). Used only by the term
+    /// pass, for a path the decode did not take.
+    func jointCandidates(
+        encoded: MLMultiArray, t: Int, state: DecoderStep, scratch: MLMultiArray
+    ) throws -> JointCandidates {
+        try copyEncoderStep(from: encoded, timeIndex: t, into: scratch, dim: encoded.shape[1].intValue)
+        let output = try jointModel.prediction(
+            from: JointInput(encoderStep: scratch, decoderStep: state.output))
+        return Self.candidates(output)
     }
 
     private func runDecoder(token: Int32, h: MLMultiArray, c: MLMultiArray) throws -> DecoderStep {

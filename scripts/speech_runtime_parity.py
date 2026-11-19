@@ -7,12 +7,26 @@
     uv run scripts/speech_runtime_parity.py --replay
     uv run scripts/speech_runtime_parity.py --corpus DIR [--corpus DIR ...]
     uv run scripts/speech_runtime_parity.py --replay --home SCRATCH_HOME
+    uv run scripts/speech_runtime_parity.py --replay --vocabulary TERMS.json
+    uv run scripts/speech_runtime_parity.py --replay --session [--corpus DIR]
 
 Both programs decode every clip: the FluidAudio helper
 (``.models/bin/parrot-asr-helper``, the reference) in protocol 1, and the
 runtime (``.models/bin/parrot-speech-runtime``, the candidate) in protocol 1
 and again in protocol 2. The three are interleaved clip by clip, in rotating
 order, so that drift on the Mac falls on all of them alike.
+
+With ``--session`` one more process, the runtime in protocol 3, decodes
+every clip as dictate.py streams a long take: ``begin``, the audio in
+appends of uneven sizes (``SESSION_APPENDS``, which cut every window
+boundary at a different place), then ``finish``. Its answer must equal the
+same runtime's protocol 2 answer for the whole clip in every key but the
+timings, for every clip of every length; with ``--vocabulary`` the session
+gets the same term list and is held to the protocol 2 answer with terms,
+the term pass's report included. It prints how many do, and the time
+``finish`` took
+(the part of a session decode left for key release) beside the protocol 2
+time for the whole clip.
 
 It prints, for clips of 15 seconds or less and for longer ones, how many
 transcripts are identical, then every clip whose text differs with both
@@ -30,6 +44,14 @@ Clips:
   they are, in ``manifest.json`` order when there is one) or recordings that
   ``afconvert`` reads (converted to 16 kHz mono and padded with 0.3 s of
   silence each side).
+
+``--vocabulary TERMS.json`` (``{"terms": [...], "max_debt": 5.0}``) adds a
+fourth process: the runtime in protocol 2, sent that term list in a
+control frame. Its answers must equal the plain protocol 2 answers in every
+key but ``processing_s`` and the term pass's ``bias`` report, and with no
+terms or a ``max_debt`` of 0 they must carry no ``bias`` at all: the term
+pass reports and never changes a transcript. It prints how many matched,
+how many reports came back and the pass's own time.
 
 Neither program can reach the network while this runs: each is started under
 ``sandbox-exec`` with every network operation denied. ``--home DIR`` points
@@ -74,6 +96,14 @@ SANDBOX = Path("/usr/bin/sandbox-exec")
 SANDBOX_PROFILE = "(version 1)(allow default)(deny network*)"
 TIME = Path("/usr/bin/time")
 PROTOCOL_1_KEYS = ["ok", "processing_s", "text"]
+# Protocol 3 headers: the operation in the top byte, a count below it
+# (native/ParrotASRHelper/PROTOCOL.md, "Protocol 3").
+SESSION_BEGIN, SESSION_APPEND, SESSION_FINISH = 1, 2, 3
+OPERATION_SHIFT = 56
+# Append sizes, used in turn: the app's own (dictate.SPEECH_SESSION_APPEND
+# _SAMPLES), one sample, an audio callback's block, and odd sizes that
+# land everywhere relative to the 239,360-sample windows.
+SESSION_APPENDS = (8_000, 1, 512, 23_999, 160_000, 4_801, 239_361)
 
 
 class Program:
@@ -111,12 +141,42 @@ class Program:
         del self.buffer[:end + 1]
         return json.loads(line)
 
+    def control(self, frame: bytes) -> dict:
+        self.process.stdin.write(frame)
+        self.process.stdin.flush()
+        return self._line()
+
     def request(self, audio: np.ndarray) -> tuple[dict, float]:
         payload = np.ascontiguousarray(audio, dtype="<f4")
         started = time.perf_counter()
         self.process.stdin.write(struct.pack("<Q", len(payload)))
         self.process.stdin.write(payload.tobytes())
         self.process.stdin.flush()
+        reply = self._line()
+        return reply, time.perf_counter() - started
+
+    def _operation(self, operation: int, payload: bytes = b"",
+                   count: int = 0) -> None:
+        self.process.stdin.write(struct.pack(
+            "<Q", (operation << OPERATION_SHIFT) | count))
+        if payload:
+            self.process.stdin.write(payload)
+        self.process.stdin.flush()
+
+    def session(self, audio: np.ndarray) -> tuple[dict, float]:
+        """Decode ``audio`` as a protocol 3 session; the answer to finish
+        and the round trip of the finish alone."""
+        payload = np.ascontiguousarray(audio, dtype="<f4")
+        self._operation(SESSION_BEGIN)
+        offset, turn = 0, 0
+        while offset < len(payload):
+            size = SESSION_APPENDS[turn % len(SESSION_APPENDS)]
+            part = payload[offset:offset + size]
+            self._operation(SESSION_APPEND, part.tobytes(), len(part))
+            offset += len(part)
+            turn += 1
+        started = time.perf_counter()
+        self._operation(SESSION_FINISH)
         reply = self._line()
         return reply, time.perf_counter() - started
 
@@ -219,6 +279,17 @@ def source_digest(package: Path = ROOT / "native" / "ParrotSpeechRuntime") -> st
     return digest.hexdigest()
 
 
+def untimed(answer: dict) -> str:
+    """An answer without its timings and a session's count: what a session
+    and a single request of the same audio must share, byte for byte."""
+    kept = {key: value for key, value in answer.items()
+            if key not in ("processing_s", "samples", "bias_at_finish_ms")}
+    if isinstance(kept.get("bias"), dict):
+        kept["bias"] = {key: value for key, value in kept["bias"].items()
+                        if key != "added_ms"}
+    return json.dumps(kept, sort_keys=True)
+
+
 def percentile(values: list[float], point: float) -> float:
     ordered = sorted(values)
     return ordered[math.ceil((len(ordered) - 1) * point)] if ordered else math.nan
@@ -242,8 +313,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="a folder of .npy clips or recordings")
     parser.add_argument("--out", type=Path,
                         help="write one JSON line per clip here")
+    parser.add_argument("--vocabulary", type=Path,
+                        help="a JSON term list for a fourth, term-pass "
+                             "process (see above)")
     parser.add_argument("--no-sandbox", action="store_true",
                         help="run the programs without sandbox-exec")
+    parser.add_argument("--session", action="store_true",
+                        help="also decode every clip as a protocol 3 session")
     args = parser.parse_args(argv)
     if sys.platform != "darwin":
         parser.error("this compares macOS programs; run it on a Mac")
@@ -280,6 +356,26 @@ def main(argv: list[str] | None = None) -> int:
                               ["--server", "--protocol", "2", *model_args],
                               home, sandbox),
     }
+    terms = None
+    if args.vocabulary:
+        sys.path.insert(0, str(ROOT))
+        from parrot_core import vocabulary_control_frame
+        terms = json.loads(args.vocabulary.read_text(encoding="utf-8"))
+        programs["candidate-2v"] = launch(
+            "candidate-2v", args.candidate,
+            ["--server", "--protocol", "2", *model_args], home, sandbox)
+        reply = programs["candidate-2v"].control(vocabulary_control_frame(
+            [(term, "typed") for term in terms["terms"]], 1,
+            float(terms["max_debt"])))
+        print(f"candidate-2v term list: {reply}")
+    session = (launch("candidate-3", args.candidate,
+                      ["--server", "--protocol", "3", *model_args],
+                      home, sandbox) if args.session else None)
+    if session is not None and terms is not None:
+        reply = session.control(vocabulary_control_frame(
+            [(term, "typed") for term in terms["terms"]], 1,
+            float(terms["max_debt"])))
+        print(f"candidate-3 term list: {reply}")
     # The candidate must be built from this checkout (setup.sh builds it
     # from here): this is the digest the README records beside the result.
     print(f"sources: sha256:{source_digest()}")
@@ -290,20 +386,53 @@ def main(argv: list[str] | None = None) -> int:
     for program in programs.values():
         for _ in range(3):
             program.request(clips[0][1])
+    if session is not None:
+        print(f"candidate-3: {session.ready}")
+        for _ in range(3):
+            session.session(clips[0][1])
 
     records = []
     for index, (clip_id, audio) in enumerate(clips):
         record = {"id": clip_id, "seconds": round(len(audio) / SAMPLE_RATE, 3)}
-        for name in order[index % 3:] + order[:index % 3]:
+        turn = index % len(order)
+        for name in order[turn:] + order[:turn]:
             reply, seconds = programs[name].request(audio)
             record[name] = {
                 "ok": reply.get("ok"), "text": reply.get("text"),
                 "keys": sorted(reply), "processing_s": reply.get("processing_s"),
                 "round_trip_s": round(seconds, 6),
                 "words": len(reply.get("words") or []),
+                # Everything but the timing and the term pass's report.
+                "answer": json.dumps(
+                    {key: value for key, value in reply.items()
+                     if key not in ("processing_s", "bias")},
+                    sort_keys=True),
+                "bias": reply.get("bias"),
+            }
+            if name == "candidate-2":
+                batch = reply
+            if name == "candidate-2v":
+                batch_with_terms = reply
+        if session is not None:
+            reply, seconds = session.session(audio)
+            # The session's answer against the same program's single
+            # request with the same term list: every key, the term pass's
+            # report included, but the timings and the session's own count.
+            alike = batch_with_terms if terms is not None else batch
+            record["candidate-3"] = {
+                "ok": reply.get("ok"), "text": reply.get("text"),
+                "processing_s": reply.get("processing_s"),
+                "round_trip_s": round(seconds, 6),
+                "samples": reply.get("samples"),
+                "bias_at_finish_ms": reply.get("bias_at_finish_ms"),
+                "same": (reply.get("ok") is True and alike.get("ok") is True
+                         and reply.get("samples") == len(audio)
+                         and untimed(reply) == untimed(alike)),
             }
         records.append(record)
     memory = {name: program.close() for name, program in programs.items()}
+    if session is not None:
+        memory["candidate-3"] = session.close()
 
     if args.out:
         with args.out.open("w", encoding="utf-8") as handle:
@@ -338,6 +467,45 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    reference: {record['reference']['text']!r}")
         print(f"    candidate: {record['candidate-1']['text']!r}")
 
+    sessions_same = None
+    if session is not None:
+        sessions_same = sum(r["candidate-3"]["same"] for r in records)
+        print(f"candidate protocol 3 session answer equal to its protocol 2 "
+              f"answer{' with the same terms' if terms is not None else ''}"
+              f" (every key but timings): {sessions_same} of {len(records)} "
+              f"({sum(r['candidate-3']['same'] for r in short)} of {len(short)} "
+              f"of {LONG_SECONDS:g} s or less, "
+              f"{sum(r['candidate-3']['same'] for r in long)} of {len(long)} "
+              f"longer)")
+        for record in records:
+            if not record["candidate-3"]["same"]:
+                print(f"  session differs: {record['id']} ({record['seconds']} s)")
+        print("session finish against the whole clip in protocol 2, "
+              "processing_s, ms:")
+        for label, lo, hi in (("15 s or less", 0, LONG_SECONDS),
+                              ("15 to 30 s", LONG_SECONDS, 30),
+                              ("30 to 120 s", 30, 120),
+                              ("over 120 s", 120, math.inf)):
+            group = [r for r in records if lo < r["seconds"] <= hi
+                     or (lo == 0 and r["seconds"] == 0)]
+            if not group:
+                continue
+            finish = [1000 * float(r["candidate-3"]["processing_s"] or 0)
+                      for r in group]
+            whole = [1000 * float(r["candidate-2"]["processing_s"] or 0)
+                     for r in group]
+            print(f"  {label:13s} ({len(group):3d} clips) finish p50 "
+                  f"{percentile(finish, .5):7.2f} p95 {percentile(finish, .95):7.2f} "
+                  f"max {max(finish):7.2f}   whole p50 {percentile(whole, .5):7.2f} "
+                  f"p95 {percentile(whole, .95):7.2f} max {max(whole):7.2f}")
+
+    if session is not None and terms is not None:
+        at_finish = [float(r["candidate-3"]["bias_at_finish_ms"] or 0)
+                     for r in records]
+        print(f"session term pass left for finish, ms: p50 "
+              f"{percentile(at_finish, .5):.2f} p95 "
+              f"{percentile(at_finish, .95):.2f} max {max(at_finish):.2f}")
+
     print("latency, ms (processing_s / round trip):")
     for name in order:
         processing = [1000 * float(r[name]["processing_s"] or 0) for r in records]
@@ -351,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  paired {name} minus reference, round trip: "
               f"p50 {percentile(paired, .5):+.2f}  p95 {percentile(paired, .95):+.2f}")
     print("peak memory, MiB (maximum resident set size / peak footprint):")
-    for name in order:
+    for name in [*order, *(["candidate-3"] if session is not None else [])]:
         values = memory.get(name) or {}
         rss = values.get("max_rss")
         footprint = values.get("peak_footprint")
@@ -359,8 +527,29 @@ def main(argv: list[str] | None = None) -> int:
               f"{rss / 2**20 if rss else math.nan:7.1f} / "
               f"{footprint / 2**20 if footprint else math.nan:7.1f}")
 
+    terms_agree = True
+    if terms is not None:
+        agree = sum(r["candidate-2v"]["answer"] == r["candidate-2"]["answer"]
+                    for r in records)
+        reports = [r["candidate-2v"]["bias"] for r in records
+                   if r["candidate-2v"]["bias"] is not None]
+        silent = not terms["terms"] or float(terms["max_debt"]) <= 0
+        added = [float(report.get("added_ms", 0))
+                 for report in reports]
+        print(f"candidate protocol 2 with terms, every key but processing_s "
+              f"and bias identical to without: {agree} of {len(records)}")
+        print(f"term-pass reports: {len(reports)} of {len(records)} "
+              f"(expected {0 if silent else len(records)}); detours: "
+              f"{sum(len(report.get('detours') or []) for report in reports)}"
+              f"; added ms p50 {percentile(added, .5):.2f} "
+              f"p95 {percentile(added, .95):.2f}")
+        terms_agree = (agree == len(records) and len(reports) == (
+            0 if silent else len(records)))
+
     failed = (sum(map(same, short)) != len(short)
-              or keys_ok != len(records) or protocols_agree != len(records))
+              or keys_ok != len(records) or protocols_agree != len(records)
+              or not terms_agree
+              or (sessions_same is not None and sessions_same != len(records)))
     return 1 if failed else 0
 
 

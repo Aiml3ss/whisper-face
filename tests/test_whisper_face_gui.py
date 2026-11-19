@@ -63,6 +63,9 @@ from whisper_face_gui import (
     hotkey_row_detail,
     hotkey_shared_mode_note,
     recent_dictation_row,
+    recent_dictation_receipt_text,
+    recent_dictations_tally,
+    RECENT_RECEIPTS,
     HOTKEY_KEYCODES,
     MODE_GUIDE,
     SOUND_THEMES,
@@ -553,6 +556,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.flight.update_failed",
                 "operation.self_correction.update_failed",
                 "operation.remove_repeats.update_failed",
+                "operation.favor_words.update_failed",
                 "operation.speech_runtime.update_failed",
                 "operation.acoustic.update_failed",
                 "operation.relisten.update_failed",
@@ -3197,6 +3201,46 @@ class RecentDictationRowTests(unittest.TestCase):
                 self.assertTrue(recent_dictation_row(entry))
 
 
+class RecentDictationReceiptTests(unittest.TestCase):
+    """Each recent dictation says what became of it, in plain words."""
+
+    def test_the_window_words_every_receipt_the_runtime_can_send(self):
+        tree = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
+        node = next(
+            node for node in tree.body if isinstance(node, ast.Assign)
+            and any(getattr(target, "id", "") == "TRANSCRIPT_RECEIPTS"
+                    for target in node.targets))
+        runtime = {item.value for item in ast.walk(node.value)
+                   if isinstance(item, ast.Constant)
+                   and isinstance(item.value, str)}
+        self.assertEqual(runtime, set(RECENT_RECEIPTS))
+        texts = {recent_dictation_receipt_text({"receipt": receipt})
+                 for receipt in RECENT_RECEIPTS}
+        self.assertEqual(len(texts), len(RECENT_RECEIPTS))
+
+    def test_only_proof_counts_as_in_your_document(self):
+        for receipt in RECENT_RECEIPTS:
+            with self.subTest(receipt=receipt):
+                text = recent_dictation_receipt_text({"receipt": receipt})
+                self.assertEqual(text.startswith("In your document"),
+                                 receipt in {"proven", "position"})
+                self.assertEqual(
+                    "Voice Outbox" in text,
+                    receipt in {"not_pasted", "unconfirmed", "interrupted"})
+        self.assertEqual(
+            recent_dictations_tally([
+                {"receipt": "proven"}, {"receipt": "position"},
+                {"receipt": "unchecked"}, {"receipt": "not_pasted"},
+                {}]),
+            "2 of 5 checked in your document after pasting.")
+
+    def test_an_unknown_or_missing_receipt_claims_nothing(self):
+        for entry in ({}, {"receipt": "delivered!"}, {"receipt": 7}):
+            with self.subTest(entry=entry):
+                self.assertEqual(recent_dictation_receipt_text(entry),
+                                 "No delivery record")
+
+
 class ControlSettingsViewModelTests(unittest.TestCase):
     """A1/A2/A3/D1: the window drives the runtime and reports its verdicts."""
 
@@ -3390,6 +3434,71 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         self.assertTrue(state.settings.remove_repeats)
         self.assertEqual(state.notice_level, "error")
         self.assertIn("Repeated words", state.notice)
+
+    def test_favor_my_words_is_on_unless_settings_say_off(self):
+        # A runtime from before the switch, and every value that is not the
+        # JSON literal false, reads as on.
+        self.assertTrue(GUIActions().set_favor_my_words(True))
+        self.assertTrue(normalize_settings({}).favor_my_words)
+        self.assertTrue(
+            normalize_settings({"favor_my_words": "no"}).favor_my_words)
+        self.assertFalse(
+            normalize_settings({"favor_my_words": False}).favor_my_words)
+
+    def test_the_favor_my_words_switch_shows_what_the_runtime_stored(self):
+        stored = {"favor_my_words": True}
+
+        def set_favor_my_words(enabled):
+            self.calls.append(enabled)
+            stored["favor_my_words"] = enabled
+            return enabled
+
+        model = self.model(
+            settings_snapshot=lambda: dict(stored),
+            set_favor_my_words=set_favor_my_words)
+        self.assertTrue(model.select_section("Settings").settings
+                        .favor_my_words)
+        state = model.set_favor_my_words(False)
+        self.assertEqual(self.calls, [False])
+        self.assertFalse(state.settings.favor_my_words)
+        self.assertFalse(model.refresh().settings.favor_my_words)
+        self.assertTrue(model.set_favor_my_words(True)
+                        .settings.favor_my_words)
+        # A refusal shows what was stored.
+        refused = self.model(set_favor_my_words=lambda _enabled: True)
+        self.assertTrue(
+            refused.set_favor_my_words(False).settings.favor_my_words)
+
+    def test_a_raising_favor_my_words_switch_reports_and_stays_on(self):
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("private detail")
+
+        model = self.model(set_favor_my_words=explode)
+        state = model.set_favor_my_words(False)
+        self.assertTrue(state.settings.favor_my_words)
+        self.assertEqual(state.notice_level, "error")
+        self.assertIn("Favor my words", state.notice)
+
+    def test_favor_my_words_says_what_it_does_and_that_it_can_be_undone(self):
+        catalog = STRING_CATALOGS["en"]
+        self.assertEqual(catalog["settings.personalize.favor_words"],
+                         "Favor my words")
+        self.assertIn("vocabulary", catalog[
+            "settings.personalize.favor_words.on"])
+        self.assertIn("undone", catalog[
+            "settings.personalize.favor_words.on"].replace("\u00a0", " "))
+        self.assertIn("Replace with What You Said in the menu bar puts back", catalog[
+            "settings.accessibility.favor_words.help"])
+        # Every catalog the window carries says it.
+        for locale, strings in STRING_CATALOGS.items():
+            for key in ("settings.personalize.favor_words",
+                        "settings.personalize.favor_words.on",
+                        "settings.personalize.favor_words.off",
+                        "settings.accessibility.favor_words.label",
+                        "settings.accessibility.favor_words.help",
+                        "operation.favor_words.update_failed"):
+                with self.subTest(locale=locale, key=key):
+                    self.assertTrue(strings.get(key))
 
     def test_the_new_speech_runtime_is_off_unless_the_runtime_says_on(self):
         self.assertFalse(GUIActions().set_new_speech_runtime(True))
@@ -4325,6 +4434,8 @@ class SettingsPagesContractTests(unittest.TestCase):
                 "settings.controls.self_correction.on",
                 "settings.controls.remove_repeats.off",
                 "settings.controls.remove_repeats.on",
+                "settings.personalize.favor_words.off",
+                "settings.personalize.favor_words.on",
                 "pages.models.advisory",
                 "pages.models.advisory.evidence",
                 "pages.models.advisory.unavailable"):
@@ -4492,6 +4603,9 @@ class EditorSheetContractTests(unittest.TestCase):
         "editVocabulary_": "_vocabulary_page",
         "reviewCorrections_": "_corrections_page",
         "inspectKeywords_": "_keywords_page",
+        # Not a Personalize editor, but a sheet made the same way: the
+        # Privacy page's recent dictations, each with its receipt.
+        "browseRecentDictations_": "_recent_page",
     }
 
     @staticmethod
@@ -4590,7 +4704,7 @@ class EditorSheetContractTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
             and "NSAlert" in self._names(node))
         self.assertEqual(alerts, [
-            "_capture_hotkey", "_confirm", "browseRecentDictations_",
+            "_capture_hotkey", "_confirm",
             "inspectResultEvidence_", "inspectVoiceObjects_", "viewModes_"])
 
     def test_a_sheet_is_made_of_the_pages_own_parts(self):
@@ -5054,7 +5168,7 @@ class EditorSheetContractTests(unittest.TestCase):
             "snippets-empty", "vocabulary", "vocabulary-refused",
             "vocabulary-empty", "corrections", "corrections-contrast",
             "corrections-empty", "keywords", "keywords-copied",
-            "keywords-empty"})
+            "keywords-empty", "recent", "recent-words", "recent-empty"})
         self.assertIn("f'sheet-{picture}-{suffix}'", render)
         self.assertIn("f'sheet-tones-empty-{suffix}'", render)
         self.assertIn("f'sheet-in-window-{picture}-{suffix}'", render)
@@ -7823,6 +7937,60 @@ class EditorSheetAppKitTests(unittest.TestCase):
             self.controller.modal_responder = None
         self.assertEqual(remaining, [])
         return seen
+
+    def assert_no_text_is_cut(self, sheet):
+        """Where a sheet's body stops, no header or note is cut in two:
+        each lies wholly inside what shows, or wholly below it."""
+        shown = float(sheet.scroll.frame().size.height)
+        checked = 0
+        for header, _group, notes, trailing in sheet.document.sections:
+            for view in (header, trailing, *notes):
+                if view is None or bool(view.isHidden()):
+                    continue
+                frame = view.frame()
+                top = float(frame.origin.y)
+                bottom = top + float(frame.size.height)
+                checked += 1
+                self.assertTrue(
+                    bottom <= shown + 0.5 or top >= shown - 0.5,
+                    f"{view.stringValue()!r} is cut by the fold: "
+                    f"{top}-{bottom} against {shown}")
+        return checked
+
+    def test_a_scrolling_sheet_never_cuts_a_note_in_two(self):
+        import dataclasses
+        entries = []
+        self.model.actions = dataclasses.replace(
+            self.model.actions,
+            recent_dictations=lambda: tuple(entries),
+            reveal_recent_dictation=lambda _entry_id: "words")
+        self.model.state = dataclasses.replace(
+            self.model.state, recent_dictations=True)
+        checked = 0
+        catalog = gui_module.STRING_CATALOGS["en"]
+        key = "settings.dialog.recent.message"
+        # From a list that fits to one that scrolls, under a header that
+        # grows half a line at a time, so the note under the list meets
+        # the fold at every offset a line can have.
+        for halves in range(1, 17):
+            message = " ".join(["Words that fill half a line."] * halves)
+            for count in range(1, 11):
+                entries[:] = [
+                    {"id": f"take-{index}", "at": 0.0,
+                     "age_seconds": 60.0, "words": 9, "app": "Mail",
+                     "receipt": ("interrupted", "proven")[index % 2]}
+                    for index in range(count)]
+                with self.subTest(halves=halves, count=count), \
+                        patch.dict(catalog, {key: message}):
+                    (sheet,) = self.drive("browseRecentDictations_", "done")
+                    checked += self.assert_no_text_is_cut(sheet)
+        for action, answer in (
+                ("editVocabulary_", "cancel"),
+                ("reviewCorrections_", "done")):
+            with self.subTest(action=action):
+                (sheet,) = self.drive(action, answer)
+                checked += self.assert_no_text_is_cut(sheet)
+        self.assertGreater(checked, 10)
 
     def test_every_editor_is_a_sheet_and_leaving_it_changes_nothing(self):
         for action, answer in (

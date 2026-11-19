@@ -46,6 +46,7 @@ arguments:
    uv run tests/test_benchmark_asr.py
    uv run tests/test_benchmark_macos_asr_warm_path.py
    uv run tests/test_performance_lab.py
+   uv run tests/test_release_latency_probe.py
    uv run tests/test_dictate.py
    uv run tests/test_whole_program.py
    uv run tests/test_gui_settings_runtime.py
@@ -100,6 +101,7 @@ arguments:
    uv run tests/test_side_by_side_update.py
    uv run tests/test_app_update.py
    uv run tests/test_self_update.py
+   uv run tests/test_voice_check.py
    ```
 
    This list is duplicated in `docs/installer-release-process.md` and

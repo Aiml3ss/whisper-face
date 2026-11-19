@@ -51,7 +51,7 @@ reruns are idempotent.
   service and writes exactly one byte to a PID+revision-bound 0600
   socket to show the GUI.
 - **Verify modes** are read-only and never repair: tools, helper,
-  speech runtime when installed (optional while off by default; one that is present must answer protocol 2), plists, logs, launcher binding, locks, model pins, agents, health —
+  speech runtime when installed (optional while off by default; one that is present must answer protocol 3), plists, logs, launcher binding, locks, model pins, agents, health —
   plus a bounded native GUI smoke test on Mac. The documented platform
   asymmetry: Mac proves launchd-PID-to-listener identity; Windows
   cannot (Ollama is independently managed).

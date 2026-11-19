@@ -52,7 +52,10 @@ Qwen3.5-4B, and has no Parakeet.
   deterministically. Compose, Reply, and Edit refuse outside English.
 - **Rolling recognition.** Long dictation is transcribed while you are still
   talking, cut at natural pauses, so the decode at key release covers only
-  the remainder rather than the whole recording.
+  the remainder rather than the whole recording. On the Parakeet route a
+  take of up to 14.96 s (one model window) is not cut: it is decoded whole,
+  in one pass. If you are still speaking when you let go, what you said is
+  already decoding while the app listens for the end of your last word.
 - **Cascade on Mac.** For English, a warm native Parakeet Unified helper is
   the primary recognizer and Whisper Tiny decodes the same audio only to
   measure agreement; Tiny's text is never delivered on that route. When the
@@ -157,8 +160,20 @@ Qwen3.5-4B, and has no Parakeet.
   path applies only the written rules above (fillers, spoken structure,
   snippets on the explicit cue, and the typed self-correction only when it is
   turned on).
+- **Favor my words.** On Mac, when Whisper Face's own speech runtime
+  answers, a dictionary term (or a correction the Personal Regression Lab
+  proved) the recognizer itself ranked a close second, over words it was
+  unsure of that sound like the term, is written in their place: at most two
+  in a dictation, English capture only, never in code mode or verbatim apps,
+  never over a digit, a negation, an address or one ordinary word. Each one is
+  a `vocabulary_term` clean-up edit shown under Inspect Evidence, the words
+  heard stay the raw transcript (which Replace with What You Said puts back),
+  and the transcript history counts how many were written. The preference `favor_my_words` (on by default; the switch
+  under Settings → Personalize) turns it off, leaving the report only
+  counted.
 - **Bounded context.** App names, window titles, and dictionary terms bias
-  the recognizer and protect words but never replace a recognized word. Other
+  the recognizer and protect words but never replace a recognized word,
+  except through Favor my words above. Other
   on-screen text (the selection, the open document, the repository, the
   focused field, the clipboard) can only *repair a name*: the recognizer
   must have been unsure of the take (confidence 0.70 or lower, scored for the

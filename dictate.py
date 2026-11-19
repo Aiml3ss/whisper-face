@@ -232,7 +232,8 @@ import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from pathlib import Path
 
 import numpy as np
@@ -252,6 +253,7 @@ if IS_MACOS:
         NSAffineTransform,
         NSAlert,
         NSAlertFirstButtonReturn,
+        NSAlertSecondButtonReturn,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
         NSAppearanceNameAqua,
@@ -374,6 +376,7 @@ from parrot_core import (  # noqa: E402
     transform_last_insertion,
     compile_cleanup,
     compile_code_dictation,
+    finish_cleanup,
     NUMBER_WORDS,
     combine_word_evidence_status,
     confidence_from_segments,
@@ -382,7 +385,11 @@ from parrot_core import (  # noqa: E402
     hypothesis_agreement,
     parakeet_confidence_from_agreement,
     parakeet_result,
+    helper_takes_vocabulary,
+    shift_vocabulary_evidence,
+    vocabulary_control_frame,
     should_escalate_uncertain,
+    words_settle_route,
     infer_revised_insertion,
     mode_from_modifiers,
     recognition_words_from_segments,
@@ -401,23 +408,33 @@ from voice_compiler import (  # noqa: E402
     VoiceCompiler,
     VoiceIR,
     WordEvidence,
+    VOCABULARY_EDIT_KIND,
+    VOCABULARY_REPORT_DEBT,
     analyze_prosody,
+    apply_dictionary_spelling,
+    apply_vocabulary_decisions,
+    apply_vocabulary_evidence,
     build_consequence_plan,
     context_firewall_receipt,
     execute_consequence_plan,
     project_word_evidence,
+    vocabulary_alternative,
+    vocabulary_terms,
 )
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
     InsertionCoordinator,
     InsertionLease,
     ReadbackResult,
+    ReceiptReason,
     ReceiptState,
     position_check,
     position_count,
     readback_difference,
     readback_stage,
+    review_selection_drift,
     same_but_whitespace_form,
+    user_input_since,
     utf16_units,
 )
 from personal_regression import PersonalRegressionLab  # noqa: E402
@@ -515,6 +532,7 @@ from voice_objects import (  # noqa: E402
     TaskDraft,
 )
 import self_update  # noqa: E402
+import voice_check  # noqa: E402
 
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
@@ -734,6 +752,16 @@ PERFORMANCE_TRACE_SCHEMAS = {
         "release_ms", "asr_ms", "compiler_ms",
         "cleanup_ms", "context_ms", "insertion_ms",
     ),
+    # One per pasted dictation (release_path_metrics). The first eight are
+    # contiguous stages from the key-up event to the paste keystroke and add
+    # up to release_to_paste_ms, the headline; receipt_ms follows the paste;
+    # the last four are measured inside or beside those stages.
+    "release_path": (
+        "dispatch_ms", "tail_ms", "stop_ms", "asr_ms", "order_ms",
+        "compile_ms", "cleanup_ms", "pre_paste_ms", "release_to_paste_ms",
+        "receipt_ms", "asr_native_ms", "crosscheck_ms", "escalation_ms",
+        "audio_ms",
+    ),
 }
 CONSEQUENCE_RISK_IDS = frozenset({
     "name", "number", "currency", "date", "time", "recipient", "contact",
@@ -872,6 +900,10 @@ PARAKEET_RUNTIME_PINNED = bool(
 PARAKEET_RUNTIME_HELPER = HERE / ".models" / "bin" / "parrot-speech-runtime"
 DICTIONARY_FILE = HERE / "dictionary.txt"
 TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
+# Dictations recognised and not yet settled: written before any paste, emptied
+# once the history line is written. What a stop leaves here is recovered at
+# the next start (``recover_journaled_dictations``).
+DELIVERY_JOURNAL_FILE = HERE / "delivery_journal.json"
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
 ACOUSTIC_KEYWORD_MEMORY_FILE = HERE / "acoustic_keyword_memory.json"
 ACOUSTIC_KEYWORD_ACTIVATION_FILE = (
@@ -919,8 +951,17 @@ PARAKEET_MIN_REQUEST_TIMEOUT = 3.0
 PARAKEET_MAX_REQUEST_TIMEOUT = 10.0
 # The helper protocol this client asks for. A protocol 1 helper ignores the
 # request and answers as it always has; a protocol 2 helper adds each word's
-# time and confidence (native/ParrotASRHelper/PROTOCOL.md).
-PARAKEET_PROTOCOL = 2
+# time and confidence; protocol 3, Whisper Face's own runtime, adds sessions
+# that decode a long take while it is captured (native/ParrotASRHelper/
+# PROTOCOL.md). Batch requests and answers are the same in 2 and 3.
+PARAKEET_PROTOCOL = 3
+# Protocol 3 request headers: the operation in the top byte, a count in the
+# rest. A batch request's header is its sample count, whose top byte is 0.
+SPEECH_SESSION_BEGIN = 1
+SPEECH_SESSION_APPEND = 2
+SPEECH_SESSION_FINISH = 3
+SPEECH_SESSION_CANCEL = 4
+SPEECH_SESSION_OPERATION_SHIFT = 56
 # A ten-minute dictation's words are about 300 KiB of JSON; the text alone
 # never came near the old 64 KiB.
 PARAKEET_MAX_RESPONSE_BYTES = 1024 * 1024
@@ -934,6 +975,23 @@ PARAKEET_MAX_RESPONSE_BYTES = 1024 * 1024
 # PROSODY_FORMATTING on, the words place spans but every span stays flagged.
 PROSODY_FORMATTING = False
 PARAKEET_WORD_CONFIDENCE_ROUTING = False
+# A Parakeet decode whose every word the runtime scored at least
+# parrot_core.CROSSCHECK_SKIP_CONFIDENCE is never escalated to Whisper Turbo
+# before the paste. Tiny still runs beside the decode exactly as before and
+# still sets the route confidence; only the Turbo decode it could trigger
+# (0.6 to 2.6 s, the slow tail of release to paste) is skipped. A decode
+# with any word below the line, or without the runtime's words (the
+# FluidAudio helper speaks protocol 1), takes today's path unchanged. On
+# because the owner's recordings show it loses nothing Turbo would have
+# fixed (experiment E3, CROSSCHECK_SKIP_CONFIDENCE in parrot_core.py).
+PARAKEET_CONFIDENT_SKIPS_ESCALATION = True
+# Long takes on Whisper Face's own runtime are streamed to it while they are
+# captured (SpeechSession), so release decodes only the last window. Off,
+# no session is begun and long takes are decoded as rolling chunks only.
+SPEECH_SESSION_DECODE = True
+# Audio is handed to the session in pieces of about this many samples (half
+# a second), off the audio thread.
+SPEECH_SESSION_APPEND_SAMPLES = 8_000
 VOICE_OUTBOX_MAX_ITEMS = 20
 LLM_CLEANUP_TIMEOUT = (1, 4) # localhost connect + inter-chunk stall deadline.
                              # Capture must fall back faithfully instead of
@@ -956,6 +1014,14 @@ CHUNK_MIN_SECONDS = 4.0      # never cut a segment shorter than this
 CHUNK_CUT_SILENCE = 0.6      # a pause this long marks a safe cut point
 SPECULATIVE_MIN_SECONDS = 0.8
 SPECULATIVE_SILENCE = 0.25   # likely end pause: decode before key release
+# On the Parakeet route a take this long or shorter is decoded whole: no
+# rolling chunk is cut, so release sends the whole take as one request (or
+# reuses a speculation of the whole take) and the text is exactly the
+# offline decode of the recording, with no joins. Parakeet's encoder reads
+# fixed 14.96 s windows (WindowLayout in native/ParrotSpeechRuntime), so a
+# whole take up to one window costs one encoder pass, the same as a
+# remainder. Longer takes still cut rolling chunks, once past this length.
+WHOLE_TAKE_MAX_SECONDS = 14.96
 CAPTURE_BLOCK_SECONDS = 8     # bound ndarray count during long dictations
 
 SNIPPETS_FILE = HERE / "snippets.json"
@@ -1420,11 +1486,20 @@ GLOSS = {
     # Dictionary terms as protected cleanup anchors and a casefold->canonical
     # casing map, rebuilt alongside the prompt by refresh_glossary().
     "anchor_pack": ContextPack(), "vocabulary": {},
+    # The terms the speech runtime's term pass looks for
+    # (voice_compiler.vocabulary_terms) and the version that names them.
+    "vocabulary_terms": (), "vocabulary_version": 0,
     "lock": threading.Lock(),
 }
 
 # Serializes transcript-log writes against the learning loop's trim rewrite.
 TRANSCRIPTS_LOCK = threading.Lock()
+# Serializes the delivery journal's read-modify-write. Taken before
+# TRANSCRIPTS_LOCK when both are held, never after it.
+DELIVERY_JOURNAL_LOCK = threading.Lock()
+# Dictations in flight at once are a handful; a journal past this keeps its
+# newest entries, so a settle that keeps failing cannot grow it without end.
+DELIVERY_JOURNAL_MAX = 50
 
 # Last moment the user touched dictation (press or finished processing);
 # gates the learn pass and the keep-warm heartbeat.
@@ -1461,6 +1536,15 @@ PIPELINE_STATE = {
     "last_confidence": 1.0,
     "last_alternatives": [],
     "last_cleanup_edits": [],
+    # The term pass: reports seen and terms the policy would have written,
+    # over this run, and the last dictation's "Alt:" text; then how many
+    # of them "Favor my words" wrote, over this run and in the last
+    # dictation. Counts only, never words.
+    "vocab_candidates": 0,
+    "vocab_shadow_accepts": 0,
+    "last_vocabulary_alternative": None,
+    "vocab_applied": 0,
+    "last_vocabulary_applied": 0,
     "last_mode": "capture",
     "last_compiler_decisions": 0,
     "last_compiler_details": [],
@@ -1612,6 +1696,7 @@ PREFERENCES = {
     "recent_dictations": False,
     "self_correction": False,
     "remove_repeats": True,
+    "favor_my_words": True,
     "new_speech_runtime": False,
     "language": LANGUAGE_DEFAULT,
 }
@@ -2073,6 +2158,11 @@ def load_preferences():
     # that off. A file written before the key existed keeps the default.
     PREFERENCES["remove_repeats"] = bool(
         loaded.get("remove_repeats") is not False)
+    # A word the recognizer nearly heard as one of the user's own is written
+    # their way unless they turned that off. A file written before the key
+    # existed keeps the default, so an install that is updated has it on.
+    PREFERENCES["favor_my_words"] = bool(
+        loaded.get("favor_my_words") is not False)
     # Whisper Face's own speech runtime is asked first only for a user who
     # turned it on. Any other value, and a file written before the key
     # existed, leaves the FluidAudio helper alone in charge.
@@ -2158,6 +2248,7 @@ def save_preferences():
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
         "self_correction": bool(PREFERENCES["self_correction"]),
         "remove_repeats": bool(PREFERENCES["remove_repeats"]),
+        "favor_my_words": bool(PREFERENCES["favor_my_words"]),
         "new_speech_runtime": bool(PREFERENCES["new_speech_runtime"]),
         "language": normalize_language(PREFERENCES["language"]),
     }
@@ -2287,6 +2378,14 @@ def set_remove_repeats(enabled: bool) -> bool:
     PREFERENCES["remove_repeats"] = bool(enabled)
     save_preferences()
     return PREFERENCES["remove_repeats"]
+
+
+def set_favor_my_words(enabled: bool) -> bool:
+    """Persist the on-by-default "Favor my words": whether the term pass's
+    accepted decisions are written (on) or only counted (off)."""
+    PREFERENCES["favor_my_words"] = bool(enabled)
+    save_preferences()
+    return PREFERENCES["favor_my_words"]
 
 
 def speech_runtime_selected() -> bool:
@@ -2520,6 +2619,17 @@ def voice_outbox_menu_title(count, needs_home=None) -> str:
             return (f"Voice Outbox — {needs_home} recoverable, "
                     f"{count - needs_home} pasted")
     return f"Voice Outbox — {count} recoverable"
+
+
+SAID_MENU_TITLE = "Replace with What You Said"
+
+
+def said_menu_title(status) -> str:
+    """Name the raw-words row; say why when there is nothing to put back."""
+    if (isinstance(status, dict) and status.get("available")
+            and not status.get("said_available")):
+        return f"{SAID_MENU_TITLE} — clean-up changed nothing"
+    return SAID_MENU_TITLE
 
 
 def undo_menu_title(status, hotkey_label: str = "") -> str:
@@ -3281,7 +3391,7 @@ def hud_caption_text(caption: str) -> str:
 
 
 def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
-                 language=LANGUAGE_DEFAULT):
+                 language=LANGUAGE_DEFAULT, replace=False):
     try:
         result = fut.result()
         if isinstance(result, Recognition):
@@ -3298,7 +3408,8 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
     evidence = result if isinstance(result, Recognition) else None
     if t and not is_hallucination(t, language, evidence):
         current = CAPTION["text"]
-        if current == "Listening" or current.endswith(" mode"):
+        if (replace or current == "Listening"
+                or current.endswith(" mode")):
             current = ""
         CAPTION["text"] = join_recognized_parts((current, t), language)
         CAPTION["stable_prefix"] = True
@@ -3962,6 +4073,12 @@ class StatusBar(NSObject):
         # title carries a length and an app — never any dictated text.
         self.undo_item = mk("Undo Last Dictation", "undoLastDictation:")
         self.undo_item.setHidden_(True)
+        # Beside Undo and only with it: the raw transcript put back where
+        # the cleaned text stands. Dimmed, saying why, when clean-up
+        # changed nothing.
+        self.said_item = mk(
+            SAID_MENU_TITLE, "replaceWithWhatYouSaid:")
+        self.said_item.setHidden_(True)
         # Recent dictations are off by default and stay metadata-only until
         # an explicit reveal, exactly like the Voice Inbox.
         self.recent_root = mk("Recent Dictations", None)
@@ -4000,6 +4117,7 @@ class StatusBar(NSObject):
         menu.addItem_(self.faces_root)
         menu.addItem_(self.recognition_item)
         menu.addItem_(self.undo_item)
+        menu.addItem_(self.said_item)
         menu.addItem_(self.recent_root)
         menu.addItem_(self.voice_outbox_item)
         menu.addItem_(self.voice_inbox_item)
@@ -4158,10 +4276,27 @@ class StatusBar(NSObject):
         self.undo_item.setTitle_(undo_menu_title(
             status, hotkey_label_for(UNDO_HOTKEY_NAME)))
         self.undo_item.setEnabled_(bool(status["available"]))
+        self.said_item.setHidden_(not status["available"])
+        self.said_item.setTitle_(said_menu_title(status))
+        self.said_item.setEnabled_(bool(status.get("said_available")))
 
     def undoLastDictation_(self, sender):
         """Run the undo transaction off the main thread; it synthesizes keys."""
         threading.Thread(target=undo_last_dictation, daemon=True).start()
+
+    def replaceWithWhatYouSaid_(self, sender):
+        """Put the raw words back, off the main thread like Undo; a refusal
+        comes back to the main thread to be said."""
+        threading.Thread(
+            target=replace_with_what_you_said,
+            args=(self.show_said_refusal,), daemon=True).start()
+
+    def show_said_refusal(self, detail):
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(SAID_MENU_TITLE)
+        alert.setInformativeText_(str(detail))
+        alert.addButtonWithTitle_("OK")
+        alert.runModal()
 
     def rebuild_recent_dictations(self):
         """Rebuild the metadata-only recent list from the log on disk.
@@ -4413,24 +4548,38 @@ class StatusBar(NSObject):
             return {}
         return answer if isinstance(answer, dict) else {}
 
-    def _begin_release_update(self, version, revision):
+    def _begin_release_update(self, version, revision, update_anyway=False):
         """The person accepted: download, verify and hand over to the new
-        app, off the main thread. Only a failure comes back here; on success
-        the new app's own window carries on."""
+        app, off the main thread. Only a failure, or an update held because
+        it heard the person less well, comes back here; on success the new
+        app's own window carries on."""
+        arguments = ["install", "--version", version, "--revision", revision]
+        if update_anyway:
+            arguments.append("--update-anyway")
+
         def worker():
             outcome = self._release_update_result(
-                self._release_update_command(
-                    "install", "--version", version, "--revision", revision),
-                timeout=1800)
+                self._release_update_command(*arguments), timeout=1800)
+            if outcome.get("status") == "held":
+                from whisper_face_gui import voice_check_update_label
+                AppHelper.callAfter(
+                    self._present_voice_hold, outcome.get("voice_check") or {},
+                    voice_check_update_label(version=version),
+                    lambda: self._begin_release_update(
+                        version, revision, update_anyway=True))
+                return
             detail = release_update_failure(outcome)
             if detail is not None:
                 AppHelper.callAfter(
                     self._update_alert, "Couldn't install the update.", detail)
         threading.Thread(target=worker, daemon=True).start()
-        self._update_alert(
-            f"Downloading Whisper Face {version}…",
-            "Its update window opens when the download is ready and "
-            "checked. You can keep working until then.")
+        detail = ("Its update window opens when the download is ready and "
+                  "checked. You can keep working until then.")
+        if not update_anyway:
+            from whisper_face_gui import voice_check_ahead
+            ahead = voice_check_ahead(voice_check.corpus_size())
+            detail = f"{detail}\n\n{ahead}" if ahead else detail
+        self._update_alert(f"Downloading Whisper Face {version}…", detail)
 
     def _present_update_check(self, report):
         try:
@@ -4476,7 +4625,7 @@ class StatusBar(NSObject):
         except Exception as e:
             print(f"! update check UI failed: {e}")
 
-    def _begin_update(self, target_rev):
+    def _begin_update(self, target_rev, update_anyway=False):
         if not target_rev:
             self._update_alert(
                 "Couldn't start the update.",
@@ -4514,6 +4663,8 @@ class StatusBar(NSObject):
                 "--result", str(result_path),
                 "--label", label,
             ]
+            if update_anyway:
+                command.append("--update-anyway")
             submitted = subprocess.run(
                 command, capture_output=True, text=True, timeout=15)
             if submitted.returncode != 0:
@@ -4521,13 +4672,43 @@ class StatusBar(NSObject):
                     "Couldn't start the update.",
                     "The detached updater could not be launched.")
                 return
-            self._update_alert(
-                "Updating Whisper Face…",
-                "The update is running safely in the background. "
-                "Whisper Face will restart and report the result.")
+            detail = ("The update is running safely in the background. "
+                      "Whisper Face will restart and report the result.")
+            if not update_anyway:
+                from whisper_face_gui import voice_check_ahead
+                ahead = voice_check_ahead(voice_check.corpus_size())
+                if ahead:
+                    detail = f"{detail}\n\n{ahead}"
+                    # A held update changes nothing and restarts nothing,
+                    # so this copy, still running, looks for the answer.
+                    threading.Thread(
+                        target=self._await_held_update, args=(result_path,),
+                        daemon=True).start()
+            self._update_alert("Updating Whisper Face…", detail)
         except Exception as e:
             self._update_alert(
                 "Couldn't start the update.", type(e).__name__)
+
+    def _await_held_update(self, result_path, *, deadline_s=3600.0,
+                           interval_s=2.0, sleep=time.sleep):
+        """Off the main thread: wait for the detached updater to say the
+        update was held. Any other answer restarts this app, and the next
+        start reads it; this thread just ends with the process."""
+        deadline = time.monotonic() + deadline_s
+        while time.monotonic() < deadline:
+            try:
+                outcome = json.loads(Path(result_path).read_text(
+                    encoding="utf-8"))
+            except (OSError, ValueError):
+                outcome = {}
+            status = outcome.get("status") if isinstance(outcome, dict) \
+                else None
+            if status == "held":
+                AppHelper.callAfter(self._consume_update_result)
+                return
+            if status not in (None, "running"):
+                return
+            sleep(interval_s)
 
     def _consume_update_result(self):
         result_path = (
@@ -4538,7 +4719,8 @@ class StatusBar(NSObject):
                 return
             outcome = json.loads(result_path.read_text(encoding="utf-8"))
             if outcome.get("status") not in {
-                    "applied", "rolled_back", "rollback_failed", "failed"}:
+                    "applied", "rolled_back", "rollback_failed", "failed",
+                    "held"}:
                 return
             result_path.unlink(missing_ok=True)
             # Consuming the result deletes it, which used to erase the only
@@ -4552,21 +4734,61 @@ class StatusBar(NSObject):
                         f"{outcome.get('status')} "
                         f"{str(outcome.get('from') or '')[:7]}->"
                         f"{str(outcome.get('to') or '')[:7]} "
-                        f"{outcome.get('error') or ''}\n")
+                        f"{outcome.get('error') or ''}"
+                        f"{self._voice_check_log(outcome)}\n")
             except OSError:
                 pass
             self._present_update_result(outcome)
         except Exception as e:
             print(f"! could not consume update result: {e}")
 
+    @staticmethod
+    def _voice_check_log(outcome):
+        """The voice check's counts for update.log; never a word."""
+        checked = outcome.get("voice_check") if isinstance(outcome, dict) \
+            else None
+        if not isinstance(checked, dict) or checked.get("status") in (
+                None, "no-corpus"):
+            return ""
+        return " " + voice_check.summary_line(checked)
+
+    def _present_voice_hold(self, outcome, update_label, on_anyway):
+        """An update that heard the person less well: what got worse, in
+        counts, and their choice. Wait is the default; nothing changed."""
+        try:
+            from whisper_face_gui import localized_string, voice_check_held
+            title, detail = voice_check_held(outcome, update_label)
+            alert = NSAlert.alloc().init()
+            self._brand_update_alert(alert)
+            alert.setMessageText_(title)
+            alert.setInformativeText_(detail)
+            alert.addButtonWithTitle_(
+                localized_string("update.voice_check.held.wait"))
+            alert.addButtonWithTitle_(
+                localized_string("update.voice_check.held.anyway"))
+            if alert.runModal() == NSAlertSecondButtonReturn:
+                on_anyway()
+        except Exception as e:
+            print(f"! update hold UI failed: {e}")
+
     def _present_update_result(self, outcome):
         try:
             status = outcome.get("status")
-            if status == "applied":
+            if status == "held":
+                from whisper_face_gui import voice_check_update_label
+                target = str(outcome.get("to") or "")
+                self._present_voice_hold(
+                    outcome.get("voice_check") or {},
+                    voice_check_update_label(build=target),
+                    lambda: self._begin_update(target, update_anyway=True))
+            elif status == "applied":
+                from whisper_face_gui import voice_check_note
                 revision = str(outcome.get("to") or "")[:7]
-                self._update_alert(
-                    "Whisper Face is up to date.",
-                    f"Now running build {revision}." if revision else "")
+                detail = f"Now running build {revision}." if revision else ""
+                note = voice_check_note(outcome.get("voice_check"))
+                if note:
+                    detail = f"{detail}\n\n{note}" if detail else note
+                self._update_alert("Whisper Face is up to date.", detail)
             elif status == "rolled_back":
                 # Say why. A bare "it failed" gave nobody -- user or
                 # maintainer -- anything to act on, so the same failure kept
@@ -5601,6 +5823,7 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
     language = normalize_language(
         current_language() if language is None else language)
     segment = np.concatenate(frames).flatten()
+    fast_started_at = time.perf_counter()
     fast = ASR_POOL.submit(
         transcribe_detailed,
         segment,
@@ -5612,6 +5835,7 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
         # working cross-check.
         language=language,
     ).result()
+    fast_s = time.perf_counter() - fast_started_at
     if still_valid is not None and not still_valid():
         return fast
     # On Mac, the warm Parakeet batch path is both more accurate and faster
@@ -5634,6 +5858,9 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
         crosscheck_text=fast.text or None, language=language).result()
     if fast.text and fast.text != accurate.text:
         accurate.alternative = fast.text
+    if getattr(accurate, "crosscheck_s", None) is None and fast.text:
+        # Tiny's pass above was this decode's cross-check.
+        accurate.crosscheck_s = fast_s
     return accurate
 
 
@@ -5731,6 +5958,7 @@ class Recorder:
         self.insertion_lease = None
         self.insertion_receipt = None
         self.insertion_opaque_evidence = None
+        self.insertion_ax_wake = None
         self.process_ticket = None
         self.input_signature_at_press = None
         self.context_terms = []
@@ -5753,14 +5981,31 @@ class Recorder:
         self.speculative_start = 0
         self.speculative_end = 0
         self.speculative_invalid = False
+        # The sample count at the end of the last block loud enough to count
+        # as speech.
+        self.voiced_until = 0
+        # No rolling chunk is cut until the take is longer than this many
+        # samples; 0 keeps the rolling plan from the first pause. Set per
+        # take by the hotkey worker (whole_take_limit_samples).
+        self.whole_take_samples = 0
+        # Held by the audio callback for each block and by stop() to end
+        # capture, so the take's last sample is exact the moment stop()
+        # returns, without waiting for the stream itself to stop.
+        self.capture_lock = threading.Lock()
+        # The take streamed to the speech runtime as it is captured, once it
+        # outgrows the whole-take path (SpeechSession); None otherwise. Set
+        # per take by the hotkey worker (speech_session_for).
+        self.session = None
 
     def start(self, press_at=None):
         self.frames = CapturedAudio()
+        self.session = None
         self.chunks = []
         self.cut_samples = 0
         self.total_samples = 0
         self.silent_samples = 0
         self.voiced_since_cut = False
+        self.voiced_until = 0
         self.speculative_future = None
         self.speculative_start = 0
         self.speculative_end = 0
@@ -5776,6 +6021,7 @@ class Recorder:
         self.insertion_lease = None
         self.insertion_receipt = None
         self.insertion_opaque_evidence = None
+        self.insertion_ax_wake = None
         self.process_ticket = None
         self.input_signature_at_press = None
         self.recording = True
@@ -5790,6 +6036,9 @@ class Recorder:
 
     def replace_with_buffered_audio(self, audio: np.ndarray):
         """Turn a quick tap's Recorder into a retrospective captured take."""
+        session, self.session = self.session, None
+        if session is not None:
+            session.cancel()
         self.frames = CapturedAudio(audio)
         self.chunks = []
         self.cut_samples = 0
@@ -5804,6 +6053,10 @@ class Recorder:
         self.source = "flight"
 
     def _callback(self, indata, frames, time_info, status):
+        with self.capture_lock:
+            self._capture_block(indata, status)
+
+    def _capture_block(self, indata, status):
         if not self.recording:
             return
         self.last_frame_at = time.perf_counter()
@@ -5818,6 +6071,8 @@ class Recorder:
             self.speculative_invalid = False
         n = len(indata)
         self.total_samples += n
+        if self.session is not None:
+            self.session.captured(self.total_samples)
         rms = float(np.sqrt(np.mean(indata ** 2)))
         # sqrt curve: whispers visibly register instead of flatlining
         LEVELS.append(min(1.0, (rms * 14.0) ** 0.5))
@@ -5828,6 +6083,7 @@ class Recorder:
         else:
             self.silent_samples = 0
             self.voiced_since_cut = True
+            self.voiced_until = self.total_samples
             if self.speculative_future is not None:
                 if self.speculative_future.cancel():
                     self.speculative_future = None
@@ -5856,7 +6112,14 @@ class Recorder:
                 lambda: not self.speculative_invalid,
                 self.language,
             )
+            if self.whole_take_samples and self.speculative_start == 0:
+                # No rolling chunk feeds the caption while the take is
+                # decoded whole, so a still-current decode of the whole take
+                # so far does, replacing what it showed.
+                self.speculative_future.add_done_callback(
+                    self._caption_whole_take)
         if (self.voiced_since_cut
+                and self.total_samples > self.whole_take_samples
                 and segment_samples >= CHUNK_MIN_SECONDS * SAMPLE_RATE
                 and self.silent_samples >= CHUNK_CUT_SILENCE * SAMPLE_RATE):
             if can_reuse_speculation(
@@ -5876,11 +6139,15 @@ class Recorder:
                 decode_end = self.total_samples
             # Only compiler-approved stable text reaches the HUD. Provisional
             # text is never typed into the focused application.
+            # A chunk from the start of the take replaces the caption, which
+            # can only hold "Listening" or a whole-take speculation of the
+            # same audio; a later chunk adds to it.
             decode_future.add_done_callback(
                 lambda done, terms=tuple(self.context_terms),
                 bundle=self.bundle_at_press, pack=self.context_pack,
-                language=self.language:
-                    _caption_add(done, terms, bundle, pack, language))
+                language=self.language, replace=decode_start == 0:
+                    _caption_add(done, terms, bundle, pack, language,
+                                 replace=replace))
             self.chunks.append(BoundedRecognitionFuture(
                 decode_future, decode_start, decode_end))
             self.speculative_future = None
@@ -5892,6 +6159,13 @@ class Recorder:
             # speech, so it opens the next segment rather than being skipped.
             self.cut_samples = decode_end
             self.voiced_since_cut = False
+
+    def _caption_whole_take(self, done):
+        if (self.recording and self.speculative_future is done
+                and not self.speculative_invalid):
+            _caption_add(done, tuple(self.context_terms),
+                         self.bundle_at_press, self.context_pack,
+                         self.language, replace=True)
 
     def snapshot(self) -> np.ndarray:
         """Audio so far, without stopping the stream."""
@@ -5907,14 +6181,26 @@ class Recorder:
             latest = max(latest, self.last_frame_at)
         return now - latest >= NO_AUDIO_SECONDS
 
-    def stop(self) -> np.ndarray:
+    def stop(self, *, wait_for_stream: bool = True) -> np.ndarray:
+        """End capture and return the take.
+
+        The take ends the moment this takes the capture lock: no block is
+        added after it. With ``wait_for_stream`` false the microphone
+        stream is stopped on AUDIO_STOP_POOL instead of here, because
+        stopping a PortAudio stream waits on the audio device and the take
+        is already complete without it.
+        """
         delivered_audio = not self.audio_stalled(time.perf_counter())
-        self.recording = False
+        with self.capture_lock:
+            self.recording = False
         if self.captured_via_flight:
             FLIGHT.detach(self, delivered_audio=delivered_audio)
         if self.slot is not None:
             slot, self.slot = self.slot, None
-            AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
+            if wait_for_stream:
+                AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
+            else:
+                release_stream_later(slot, delivered_audio)
         if self.audio_status:
             print(f"! audio callback status: {'; '.join(self.audio_status)}")
         audio = self.frames.array()
@@ -5927,6 +6213,192 @@ class Recorder:
         if self.captured_via_flight and self.source == "hold":
             FLIGHT.clear()                   # never let a hold paste twice
         return audio
+
+
+def whole_take_limit_samples(language: str) -> int:
+    """How long a take may run before rolling chunks are cut, in samples.
+
+    WHOLE_TAKE_MAX_SECONDS on the route _speculative_frames sends to
+    Parakeet (macOS, the model and its program present, a language it
+    decodes); 0, the rolling plan from the first pause, everywhere else.
+    """
+    try:
+        parakeet_route = (
+            IS_MACOS and PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
+            and normalize_language(language) in PARAKEET_LANGUAGES)
+    except Exception:
+        parakeet_route = False
+    return int(WHOLE_TAKE_MAX_SECONDS * SAMPLE_RATE) if parakeet_route else 0
+
+
+# One worker: streams stop one at a time and in release order, off the
+# path from key release to the paste.
+AUDIO_STOP_POOL = ThreadPoolExecutor(max_workers=1)
+
+
+def release_stream_later(slot, delivered_audio: bool = True):
+    """Stop a finished take's stream and return it to AUDIO_POOL, later.
+
+    The slot stays busy until then, so no take can start on it. A failed
+    stop marks the pool for recovery, as it does when stopped in place; the
+    finished take keeps its audio either way.
+    """
+    def release():
+        try:
+            AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
+        except Exception as error:
+            print(f"! microphone stop failed: {type(error).__name__}")
+    return AUDIO_STOP_POOL.submit(release)
+
+
+# One worker: a take's session messages go out in the order they were made,
+# off the audio thread and off the path from key release to the paste.
+SPEECH_SESSION_POOL = ThreadPoolExecutor(max_workers=1)
+
+
+def speech_session_client():
+    """The client that decodes sessions, or None.
+
+    Whisper Face's own runtime, when it is the program asked first and is
+    loaded and speaking protocol 3. Nothing is started for a session: a
+    take that finds no such program is decoded the usual way.
+    """
+    if not SPEECH_SESSION_DECODE:
+        return None
+    try:
+        client = PARAKEET.preferred
+        if client is None or client.protocol < 3:
+            return None
+        process = client.process
+        if process is None or process.poll() is not None:
+            return None
+        return client
+    except Exception:
+        return None
+
+
+def speech_session_for(rec):
+    """A session for a take on the Parakeet route, or None."""
+    limit = int(getattr(rec, "whole_take_samples", 0) or 0)
+    if limit <= 0:
+        return None
+    client = speech_session_client()
+    if client is None:
+        return None
+    return SpeechSession(client, rec.frames, limit)
+
+
+class SpeechSession:
+    """A long take streamed to the speech runtime while it is captured.
+
+    Nothing is sent while the take fits the whole-take path
+    (``start_after`` samples, WHOLE_TAKE_MAX_SECONDS). Once it outgrows it,
+    the audio callback hands the pool a request to send whatever is new,
+    every SPEECH_SESSION_APPEND_SAMPLES, and the runtime decodes each 15 s
+    window as it completes (protocol 3). At release ``finish`` sends the
+    rest and returns the runtime's transcript of the whole take, which is
+    its offline decode of the recording, or None, and the take is decoded
+    the usual way. What is sent is read from the take's own CapturedAudio,
+    so it is the take sample for sample. Rolling chunks are cut and decoded
+    beside it exactly as without a session.
+    """
+
+    def __init__(self, client, frames, start_after: int, pool=None):
+        self.client = client
+        self.frames = frames
+        self.start_after = int(start_after)
+        self.pool = pool or SPEECH_SESSION_POOL
+        self.token = None
+        # Written on the audio thread until capture stops.
+        self.begun = False
+        self.queued = 0
+        # Written on the pool.
+        self.sent = 0
+        self.failed = False
+
+    def captured(self, total: int) -> None:
+        """From the audio callback, with the capture lock held: hand the
+        pool what is new once there is enough of it. Never blocks."""
+        if total <= self.start_after:
+            return
+        if self.begun and total - self.queued < SPEECH_SESSION_APPEND_SAMPLES:
+            return
+        try:
+            if not self.begun:
+                self.begun = True
+                self.pool.submit(self._begin)
+            self.queued = total
+            self.pool.submit(self._send)
+        except RuntimeError:
+            self.failed = True      # the pool is shutting down with the app
+
+    def _begin(self) -> None:
+        self.token = self.client.begin_session()
+        if self.token is None:
+            self.failed = True
+
+    def _send(self) -> None:
+        if self.failed:
+            return
+        frames = self.frames.frames_from(self.sent)
+        if not frames:
+            return
+        audio = np.concatenate(frames)
+        if self.client.append_session(self.token, audio):
+            self.sent += len(audio)
+        else:
+            self.failed = True
+
+    def _finish(self, frames, expected: int):
+        self._send()
+        if self.failed or frames is not self.frames or self.sent != expected:
+            self._cancel()
+            return None
+        token, self.token = self.token, None
+        return self.client.finish_session(token, expected)
+
+    def _cancel(self) -> None:
+        token, self.token = self.token, None
+        if token is not None:
+            self.client.cancel_session(token)
+
+    def finish(self, frames, expected: int, unless=()):
+        """At release, once capture has stopped: the runtime's answer for
+        the whole take of ``expected`` samples in ``frames``, or None.
+
+        ``unless`` are the usual path's decodes still running: once every
+        one of them is done before the answer, the usual path is ready and
+        this returns None at once; the finish then ends unread on the pool.
+        """
+        if not self.begun:
+            return None
+        try:
+            answer = self.pool.submit(self._finish, frames, expected)
+            deadline = time.monotonic() + (
+                PARAKEET_MAX_REQUEST_TIMEOUT + PARAKEET_MIN_REQUEST_TIMEOUT)
+            unless = list(unless)
+            others = [future for future in unless if not future.done()]
+            while others and not answer.done():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                wait_for_futures([answer, *others], timeout=left,
+                                 return_when=FIRST_COMPLETED)
+                others = [future for future in others if not future.done()]
+            if unless and not others and not answer.done():
+                return None
+            return answer.result(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception as error:
+            print(f"! speech session unavailable: {type(error).__name__}")
+            return None
+
+    def cancel(self) -> None:
+        """Drop the session without waiting."""
+        if self.begun:
+            try:
+                self.pool.submit(self._cancel)
+            except RuntimeError:
+                pass
 
 
 def stalled_take_action(rec, now: float) -> str | None:
@@ -6324,6 +6796,7 @@ def gui_settings_snapshot() -> dict:
         "corrections": corrections,
         "self_correction": bool(PREFERENCES["self_correction"]),
         "remove_repeats": bool(PREFERENCES["remove_repeats"]),
+        "favor_my_words": bool(PREFERENCES["favor_my_words"]),
     }
 
 
@@ -6536,7 +7009,9 @@ def runtime_status_snapshot() -> dict:
     outbox_summary = ""
     if outbox_needs_home:
         outbox_summary = (
-            "Paste may have landed — verify before reusing"
+            "Kept when Whisper Face stopped — check before reusing"
+            if outbox_needs_home[-1].reason == ReceiptReason.INTERRUPTED
+            else "Paste may have landed — verify before reusing"
             if outbox_needs_home[-1].paste_attempted
             else "Not pasted — destination changed")
     elif outbox:
@@ -6582,6 +7057,10 @@ def runtime_status_snapshot() -> dict:
         "last_alternatives_considered": len(
             PIPELINE_STATE["last_alternatives"]),
         "last_cleanup_edits": list(PIPELINE_STATE["last_cleanup_edits"]),
+        "vocab_candidates": PIPELINE_STATE.get("vocab_candidates", 0),
+        "vocab_shadow_accepts": PIPELINE_STATE.get(
+            "vocab_shadow_accepts", 0),
+        "vocab_applied": PIPELINE_STATE.get("vocab_applied", 0),
         "last_proof_edits_accepted": PIPELINE_STATE[
             "last_proof_edits_accepted"],
         "last_proof_edits_rejected": PIPELINE_STATE[
@@ -7323,6 +7802,12 @@ def refresh_glossary():
             if terms else None
         GLOSS["confusions"] = dict(state.get("confusions", {}))
         GLOSS["regression"] = personal_regression_lab(state)
+        bias_terms = vocabulary_terms(
+            vocabulary.values(),
+            [(mapping.heard, mapping.preferred)
+             for mapping in GLOSS["regression"].active()])
+        GLOSS["vocabulary_terms"] = bias_terms
+        GLOSS["vocabulary_version"] = vocabulary_version(bias_terms)
 
     write_auto_section(promoted)
     return terms
@@ -7441,6 +7926,11 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
         entry["id"] = event_id
     if metrics:
         entry["metrics"] = metrics
+    _append_transcript_entry(entry)
+
+
+def _append_transcript_entry(entry: dict):
+    """Append one finished history line, owner-only, then apply retention."""
     with TRANSCRIPTS_LOCK:
         fd = os.open(
             TRANSCRIPTS_FILE,
@@ -7465,6 +7955,182 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
     _rebase_learned_processed(dropped)
     with USAGE_CACHE["lock"]:
         USAGE_CACHE["at"] = 0.0
+
+
+# ---- Delivery journal -------------------------------------------------------
+# A dictation is written here, owner-only and atomically, before anything is
+# pasted, and leaves once its history line is written. Between the two it
+# exists on disk, so a crash, a hang or a kill between recognition and the
+# history line cannot take the words with it. What the journal still holds at
+# the next start is recovered: into the history as not delivered, and into
+# the Voice Outbox, where Copy & Dismiss offers it.
+# Stages: "recognized" (the clean-up has not run; only the raw words exist)
+# and "pasting" (the final text, written just before the one paste attempt).
+
+
+def _read_delivery_journal_locked() -> list[dict]:
+    """The journal's entries; the caller holds DELIVERY_JOURNAL_LOCK."""
+    try:
+        payload = json.loads(
+            DELIVERY_JOURNAL_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as error:
+        # Every write is atomic, so this is damage from outside. It must not
+        # stop a dictation; the next write replaces it.
+        print(f"! delivery journal unreadable: {type(error).__name__}")
+        return []
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries
+            if isinstance(entry, dict)
+            and isinstance(entry.get("id"), str) and entry["id"]]
+
+
+def _write_delivery_journal_locked(entries: list[dict]) -> None:
+    """Replace the journal atomically; an empty one leaves no file."""
+    if not entries:
+        try:
+            DELIVERY_JOURNAL_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    atomic_write_text(
+        DELIVERY_JOURNAL_FILE,
+        json.dumps({"version": 1,
+                    "entries": entries[-DELIVERY_JOURNAL_MAX:]}),
+        mode=0o600)
+
+
+def journal_dictation(event_id: str, *, raw: str, text: str, bundle: str,
+                      mode: str, language: str, stage: str) -> bool:
+    """Record one dictation on disk before anything is pasted.
+
+    Called once the words are recognised (``stage="recognized"``, no clean
+    text yet) and again with the final text just before the paste
+    (``stage="pasting"``); the second replaces the first and keeps its time.
+    A failed write is reported and the dictation goes on: the journal is a
+    safety net, never a reason to withhold a paste.
+    """
+    if not isinstance(event_id, str) or not event_id:
+        return False
+    entry = {
+        "id": event_id,
+        "ts": time.time(),
+        # The same identity the history keeps: on Windows a digest of the
+        # window title, never the title, so no document name reaches disk.
+        "app": transcript_app_identity(bundle),
+        "raw": str(raw or ""),
+        "clean": str(text or ""),
+        "mode": str(mode or "capture"),
+        "language": str(language or LANGUAGE_DEFAULT),
+        "stage": "pasting" if stage == "pasting" else "recognized",
+    }
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        for existing in entries:
+            if existing.get("id") == event_id:
+                entry["ts"] = existing.get("ts", entry["ts"])
+        entries = [existing for existing in entries
+                   if existing.get("id") != event_id]
+        entries.append(entry)
+        try:
+            _write_delivery_journal_locked(entries)
+        except OSError as error:
+            print(f"! delivery journal write failed: {type(error).__name__}")
+            return False
+    return True
+
+
+def settle_journaled_dictation(event_id: str) -> None:
+    """Remove one dictation from the journal: its outcome is recorded."""
+    if not isinstance(event_id, str) or not event_id:
+        return
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        remaining = [entry for entry in entries
+                     if entry.get("id") != event_id]
+        if len(remaining) == len(entries):
+            return
+        try:
+            _write_delivery_journal_locked(remaining)
+        except OSError as error:
+            # The entry stays, and is recovered as not delivered at the next
+            # start: a duplicate copy, never a lost one.
+            print(f"! delivery journal settle failed: {type(error).__name__}")
+
+
+def recover_journaled_dictations(only: str | None = None,
+                                 coordinator=None) -> int:
+    """Give back what the journal holds; return how many were recovered.
+
+    At start-up ``only`` is None and every entry is recovered: Whisper Face
+    stopped before it recorded what became of them. During a dictation that
+    failed before its paste, ``only`` names that one. Each entry is written to
+    the history as not delivered, kept in the Voice Outbox, and only then
+    removed from the journal; one whose history line cannot be written stays
+    for the next try. Nothing is pasted, and no text is printed.
+    """
+    coordinator = coordinator or INSERTION_COORDINATOR
+    recovered: set[str] = set()
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        for entry in entries:
+            event_id = entry["id"]
+            if only is not None and event_id != only:
+                continue
+            raw = entry.get("raw") if isinstance(entry.get("raw"), str) \
+                else ""
+            clean = entry.get("clean") \
+                if isinstance(entry.get("clean"), str) else ""
+            text = clean if clean.strip() else raw
+            if not text.strip():
+                recovered.add(event_id)
+                continue
+            attempted = entry.get("stage") == "pasting"
+            try:
+                at = float(entry.get("ts"))
+            except (TypeError, ValueError):
+                at = time.time()
+            app = entry.get("app") if isinstance(entry.get("app"), str) \
+                else ""
+            mode = str(entry.get("mode") or "capture")
+            path = "outbox/recovered" if mode == "capture" \
+                else f"outbox/{mode}/recovered"
+            try:
+                _append_transcript_entry({
+                    "ts": at, "app": app, "raw": raw, "clean": text,
+                    "path": path,
+                    "language": str(entry.get("language")
+                                    or LANGUAGE_DEFAULT),
+                    "id": event_id,
+                    "metrics": {
+                        "insertion_state": ReceiptState.UNRESOLVED.value,
+                        "insertion_reason": ReceiptReason.INTERRUPTED.value,
+                        "paste_attempted": attempted,
+                        "insertion_verified": False,
+                        "recovered": True,
+                    },
+                })
+            except OSError as error:
+                print("! recovered dictation not written to history: "
+                      f"{type(error).__name__}")
+                continue
+            coordinator.keep(event_id, text, paste_attempted=attempted)
+            recovered.add(event_id)
+        if recovered:
+            try:
+                _write_delivery_journal_locked([
+                    entry for entry in entries
+                    if entry["id"] not in recovered])
+            except OSError as error:
+                print("! delivery journal not emptied after recovery: "
+                      f"{type(error).__name__}")
+    if recovered:
+        print(f"[journal] {len(recovered)} dictation(s) were not delivered "
+              "before Whisper Face stopped; kept in Voice Outbox")
+    return len(recovered)
 
 
 def _ollama_stream_reply(response, deadline: float,
@@ -7495,6 +8161,42 @@ def _ollama_stream_reply(response, deadline: float,
 
 
 RECENT_DICTATION_LIMIT = 10
+
+# What became of one dictation, as the history can prove it: a closed
+# vocabulary the window words, read from the receipt fields each history line
+# already carries. Never from the text.
+TRANSCRIPT_RECEIPTS = frozenset({
+    "proven",        # read back from the field: it is in the document
+    "position",      # checked by where the cursor went
+    "unchecked",     # pasted where nothing could be read back
+    "not_pasted",    # never pasted; a copy went to the Voice Outbox
+    "unconfirmed",   # pasted, and the check failed; a copy went there too
+    "interrupted",   # Whisper Face stopped first; recovered at the next start
+    "unknown",       # written before receipts were recorded
+})
+
+
+def transcript_receipt(entry: dict) -> str:
+    """Classify one history line's delivery into ``TRANSCRIPT_RECEIPTS``."""
+    metrics = entry.get("metrics") if isinstance(entry, dict) else None
+    if not isinstance(metrics, dict) or "insertion_state" not in metrics:
+        return "unknown"
+    if metrics.get("insertion_reason") == ReceiptReason.INTERRUPTED.value:
+        return "interrupted"
+    state = metrics.get("insertion_state")
+    if state == ReceiptState.VERIFIED.value:
+        return ("position" if metrics.get("insertion_reason")
+                == "commit_verified_position" else "proven")
+    if state == "legacy":
+        # No lease: pasted the way the app did before receipts (Windows).
+        return "unchecked"
+    if metrics.get("paste_attempted") is False:
+        return "not_pasted"
+    if (state == ReceiptState.UNVERIFIABLE.value
+            and metrics.get("insertion_opaque_reason") is not None):
+        # The field hid its text from the start: nothing to compare.
+        return "unchecked"
+    return "unconfirmed"
 
 
 def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
@@ -7546,6 +8248,7 @@ def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
                 0.0, (time.time() if now is None else float(now)) - at),
             "words": len(text.split()),
             "app": namer(bundle) if bundle else "",
+            "receipt": transcript_receipt(entry),
         })
     return out
 
@@ -8465,27 +9168,9 @@ def bounded_helper_exchange(
             or not 0 < float(timeout) <= bound):
         raise ValueError("helper timeout is outside the runtime bound")
     deadline = time.monotonic() + float(timeout)
-    input_fd = process.stdin.fileno()
     output_fd = process.stdout.fileno()
-    os.set_blocking(input_fd, False)
     os.set_blocking(output_fd, False)
-    pending = [memoryview(chunk).cast("B") for chunk in chunks if len(chunk)]
-    while pending:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("helper request write timed out")
-        _, writable, _ = select.select([], [input_fd], [], remaining)
-        if not writable:
-            raise TimeoutError("helper request write timed out")
-        try:
-            written = os.write(input_fd, pending[0])
-        except BlockingIOError:
-            continue
-        if written <= 0:
-            raise RuntimeError("helper request pipe closed")
-        pending[0] = pending[0][written:]
-        if not pending[0]:
-            pending.pop(0)
+    _write_helper_chunks(process, chunks, deadline)
 
     response = bytearray()
     while True:
@@ -8522,6 +9207,58 @@ def bounded_helper_exchange(
         response.extend(chunk)
 
 
+def vocabulary_version(terms) -> int:
+    """A stable number naming one term list, for the runtime to echo."""
+    digest = hashlib.sha256(json.dumps(
+        [[term.text, term.source] for term in terms],
+        ensure_ascii=False).encode("utf-8")).hexdigest()
+    return int(digest[:12], 16)
+
+
+def vocabulary_bias_state():
+    """The term list for the speech runtime's term pass and its version."""
+    with GLOSS["lock"]:
+        return GLOSS["vocabulary_terms"], GLOSS["vocabulary_version"]
+
+
+def _write_helper_chunks(process, chunks, deadline: float) -> None:
+    """Write every chunk to the program's stdin before ``deadline``."""
+    input_fd = process.stdin.fileno()
+    os.set_blocking(input_fd, False)
+    pending = [memoryview(chunk).cast("B") for chunk in chunks if len(chunk)]
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("helper request write timed out")
+        _, writable, _ = select.select([], [input_fd], [], remaining)
+        if not writable:
+            raise TimeoutError("helper request write timed out")
+        try:
+            written = os.write(input_fd, pending[0])
+        except BlockingIOError:
+            continue
+        if written <= 0:
+            raise RuntimeError("helper request pipe closed")
+        pending[0] = pending[0][written:]
+        if not pending[0]:
+            pending.pop(0)
+
+
+def bounded_helper_write(process, chunks, *, timeout: float) -> None:
+    """Write one message that has no answer (a protocol 3 session's begin,
+    append or cancel) before a deadline."""
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not 0 < float(timeout) <= PARAKEET_MAX_REQUEST_TIMEOUT):
+        raise ValueError("helper timeout is outside the runtime bound")
+    _write_helper_chunks(process, chunks, time.monotonic() + float(timeout))
+
+
+def speech_session_header(operation: int, count: int = 0) -> bytes:
+    """A protocol 3 session operation's 8-byte header."""
+    return struct.pack(
+        "<Q", (operation << SPEECH_SESSION_OPERATION_SHIFT) | int(count))
+
+
 class ParakeetClient:
     """Persistent, RAM-only bridge to a native Parakeet helper.
 
@@ -8543,7 +9280,8 @@ class ParakeetClient:
                  name="Parakeet helper", fallback="Whisper",
                  request_fallback="Whisper Turbo", ready_note="",
                  missing_note="", retry_after_failure=False, preferred=None,
-                 background_start=False, start_thread=None):
+                 background_start=False, start_thread=None,
+                 vocabulary=None):
         self.helper = Path(helper)
         # The pinned snapshot Python downloaded and verified. Named
         # explicitly so a helper that honours --models loads exactly that
@@ -8551,9 +9289,22 @@ class ParakeetClient:
         self.models = Path(models)
         self.process_factory = process_factory or subprocess.Popen
         self.exchange = exchange or bounded_helper_exchange
+        self.write = bounded_helper_write
+        # The process a protocol 3 session was begun on; a session belongs
+        # to that process and ends with it. The term list version it began
+        # with, or None.
+        self.session_process = None
+        self.session_vocabulary = None
         self.clock = clock or time.monotonic
         self.process = None
         self.protocol = 1
+        # Whether the loaded program offers the term pass, and the version
+        # of the term list it holds (None: it holds none).
+        self.takes_vocabulary = False
+        self.vocabulary_sent = None
+        # Where the term list comes from (vocabulary_bias_state unless a
+        # test gives its own).
+        self.vocabulary = vocabulary
         self.lock = threading.Lock()
         self.failed_starts = 0
         self.next_start = 0.0
@@ -8644,6 +9395,9 @@ class ParakeetClient:
             self._settle()
         process, self.process = self.process, None
         self.protocol = 1
+        self.takes_vocabulary = False
+        self.vocabulary_sent = None
+        self.session_process = None
         if process is not None:
             self._stop(process)
 
@@ -8701,6 +9455,8 @@ class ParakeetClient:
         """Take a process whose ready line arrived as the one that answers."""
         self.process = process
         self.protocol = helper_protocol(status)
+        self.takes_vocabulary = helper_takes_vocabulary(status)
+        self.vocabulary_sent = None
         if not self.retry_after_failure:
             self.failed_starts = 0
         mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
@@ -8791,6 +9547,28 @@ class ParakeetClient:
             self._stop(process)
             self._start_failed(reason)
 
+    def _sync_vocabulary(self, process, timeout: float):
+        """Send the term list when it changed since the program last got
+        one; the version it now holds, or None when it holds none. Only a
+        program whose ready line offers ``vocabulary`` is ever sent one. A
+        refusal stops the sending, not the dictation."""
+        if not self.takes_vocabulary:
+            return None
+        terms, version = (self.vocabulary or vocabulary_bias_state)()
+        if version != self.vocabulary_sent and (
+                terms or self.vocabulary_sent is not None):
+            reply = self.exchange(process, (vocabulary_control_frame(
+                [(term.text, term.source) for term in terms], version,
+                VOCABULARY_REPORT_DEBT),), timeout=timeout)
+            if not (reply.get("ok") and reply.get("version") == version):
+                self.takes_vocabulary = False
+                self.vocabulary_sent = None
+                print(f"! {self.name} refused the term list; the term pass "
+                      f"stays off")
+                return None
+            self.vocabulary_sent = version
+        return self.vocabulary_sent if terms else None
+
     def transcribe(self, audio: np.ndarray):
         """``(text, processing_s)`` as a ParakeetResult, or None.
 
@@ -8823,6 +9601,8 @@ class ParakeetClient:
                 duration = len(payload) / 16_000
                 timeout = min(PARAKEET_MAX_REQUEST_TIMEOUT, max(
                     PARAKEET_MIN_REQUEST_TIMEOUT, duration * 0.25 + 3.0))
+                vocabulary_version = self._sync_vocabulary(
+                    process, PARAKEET_MIN_REQUEST_TIMEOUT)
                 response = self.exchange(process, (
                     struct.pack("<Q", len(payload)), payload),
                     timeout=timeout)
@@ -8831,7 +9611,8 @@ class ParakeetClient:
                 result = parakeet_result(
                     str(response.get("text", "")).strip(),
                     float(response.get("processing_s", 0.0)),
-                    response, protocol=self.protocol, duration=duration)
+                    response, protocol=self.protocol, duration=duration,
+                    vocabulary_version=vocabulary_version)
                 # A program on trial earns its way off the bench by
                 # answering, not by starting: one that starts and then fails
                 # every request waits longer each time, as one that never
@@ -8850,6 +9631,113 @@ class ParakeetClient:
                     print(f"! {self.name} failed; using "
                           f"{self.request_fallback}: {error}")
                 return None
+
+    # ---- protocol 3 sessions (one long take decoded while it is captured)
+
+    def _session_failed(self, error) -> None:
+        """A session message failed: the process is closed and benched as
+        after a failed request, so the stream cannot be out of step."""
+        self._close()
+        if self.retry_after_failure:
+            wait = self._bench()
+            print(f"! {self.name} session failed; the take is decoded the "
+                  f"usual way, next attempt in {wait:.0f}s: "
+                  f"{type(error).__name__}")
+        else:
+            print(f"! {self.name} session failed; the take is decoded the "
+                  f"usual way: {type(error).__name__}")
+
+    def begin_session(self):
+        """Begin a session on the loaded program; its token, or None when
+        no loaded program speaks protocol 3. Never starts a program."""
+        with self.lock:
+            process = self.process
+            if (process is None or process.poll() is not None
+                    or self.protocol < 3):
+                return None
+            try:
+                # The session runs the term pass with the list the program
+                # holds when it begins, as a request does when it arrives.
+                self.session_vocabulary = self._sync_vocabulary(
+                    process, PARAKEET_MIN_REQUEST_TIMEOUT)
+                self.write(process, (
+                    speech_session_header(SPEECH_SESSION_BEGIN),),
+                    timeout=PARAKEET_MIN_REQUEST_TIMEOUT)
+            except Exception as error:
+                self._session_failed(error)
+                return None
+            self.session_process = process
+            return process
+
+    def append_session(self, token, audio: np.ndarray) -> bool:
+        """Add audio to the session ``token`` began; whether it was sent."""
+        payload = np.ascontiguousarray(audio, dtype="<f4")
+        if not len(payload):
+            return True
+        with self.lock:
+            if token is None or self.session_process is not token \
+                    or self.process is not token:
+                return False
+            try:
+                # The program decodes each window this completes before it
+                # reads on, so a write may wait for one window's decode.
+                self.write(token, (
+                    speech_session_header(
+                        SPEECH_SESSION_APPEND, len(payload)),
+                    payload), timeout=PARAKEET_MAX_REQUEST_TIMEOUT)
+            except Exception as error:
+                self._session_failed(error)
+                return False
+            return True
+
+    def finish_session(self, token, expected_samples: int):
+        """The session's transcript as a ParakeetResult, or None.
+
+        None when the session is gone, the program fails, or its answer is
+        for a different number of samples than ``expected_samples``.
+        """
+        with self.lock:
+            if token is None or self.session_process is not token \
+                    or self.process is not token:
+                return None
+            self.session_process = None
+            try:
+                duration = expected_samples / 16_000
+                # At most the last window and one an append just completed.
+                response = self.exchange(token, (
+                    speech_session_header(SPEECH_SESSION_FINISH),),
+                    timeout=PARAKEET_MIN_REQUEST_TIMEOUT)
+                if not response.get("ok"):
+                    raise RuntimeError("session answer was not ok")
+                samples = response.get("samples")
+                if (isinstance(samples, bool) or not isinstance(samples, int)
+                        or samples != expected_samples):
+                    raise RuntimeError("session answer covers other audio")
+                result = parakeet_result(
+                    str(response.get("text", "")).strip(),
+                    float(response.get("processing_s", 0.0)),
+                    response, protocol=self.protocol, duration=duration,
+                    vocabulary_version=self.session_vocabulary)
+            except Exception as error:
+                self._session_failed(error)
+                return None
+            self.failed_starts = 0
+            self.last_answered = self
+            return result
+
+    def cancel_session(self, token) -> None:
+        """Drop the session ``token`` began, if it is still the program's."""
+        with self.lock:
+            if token is None or self.session_process is not token \
+                    or self.process is not token:
+                return
+            self.session_process = None
+            try:
+                self.write(token, (
+                    speech_session_header(SPEECH_SESSION_CANCEL),),
+                    timeout=PARAKEET_MIN_REQUEST_TIMEOUT)
+            except Exception as error:
+                self._session_failed(error)
 
 
 # Whisper Face's own runtime (native/ParrotSpeechRuntime). It is asked first
@@ -9051,7 +9939,8 @@ def crosscheck_agreement(left: str, right: str) -> float:
 
 def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
                            verify: bool,
-                           crosscheck_text: str | None = None) \
+                           crosscheck_text: str | None = None,
+                           answer=None) \
         -> Recognition | None:
     """Parakeet primary decode with an agreement-derived route confidence.
 
@@ -9065,26 +9954,46 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     vote when Turbo is installed to break the tie, and survives as an
     inspectable alternative. Returns None when the helper fails so the
     caller falls through to the faithful Whisper path.
+
+    ``answer`` is a Parakeet answer already in hand (a speech session's);
+    no helper request is made for it.
     """
     duration = len(audio) / SAMPLE_RATE
-    helper_future = PARAKEET_IO_POOL.submit(PARAKEET.transcribe, audio)
+    helper_future = (
+        PARAKEET_IO_POOL.submit(PARAKEET.transcribe, audio)
+        if answer is None else None)
     tiny_text = crosscheck_text
-    if (tiny_text is None and verify and PARAKEET_CROSSCHECK
-            and duration <= PARAKEET_CROSSCHECK_MAX_SECONDS
-            and asr_model_is_cached(FAST_WHISPER_REPO)):
+    crosscheck_s = None
+    wants_crosscheck = (
+        tiny_text is None and verify and PARAKEET_CROSSCHECK
+        and duration <= PARAKEET_CROSSCHECK_MAX_SECONDS
+        and asr_model_is_cached(FAST_WHISPER_REPO))
+
+    def run_crosscheck():
+        nonlocal crosscheck_s
+        started_at = time.perf_counter()
         try:
             # English explicitly, rather than whatever the preference says:
             # this decode exists only to cross-check Parakeet, which is
             # reached for English alone, and the comparison means nothing if
             # the two engines decode different languages.
-            tiny_text = transcribe_detailed(
+            return transcribe_detailed(
                 audio, prompt, verify=False,
                 model_repo=FAST_WHISPER_REPO, language="en",
                 _prepared=True).text
         except Exception as error:
             print(f"! Tiny cross-check unavailable: {error}")
-            tiny_text = None
-    parakeet = helper_future.result()
+            return None
+        finally:
+            crosscheck_s = time.perf_counter() - started_at
+
+    # With word-confidence routing on, the runtime's own word scores decide
+    # whether the cross-check is needed before the paste, so the helper
+    # answers first. Off (the default), Tiny runs here while the helper
+    # request waits on the I/O pool, exactly as before.
+    if wants_crosscheck and not PARAKEET_WORD_CONFIDENCE_ROUTING:
+        tiny_text = run_crosscheck()
+    parakeet = answer if helper_future is None else helper_future.result()
     if parakeet is None or not parakeet[0]:
         return None
     text = parakeet[0]
@@ -9099,6 +10008,18 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         status = "native" if words else "misaligned"
     elif status == "native":
         status = "absent"
+    # Every word the runtime wrote is one it is sure of
+    # (parrot_core.CROSSCHECK_SKIP_CONFIDENCE).
+    settled = words_settle_route(words, status)
+    if wants_crosscheck and PARAKEET_WORD_CONFIDENCE_ROUTING:
+        if settled:
+            # Every word the runtime wrote is one it is sure of: the route
+            # confidence is the fixed prior PARROT_ASR_CROSSCHECK=off uses,
+            # the words carry the per-span evidence, and neither Tiny nor a
+            # Turbo escalation runs before the paste.
+            wants_crosscheck = False
+        else:
+            tiny_text = run_crosscheck()
     agreement = None
     confidence = PARAKEET_ROUTE_CONFIDENCE
     alternative = None
@@ -9117,12 +10038,25 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         native_processing_s=_clean_native_processing_s(parakeet[1]),
         acoustic_confidence=getattr(parakeet, "avg_confidence", None),
         word_evidence_status=status,
+        crosscheck_s=crosscheck_s,
+        # The term pass's report is placed by word times: without words it
+        # cannot be placed, so it is kept only beside them.
+        vocabulary_evidence=(
+            tuple(getattr(parakeet, "vocabulary_evidence", ()) or ())
+            if words else ()),
     )
     # Escalation needs a third engine. asr_decode_target would quietly decode
     # with Tiny when Turbo is not installed, and Tiny is the engine that just
     # disagreed: asking it again settles nothing. Without Turbo the stronger
     # recognizer's transcript stands, unverified.
+    #
+    # A decode the runtime is sure of word by word is not escalated: on the
+    # owner's recordings Turbo never fixed one (CROSSCHECK_SKIP_CONFIDENCE),
+    # and the Turbo decode is the slowest thing before the paste. Tiny's
+    # agreement still sets the route confidence and its text stays the
+    # alternative.
     if (agreement is not None and verify
+            and not (PARAKEET_CONFIDENT_SKIPS_ESCALATION and settled)
             and should_escalate_uncertain(agreement, duration)
             and asr_model_is_cached(WHISPER_REPO)):
         # The engines heard different utterances: buy one independent Turbo
@@ -9132,6 +10066,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         # an optional upgrade: if the decode itself fails, the primary
         # transcript must survive rather than turn a working dictation into a
         # dropped one.
+        escalation_started_at = time.perf_counter()
         try:
             fallback = transcribe_detailed(
                 audio, prompt, verify=False, model_repo=WHISPER_REPO,
@@ -9139,6 +10074,9 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         except Exception as error:
             print(f"! Turbo escalation unavailable: {error}")
             return recognition
+        finally:
+            recognition.escalation_s = (
+                time.perf_counter() - escalation_started_at)
         if not fallback.text:
             return recognition
         with_parakeet = crosscheck_agreement(text, fallback.text)
@@ -9149,6 +10087,8 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
             # Turbo's transcript is delivered, never Tiny's.
             fallback.alternative = text
             fallback.verified = True
+            fallback.crosscheck_s = recognition.crosscheck_s
+            fallback.escalation_s = recognition.escalation_s
             return fallback
         if fallback.text != text:
             recognition.alternative = fallback.text
@@ -9282,38 +10222,30 @@ def apply_learned_fixes(text: str, bundle: str = "") -> str:
     return regression.apply(text, app=bundle or None)
 
 
-# Whole-word matcher for vocabulary casing: an alphanumeric run, optionally
-# continued across single identifier joiners so "voice_compiler.py" stays one
-# token. Casing only ever fires on a full-token casefold match, so treating a
-# joined form as one token can skip a rewrite but never invent one.
-VOCAB_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:[._+#-][0-9A-Za-z]+)*")
-
-
-def apply_vocabulary_casing(text: str) -> str:
-    """Normalize whole-word matches of user-listed vocabulary to the casing the
-    user wrote in the dictionary (e.g. "github" -> "GitHub"). Case-insensitive
-    on the match, whole-word only so "github" inside "githubbed" is left alone,
-    and a token already in canonical form is untouched. Additive: only a token
-    whose casefold equals a listed term is ever changed, and only by raising
-    letters, so a capital the recognizer produced (a sentence start) stays."""
+def apply_vocabulary_casing(text: str, edits: list | None = None,
+                            evidence=()) -> str:
+    """Write each term the user typed into the dictionary in its own form
+    where the words heard equal it, ignoring only spaces, hyphens and case
+    ("github" and "git hub" -> "GitHub"). Whole words only, so "github"
+    inside "githubbed" is left alone. The guards are
+    ``voice_compiler.apply_dictionary_spelling``'s: a change of case alone
+    never touches an ordinary word ("Mark" listed leaves "mark") and only
+    raises letters, so a capital the recognizer placed stays; a join needs
+    two heard words, and a join of ordinary words ("tail scale") needs the
+    term pass's report for this dictation (``evidence``) to have found the
+    term over them. Each change is recorded in ``edits``, when given, as a
+    ``dictionary_spelling`` clean-up edit."""
     if not text:
         return text
     with GLOSS["lock"]:
         vocabulary = dict(GLOSS.get("vocabulary") or {})
     if not vocabulary:
         return text
-
-    def _canonical(match: "re.Match[str]") -> str:
-        word = match.group(0)
-        canonical = vocabulary.get(word.casefold())
-        if canonical is None or canonical == word:
-            return word
-        if any(have.isupper() and not want.isupper()
-               for have, want in zip(word, canonical)):
-            return word
-        return canonical
-
-    return VOCAB_WORD_RE.sub(_canonical, text)
+    spelled, changed = apply_dictionary_spelling(
+        text, vocabulary.values(), evidence or ())
+    if changed and edits is not None:
+        edits.append(CleanupEdit("dictionary_spelling", text, spelled))
+    return spelled
 
 
 def learned_alternatives(text: str, bundle: str) -> list[str]:
@@ -9346,6 +10278,65 @@ def compiler_personal_priors(bundle: str) -> tuple[PersonalPrior, ...]:
             mapping.heard, mapping.preferred,
             apps=((mapping.app, 1),) if mapping.app else ())
         for mapping in regression.active(app=bundle or None))
+
+
+# Why a "Favor my words" change was made, as the evidence inspector says it.
+VOCABULARY_EDIT_REASON = (
+    "In your vocabulary, and a close second to what the recognizer heard")
+
+
+def record_vocabulary_shadow(recognition: Recognition, mode: str) -> tuple:
+    """Run the term-pass policy in shadow: count what it would write, keep
+    the text it would give as the last alternative, and change nothing."""
+    evidence = tuple(getattr(recognition, "vocabulary_evidence", ()) or ())
+    PIPELINE_STATE["last_vocabulary_alternative"] = None
+    if not evidence:
+        return ()
+    terms, _version = vocabulary_bias_state()
+    decisions = apply_vocabulary_evidence(
+        recognition.text, recognition.words, evidence, terms, mode=mode)
+    accepted = sum(decision.accepted for decision in decisions)
+    PIPELINE_STATE["vocab_candidates"] += len(evidence)
+    PIPELINE_STATE["vocab_shadow_accepts"] += accepted
+    if accepted:
+        PIPELINE_STATE["last_vocabulary_alternative"] = \
+            vocabulary_alternative(recognition.text, decisions)
+    return decisions
+
+
+def apply_favored_words(recognition: Recognition, mode: str,
+                        language: str, bundle: str) -> list:
+    """"Favor my words": write the term pass's accepted decisions into this
+    dictation's recognition, before the voice compiler and the clean-up see
+    it, and return each change as a ``VOCABULARY_EDIT_KIND`` clean-up edit.
+
+    The policy runs exactly as in shadow first (``record_vocabulary_shadow``)
+    and, with the switch off, that is all that happens. With it on,
+    ``voice_compiler.apply_vocabulary_decisions`` writes the accepted ones
+    behind its rails: capture mode, English, not a verbatim app or a spoken
+    "verbatim", at most the policy's limit, each on the recognition's own
+    words. Nothing is applied without the runtime's report (the FluidAudio
+    helper and Whisper send none). The caller keeps the words as heard, which
+    "Replace with What You Said" puts back. Counts only are kept."""
+    PIPELINE_STATE["last_vocabulary_applied"] = 0
+    decisions = record_vocabulary_shadow(recognition, mode)
+    if not PREFERENCES.get("favor_my_words") or not any(
+            decision.accepted for decision in decisions):
+        return []
+    application = apply_vocabulary_decisions(
+        recognition.text, recognition.words, decisions,
+        mode=mode, language=language,
+        verbatim=(is_verbatim_app(bundle)
+                  or extract_tone_override(recognition.text)[1]
+                  == "verbatim"))
+    if not application.applied:
+        return []
+    recognition.text = application.text
+    recognition.words = application.words
+    PIPELINE_STATE["vocab_applied"] += len(application.applied)
+    PIPELINE_STATE["last_vocabulary_applied"] = len(application.applied)
+    return [CleanupEdit(VOCABULARY_EDIT_KIND, heard, written)
+            for heard, written in application.changes]
 
 
 def compile_voice_evidence(recognition: Recognition,
@@ -10165,8 +11156,12 @@ def wake_electron_accessibility(pid) -> bool:
     """Enable an Electron app's own a11y tree via AXManualAccessibility.
 
     Idempotent and side-effect free beyond exposing the app's existing tree —
-    it grants no new data. Returns False on any failure so callers fall back to
-    their normal empty-read handling.
+    it grants no new data. Chromium keeps its accessibility tree up to date
+    while this is on, which costs the app some work, so callers set it once
+    per process and only after a focus read came back empty. Never
+    ``AXEnhancedUserInterface``: that one also changes how AppKit animates
+    and lays out some apps' windows. Returns False on any failure so callers
+    fall back to their normal empty-read handling.
     """
     if not IS_MACOS:
         return False
@@ -10189,21 +11184,81 @@ def _focus_read_is_empty(err, focused, text_reader) -> bool:
     return bool(err) or focused is None or text_reader(focused) is None
 
 
+# Chromium builds the tree in the renderer and sends it to the app's browser
+# process asynchronously once accessibility is switched on, so a read made
+# straight after the wake still finds no focused element. Waiting is paid
+# once per app process, on the hotkey worker after capture has started.
+ELECTRON_WAKE_TIMEOUT = 0.4
+ELECTRON_WAKE_POLL = 0.025
+# Process ids already woken (or refused): the attribute is set at most once
+# per app process, and a later empty read there is answered at once.
+_ELECTRON_WOKEN_PIDS = set()
+_ELECTRON_WAKE_LOCK = threading.Lock()
+# What the most recent wake decision on this thread was, in one closed word,
+# so the hotkey worker can record it for the take it is starting.
+ELECTRON_WAKE_OUTCOMES = frozenset({
+    "woke-read",            # set now; the focused field became readable
+    "woke-empty",           # set now; still unreadable when the wait ended
+    "wake-refused",         # the app reported an error and stayed empty
+    "woken-earlier-empty",  # set earlier in this process; empty again now
+})
+_ELECTRON_WAKE_NOTE = threading.local()
+
+
+def take_electron_wake_note() -> str | None:
+    """Return and clear this thread's last wake outcome."""
+    outcome = getattr(_ELECTRON_WAKE_NOTE, "outcome", None)
+    _ELECTRON_WAKE_NOTE.outcome = None
+    return outcome
+
+
 def electron_wake_retry(reader, app, *, detector=is_electron_app,
                         waker=wake_electron_accessibility,
-                        text_reader=_ax_text):
+                        text_reader=_ax_text, clock=None, sleeper=None,
+                        timeout=None, own_pid=None):
     """Read focus once; on an empty read from an Electron app, wake its
-    accessibility tree and read exactly once more.
+    accessibility tree once per process and wait briefly for it.
 
     Returns the (err, focused) pair. The wake fires only on empty + Electron,
-    so native apps read on the first try and never pay the retry.
+    so native apps read on the first try and never pay the retry. It sets
+    only ``AXManualAccessibility``, only on the application element, never
+    on this process, and never twice for one app process: after the first
+    wait, an empty read in that process is returned at once.
     """
     err, focused = reader()
-    if _focus_read_is_empty(err, focused, text_reader) \
-            and app is not None and detector(app):
-        waker(app.processIdentifier())
+    if not _focus_read_is_empty(err, focused, text_reader) \
+            or app is None or not detector(app):
+        return err, focused
+    try:
+        pid = int(app.processIdentifier())
+    except Exception:
+        return err, focused
+    if pid == (os.getpid() if own_pid is None else own_pid):
+        return err, focused
+    with _ELECTRON_WAKE_LOCK:
+        first = pid not in _ELECTRON_WOKEN_PIDS
+        _ELECTRON_WOKEN_PIDS.add(pid)
+    if not first:
+        _ELECTRON_WAKE_NOTE.outcome = "woken-earlier-empty"
+        return err, focused
+    # The set's own answer is not trusted to skip the wait: an app can
+    # report an error for an attribute it nonetheless acted on.
+    refused = not waker(pid)
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    deadline = clock() + max(0.0, ELECTRON_WAKE_TIMEOUT
+                             if timeout is None else timeout)
+    while True:
         err, focused = reader()
-    return err, focused
+        if not _focus_read_is_empty(err, focused, text_reader):
+            _ELECTRON_WAKE_NOTE.outcome = "woke-read"
+            return err, focused
+        remaining = deadline - clock()
+        if remaining <= 0:
+            _ELECTRON_WAKE_NOTE.outcome = (
+                "wake-refused" if refused else "woke-empty")
+            return err, focused
+        sleeper(min(ELECTRON_WAKE_POLL, remaining))
 
 
 def _coerce_range(value) -> tuple[int, int] | None:
@@ -10341,7 +11396,8 @@ def focused_snapshot() -> FocusSnapshot | None:
         systemwide = AXUIElementCreateSystemWide()
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
         # An empty focus read from an Electron app means its accessibility tree
-        # is still withheld; wake it and read once more before failing closed.
+        # is still withheld; wake it once and wait briefly before failing
+        # closed.
         err, focused = electron_wake_retry(
             lambda: AXUIElementCopyAttributeValue(
                 systemwide, kAXFocusedUIElementAttribute, None),
@@ -10962,6 +12018,40 @@ def insertion_capability_buckets(rec, lease, current: FocusSnapshot | None, *,
     }
 
 
+def review_lease_drift(rec, lease: InsertionLease, current: FocusSnapshot,
+                       bundle: str):
+    """Whether a selection that moved since key-down was moved by the person.
+
+    The lease is taken as the dictation begins and the paste is due seconds
+    later. Chromium (browsers and Electron apps alike) publishes its
+    Accessibility value and range late, so the key-down read can show the
+    caret where it stood before the last keystrokes, the last click, or the
+    last paste; read again at commit it has moved without anyone touching
+    it. ``review_selection_drift`` renews the lease only when no key went
+    down and no button went down or dragged since key-down, counted by the
+    same system counters an opaque window lease is sealed with; any input,
+    or none countable, keeps the refusal. Either way the drift is recorded
+    in categories, so a refusal that remains explains itself.
+    """
+    original = getattr(rec, "focus_at_press", None)
+    observation = destination_observation(
+        current, frontmost_bundle(), lease, original,
+        getattr(rec, "bundle_at_press", bundle))
+    if observation.destination_id != lease.destination_id:
+        return lease, None      # another destination: the strict check's
+    before = getattr(original, "text", None)
+    text_changed = (None if before is None or current.text is None
+                    else before != current.text)
+    since = user_input_since(
+        getattr(rec, "input_signature_at_press", None),
+        user_input_signature())
+    staged, drift = review_selection_drift(
+        lease, observation, text_changed=text_changed, input_since=since)
+    if staged is not lease:
+        rec.insertion_lease = staged
+    return staged, drift
+
+
 def insertion_join_prefix(snapshot: FocusSnapshot | None, text: str,
                           language: str = LANGUAGE_DEFAULT) -> str:
     """Return the separator to place before ``text`` at the insertion point.
@@ -11016,11 +12106,26 @@ def commit_insertion(rec, text: str, bundle: str,
     # separator included, so it is published here rather than reconstructed
     # from the pre-join text a caller happens to still be holding.
     rec.committed_text = text
+    rec.paste_posted_at = None
+
+    def paste_and_mark(staged: str):
+        """Paste, and note when the keystroke was posted (the release-path
+        trace's headline ends here)."""
+        paste(staged)
+        try:
+            rec.paste_posted_at = time.perf_counter()
+        except Exception:
+            pass    # timing only: it never stands in the way of a paste
+
     if lease is None:
-        paste(text)
+        paste_and_mark(text)
         PIPELINE_STATE["last_insertion_state"] = "legacy"
         rec.insertion_receipt = None
         return None
+    drift = None
+    moved = getattr(current, "selection", None)
+    if not lease.opaque and moved is not None and moved != lease.selection:
+        lease, drift = review_lease_drift(rec, lease, current, bundle)
     try:
         INSERTION_COORDINATOR.stage(lease, text)
     except ValueError:
@@ -11063,8 +12168,9 @@ def commit_insertion(rec, text: str, bundle: str,
             getattr(rec, "focus_at_press", None),
             getattr(rec, "bundle_at_press", bundle),
         ),
-        paste,
+        paste_and_mark,
         readback,
+        drift=drift,
     )
     PIPELINE_STATE["last_insertion_state"] = receipt.state.value
     rec.insertion_receipt = receipt
@@ -11190,6 +12296,11 @@ class UndoableInsertion:
     inserted: str
     before: str
     selection: tuple[int, int]
+    # What was said, as the recogniser heard it and before any clean-up,
+    # with the inserted text's joining whitespace. Empty when there is no
+    # other form to offer: a mode whose words were an instruction, or a
+    # clean-up that changed nothing.
+    said: str = ""
 
     @property
     def replaced(self) -> str:
@@ -11236,16 +12347,24 @@ UNDO_COORDINATOR = InsertionCoordinator()
 
 def build_undoable_insertion(rec, snapshot: "FocusSnapshot | None",
                              bundle: str,
-                             utterance_id: str) -> "UndoableInsertion | None":
+                             utterance_id: str,
+                             said: str = "") -> "UndoableInsertion | None":
     """Describe an undoable insertion, or None when nothing can be restored.
 
     A destination whose text or selection Accessibility would not report has
     no recorded prior state, so there is nothing honest to put back and undo
-    stays unavailable rather than guessing.
+    stays unavailable rather than guessing. ``said`` is the raw transcript,
+    offered back by "Replace with What You Said" when it differs from what
+    was inserted; it takes the inserted text's leading join whitespace.
     """
     inserted = getattr(rec, "committed_text", None)
     if not isinstance(inserted, str) or not inserted:
         return None
+    spoken = said.strip() if isinstance(said, str) else ""
+    if spoken:
+        spoken = inserted[:len(inserted) - len(inserted.lstrip())] + spoken
+    if spoken == inserted:
+        spoken = ""
     if snapshot is None or snapshot.text is None or snapshot.selection is None:
         return None
     start, length = snapshot.selection
@@ -11262,6 +12381,7 @@ def build_undoable_insertion(rec, snapshot: "FocusSnapshot | None",
         inserted=inserted,
         before=snapshot.text,
         selection=(int(start), int(length)),
+        said=spoken,
     )
 
 
@@ -11276,11 +12396,14 @@ def undoable_insertion_status() -> dict:
     with UNDOABLE_INSERTION["lock"]:
         record = UNDOABLE_INSERTION["record"]
     if record is None:
-        return {"available": False, "characters": 0, "app": ""}
+        return {"available": False, "characters": 0, "app": "",
+                "said_available": False}
     return {
         "available": True,
         "characters": len(record.inserted),
         "app": app_display_name(record.bundle) if record.bundle else "",
+        # Whether "Replace with What You Said" has anything to put back.
+        "said_available": bool(record.said),
     }
 
 
@@ -11303,6 +12426,47 @@ def utterance_was_undone(utterance_id: str) -> bool:
 def undo_refusal(reason: str) -> dict:
     """One shape for every refusal: a state and a reason, never any text."""
     return {"undone": False, "reason": reason}
+
+
+# Why "Replace with What You Said" did nothing, in the words the person sees.
+# Every reason leaves the field exactly as it was, except the last group,
+# where the replacement was sent and could not be checked.
+SAID_UNDO_REASONS = {
+    "nothing_to_undo": "There is no dictation to change back.",
+    "nothing_to_change": "Clean-up changed nothing in that dictation.",
+    "too_long_to_undo": "That dictation is too long to change back safely.",
+    "already_undone": "That dictation was already changed back.",
+    "focus_drift": "You are in a different place now. Nothing was changed.",
+    "selection_drift": (
+        "The cursor moved since the dictation. Nothing was changed."),
+    "surrounding_text_drift": (
+        "The text there changed since the dictation. Nothing was changed."),
+    "target_unreadable": (
+        "Whisper Face cannot read that field now. Nothing was changed."),
+}
+SAID_UNDO_UNCHECKED = (
+    "Your words were put back, but Whisper Face could not check them. "
+    "Look at the field.")
+
+
+def said_undo_refusal_text(reason: str) -> str:
+    """Plain words for why the raw words were not put back."""
+    return SAID_UNDO_REASONS.get(str(reason or ""), SAID_UNDO_UNCHECKED)
+
+
+def replace_with_what_you_said(presenter=None, *, undo=None) -> dict:
+    """Run "Replace with What You Said" and say why when it did nothing.
+
+    ``presenter`` is handed the plain-words reason on the main thread; the
+    log gets the closed reason name only, never any text.
+    """
+    result = (undo or undo_last_dictation)(said=True)
+    if not result.get("undone"):
+        reason = str(result.get("reason") or "")
+        print(f"[undo] what was said was not put back ({reason})")
+        if presenter is not None:
+            AppHelper.callAfter(presenter, said_undo_refusal_text(reason))
+    return result
 
 
 def _grapheme_attaches(character: str) -> bool:
@@ -11423,7 +12587,8 @@ def _ax_select_text_range(element, text: str, selection: tuple[int, int],
 @with_cocoa_pool
 def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                         coordinator=None, presser=None, paster=None,
-                        readback=None, selector=None) -> dict:
+                        readback=None, selector=None,
+                        said: bool = False) -> dict:
     """Put the destination back exactly as it was before the last insertion.
 
     Undo is an insertion in reverse and is held to the same standard: it
@@ -11432,6 +12597,11 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
     readback, and reports the same content-free receipt vocabulary. If focus
     moved, the caret moved, or the surrounding text changed, it refuses and
     says which, rather than deleting whatever happens to be there now.
+
+    With ``said`` it is "Replace with What You Said": the same transaction,
+    with the raw transcript put where the cleaned text was instead of the
+    text the dictation replaced. Proven, it leaves the raw words undoable in
+    turn, so one more undo still takes the whole dictation away.
     """
     snapshot_reader = snapshot_reader or focused_snapshot
     bundle_reader = bundle_reader or frontmost_bundle
@@ -11444,10 +12614,16 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
         record = UNDOABLE_INSERTION["record"]
         if record is None:
             return undo_refusal("nothing_to_undo")
+        if said and not record.said:
+            return undo_refusal("nothing_to_change")
         if len(record.inserted) > UNDO_MAX_CHARACTERS:
             return undo_refusal("too_long_to_undo")
 
-    undo_id = undo_utterance_id(record.utterance_id)
+    # What goes where the dictation stands: the text it replaced, or what
+    # was said. Each has its own id, so each can happen once.
+    replacement = record.said if said else record.replaced
+    undo_id = (f"said:{record.utterance_id}" if said
+               else undo_utterance_id(record.utterance_id))
     lease = InsertionLease.capture(
         undo_id,
         record.destination_id,
@@ -11472,7 +12648,7 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
             return undo_refusal("nothing_to_undo")
         UNDOABLE_INSERTION["record"] = None
     try:
-        coordinator.stage(lease, record.replaced)
+        coordinator.stage(lease, replacement)
     except ValueError:
         # Already staged: this insertion has been undone once already.
         return undo_refusal("already_undone")
@@ -11506,13 +12682,14 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                 text=record.expected,
                 selection=record.inserted_range,
             ),
-            record.replaced,
+            replacement,
             timeout=READBACK_TIMEOUT,
         )
 
     receipt = coordinator.commit(undo_id, observation, perform, prove)
-    # What undo staged is the text the dictation replaced, never something
-    # waiting to be delivered, so no payload outlives the attempt.
+    # What undo staged is the text the dictation replaced, or the words that
+    # were said, never something waiting to be delivered, so no payload
+    # outlives the attempt.
     coordinator.acknowledge(undo_id)
     if receipt.state == ReceiptState.VERIFIED:
         # Suppress before announcing: the correction watcher may still be
@@ -11522,7 +12699,23 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
         if LAST_INSERTION is not None \
                 and LAST_INSERTION.get("utterance_id") == record.utterance_id:
             LAST_INSERTION = None
-        print(f"[undo] restored ({receipt.log_reason})")
+        if said:
+            # The raw words now stand where the dictation did, proven by
+            # readback, so they can be undone like any insertion.
+            with UNDOABLE_INSERTION["lock"]:
+                if UNDOABLE_INSERTION["record"] is None:
+                    UNDOABLE_INSERTION["record"] = UndoableInsertion(
+                        element=record.element,
+                        bundle=record.bundle,
+                        destination_id=record.destination_id,
+                        utterance_id=undo_id,
+                        inserted=record.said,
+                        before=record.before,
+                        selection=record.selection,
+                    )
+            print(f"[undo] put back what was said ({receipt.log_reason})")
+        else:
+            print(f"[undo] restored ({receipt.log_reason})")
         return {"undone": True, "reason": receipt.reason.value}
     if receipt.paste_attempted:
         # The substitution ran but could not be proven. The field was still
@@ -12152,24 +13345,10 @@ def quick_clean(text: str, verbatim: bool = False,
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
     if remove_repeats is None:
         remove_repeats = PREFERENCES["remove_repeats"]
-    t = compile_cleanup(t, language, PREFERENCES["self_correction"],
-                        remove_repeats).text
-    if not t:
-        return ""
-    if language != "en":
-        # Sentence casing and the ASCII terminator set are English rules.
-        # Capitalization does not exist in Japanese, Chinese, or Korean;
-        # German capitalizes nouns anywhere; and appending "." to a sentence
-        # that already ends in "。" or "？" is a visible defect. The
-        # deterministic pass therefore stops at whitespace normalization.
-        return t
-    if t[0].islower() and not continuing:   # mid-sentence joins stay lower
-        t = t[0].upper() + t[1:]
-    if t[-1] in ",;":
-        t = t[:-1] + "."
-    elif t[-1] not in ".!?…:":
-        t += "."
-    return t
+    # The finish itself lives in parrot_core, where voice_check.py replays
+    # exactly this when it tries an update on the person's recordings.
+    return finish_cleanup(t, language, PREFERENCES["self_correction"],
+                          remove_repeats, continuing=continuing)
 
 
 def needs_llm_cleanup(raw: str, tone_override: str | None,
@@ -12548,7 +13727,9 @@ def phone_clean(raw: str, recognition: Recognition | None = None) -> str:
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim, language=language)
-    return apply_vocabulary_casing(text)   # user's canonical term casing
+    # The user's dictionary terms in their own form.
+    return apply_vocabulary_casing(
+        text, None, getattr(recognition, "vocabulary_evidence", ()))
 
 
 def source_metadata() -> dict[str, str]:
@@ -13038,6 +14219,12 @@ WINDOWS_CLIPBOARD_EXCLUSIONS = (
 # clipboard comes back instead of the previous dictation.
 PASTE_RESTORE = {"lock": threading.Lock(), "timer": None, "saved": None,
                  "still_ours": None}
+# The wait between writing the clipboard and pressing paste. Inherited from
+# the first release with no measurement behind it, and the largest fixed
+# cost before the paste. It stays until the insertion matrix
+# (scripts/capture_app_matrix.py) shows that with 0 every app in it still
+# verifies every paste by readback, at least as often as with 0.05.
+PASTE_SETTLE_SECONDS = 0.05
 
 
 def write_private_pasteboard(pb, text: str) -> int:
@@ -13127,7 +14314,7 @@ def paste(text: str):
                 write_private_windows_clipboard(text)
             except Exception:
                 pyperclip.copy(text)
-            time.sleep(0.05)
+            time.sleep(PASTE_SETTLE_SECONDS)
             with kb.pressed(keyboard.Key.ctrl):
                 kb.press("v")
                 kb.release("v")
@@ -13141,7 +14328,7 @@ def paste(text: str):
 
         saved = _begin_paste_burst(lambda: snapshot_pasteboard(pb))
         our_change = write_private_pasteboard(pb, text)
-        time.sleep(0.05)
+        time.sleep(PASTE_SETTLE_SECONDS)
         with kb.pressed(keyboard.Key.cmd):
             kb.press("v")
             kb.release("v")
@@ -13506,17 +14693,33 @@ def assemble_raw(chunk_futs: list, pre_future,
                 word_has_bounds.append(has_bounds)
             evidence_statuses.append(
                 getattr(result, "word_evidence_status", "absent"))
+            # Term-pass evidence moves with its words onto the joined
+            # clock, and is dropped where their times are not reliable.
+            if words_valid:
+                vocabulary_evidence.extend(
+                    shift_vocabulary_evidence(candidate, offset)
+                    for candidate in getattr(
+                        result, "vocabulary_evidence", ()) or ())
             acoustic = getattr(result, "acoustic_confidence", None)
             if acoustic is not None:
                 acoustic_confidences.append(acoustic)
             if result.engine:
                 engines.append(result.engine)
+            for seconds, times in (
+                    (getattr(result, "crosscheck_s", None), crosscheck_times),
+                    (getattr(result, "escalation_s", None),
+                     escalation_times)):
+                if (isinstance(seconds, (int, float))
+                        and not isinstance(seconds, bool)
+                        and math.isfinite(seconds) and seconds >= 0.0):
+                    times.append(float(seconds))
             verifications.append(result.verified)
             if result.alternative:
                 alternatives.append(result.alternative)
 
     parts, confidences, alternatives, engines, verifications = [], [], [], [], []
     evidence_statuses, acoustic_confidences = [], []
+    vocabulary_evidence = []
     # Current rolling/speculative futures carry capture bounds, preserving
     # silence gaps in native timing. Bare futures remain supported for older
     # callers, but multi-part legacy timing fails closed to segment evidence.
@@ -13525,6 +14728,7 @@ def assemble_raw(chunk_futs: list, pre_future,
     timing_reliable = not bool(chunk_futs)
     native_processing_times = []
     native_processing_complete = True
+    crosscheck_times, escalation_times = [], []
     for f in chunk_futs:
         harvest(f, parts, confidences, alternatives)
     if pre_future is not None:
@@ -13561,79 +14765,299 @@ def assemble_raw(chunk_futs: list, pre_future,
         acoustic_confidence=(
             min(acoustic_confidences) if acoustic_confidences else None),
         word_evidence_status=combine_word_evidence_status(evidence_statuses),
+        crosscheck_s=sum(crosscheck_times) if crosscheck_times else None,
+        escalation_s=sum(escalation_times) if escalation_times else None,
+        vocabulary_evidence=(
+            tuple(vocabulary_evidence) if timing_reliable else ()),
     )
+
+
+def release_path_metrics(marks, recognition, audio_seconds) -> dict | None:
+    """Milliseconds per release-path stage, from monotonic marks.
+
+    ``marks`` are perf_counter readings, in order: key-up event, dispatch
+    to the finishing thread, tail quiet, capture stopped, recognition
+    joined, release order reached, compiled (with the risk and context
+    checks), text ready, paste keystroke posted, receipt settled. Each
+    stage is the gap between two neighbouring marks, so the eight stages
+    up to the paste add up to ``release_to_paste_ms`` and nothing between
+    release and paste goes untimed. Returns None when a mark is missing,
+    not a finite number, or out of order: a dictation with no paste has no
+    release-to-paste time, and none is made up.
+    """
+    try:
+        values = [float(mark) for mark in marks]
+    except (TypeError, ValueError):
+        return None
+    if (len(values) != 10 or not all(math.isfinite(v) for v in values)
+            or any(later < earlier
+                   for earlier, later in zip(values, values[1:]))):
+        return None
+
+    def ms(seconds) -> float:
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(seconds) or seconds < 0.0:
+            return 0.0
+        return round(seconds * 1000.0, 3)
+
+    gaps = [later - earlier for earlier, later in zip(values, values[1:])]
+    metrics = dict(zip(
+        ("dispatch_ms", "tail_ms", "stop_ms", "asr_ms", "order_ms",
+         "compile_ms", "cleanup_ms", "pre_paste_ms"),
+        (ms(gap) for gap in gaps[:8])))
+    metrics["release_to_paste_ms"] = ms(values[8] - values[0])
+    metrics["receipt_ms"] = ms(gaps[8])
+    # Zero when the stage did not run: no Parakeet program answered, no
+    # cross-check, no escalation.
+    metrics["asr_native_ms"] = ms(
+        getattr(recognition, "native_processing_s", None))
+    metrics["crosscheck_ms"] = ms(getattr(recognition, "crosscheck_s", None))
+    metrics["escalation_ms"] = ms(getattr(recognition, "escalation_s", None))
+    metrics["audio_ms"] = ms(audio_seconds)
+    return metrics
+
+
+def release_tail_is_silent(rec, audio: np.ndarray, end_sample: int) -> bool:
+    """Whether nothing after ``end_sample`` counts as speech.
+
+    The rule that already decides whether a speculation may stand for the
+    rest of the take (Recorder._callback and Recorder.stop): no block after
+    it was loud enough for the rolling threshold, and no 100 ms of it
+    reaches the speech gate.
+    """
+    return (int(getattr(rec, "voiced_until", 0) or 0) <= end_sample
+            and peak_rms(audio[end_sample:]) < GATE_PEAK_RMS)
+
+
+def capture_release(rec):
+    """End the take at key release and choose what decodes its last part.
+
+    Returns ``(audio, cut, chunks, remainder_future, tail_done_at)``.
+
+    If speech had already ended, capture stops at once. If it was still
+    going, the microphone keeps running until the tail goes quiet
+    (wait_for_tail_silence). When the take already ends in at least half
+    of that quiet, the audio heard by the release starts decoding at once,
+    beside the tail, and the decode stands only when the tail adds nothing
+    that counts as speech, under the same rule as a speculation
+    (release_tail_is_silent). Otherwise it is dropped and the whole
+    remainder is decoded after the tail, as before. Either way the
+    microphone stream is stopped off this path.
+
+    The early decode differs from the old one only by the quiet tail it
+    does not include, the difference a reused speculation already accepts;
+    requiring some quiet at the end of what it decodes keeps a word that
+    stops exactly at the key-up from being decoded without any.
+    """
+    early = None
+    if release_should_wait_for_tail(rec):
+        with rec.capture_lock:
+            early_cut = rec.cut_samples
+            early_end = rec.total_samples
+            quiet_samples = rec.silent_samples
+            speculating = (rec.speculative_future is not None
+                           and not rec.speculative_invalid)
+        early_audio = rec.snapshot()[early_cut:early_end]
+        # A speculation still standing at release is reused after the tail
+        # exactly as before, so nothing new is decoded for it.
+        if (not speculating
+                and 2 * quiet_samples >= (
+                    calibrated_end_silence_seconds() * SAMPLE_RATE)
+                and len(early_audio) / SAMPLE_RATE >= 0.25
+                and peak_rms(early_audio) >= GATE_PEAK_RMS):
+            early = BoundedRecognitionFuture(
+                ASR_POOL.submit(
+                    transcribe_detailed, early_audio, rec.prompt,
+                    language=rec.language),
+                early_cut,
+                early_end,
+            )
+        wait_for_tail_silence(rec)
+        tail_done_at = time.perf_counter()
+        full_audio = rec.stop(wait_for_stream=False)
+        cut = rec.cut_samples
+        chunk_futs = list(rec.chunks)
+        if (early is not None and early.start_sample == cut
+                and release_tail_is_silent(rec, full_audio,
+                                           early.end_sample)):
+            return full_audio, cut, chunk_futs, early, tail_done_at
+        if early is not None:
+            early.future.cancel()
+        if can_reuse_speculation(
+                rec.speculative_future is not None,
+                rec.speculative_invalid,
+                rec.speculative_start,
+                cut):
+            return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+                rec.speculative_future,
+                rec.speculative_start,
+                rec.speculative_end,
+            ), tail_done_at
+        rem = full_audio[cut:]
+        if (len(rem) / SAMPLE_RATE >= 0.25
+                and peak_rms(rem) >= GATE_PEAK_RMS):
+            return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+                ASR_POOL.submit(
+                    transcribe_detailed, rem, rec.prompt,
+                    language=rec.language),
+                cut,
+                cut + len(rem),
+            ), tail_done_at
+        return full_audio, cut, chunk_futs, None, tail_done_at
+    # Speech already ended. Quiesce the callback before reading the
+    # chunk/cut plan so one final callback cannot add an overlapping
+    # rolling chunk after the remainder boundary was captured.
+    tail_done_at = time.perf_counter()
+    full_audio = rec.stop(wait_for_stream=False)
+    cut = rec.cut_samples
+    chunk_futs = list(rec.chunks)
+    rem = full_audio[cut:]
+    if can_reuse_speculation(
+            rec.speculative_future is not None,
+            rec.speculative_invalid,
+            rec.speculative_start,
+            cut):
+        return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+            rec.speculative_future,
+            rec.speculative_start,
+            rec.speculative_end,
+        ), tail_done_at
+    if (len(rem) / SAMPLE_RATE >= (
+            MIN_SECONDS if not chunk_futs else 0.25)
+            and peak_rms(rem) >= GATE_PEAK_RMS):
+        return full_audio, cut, chunk_futs, BoundedRecognitionFuture(
+            ASR_POOL.submit(
+                transcribe_detailed, rem, rec.prompt,
+                language=rec.language),
+            cut,
+            cut + len(rem),
+        ), tail_done_at
+    return full_audio, cut, chunk_futs, None, tail_done_at
+
+
+def usual_decodes(chunk_futs, pre_future) -> list:
+    """The decodes the usual path joins: every rolling chunk, and the last
+    part's when there is one (a speculation that stood, the early decode
+    that ran beside the tail, or the remainder's)."""
+    futures = [getattr(scheduled, "future", scheduled)
+               for scheduled in chunk_futs]
+    if pre_future is not None:
+        futures.append(getattr(pre_future, "future", pre_future))
+    return futures
+
+
+def usual_decode_ready(chunk_futs, pre_future) -> bool:
+    """Whether everything the usual path joins is decoded already, so that
+    assemble_raw only joins finished parts."""
+    return all(future.done()
+               for future in usual_decodes(chunk_futs, pre_future))
+
+
+def session_recognition(rec, full_audio: np.ndarray, cut: int,
+                        chunk_futs, pre_future=None) -> Recognition | None:
+    """The take's transcript from its speech session, or None.
+
+    The session's answer is the runtime's offline decode of the whole take,
+    and at release it cost only the last window. That window is a decode
+    at release, so the session is not finished at all when the usual path
+    is decoded already (usual_decode_ready): a take whose last part was
+    speculated during the hold is joined at once, as it was before
+    sessions. Nor is its answer waited for once the usual path's decodes
+    all end first, which they do when the runtime was already decoding
+    the last part as the key went up. Otherwise it stands for the take
+    only where the cross-check has nothing left to do:
+
+    - the take reached the runtime exactly as it would in one request (no
+      gain or noise gate: prepare_asr_audio leaves it as it is);
+    - with the cross-check on, every rolling chunk already decoded and
+      checked during the hold came back from Parakeet (none was replaced
+      by Turbo), and every word after the last cut, the part no chunk
+      checked, is one the runtime is sure of (words_settle_route), with
+      PARAKEET_CONFIDENT_SKIPS_ESCALATION on.
+
+    Otherwise, or when anything about the session fails, it returns None
+    and the take is decoded exactly as without a session. The session is
+    ended either way.
+    """
+    session = getattr(rec, "session", None)
+    if session is None:
+        return None
+    rec.session = None
+    used = False
+    try:
+        if not session.begun or prepare_asr_audio(full_audio) is not full_audio:
+            return None
+        if usual_decode_ready(chunk_futs, pre_future):
+            return None
+        answer = session.finish(
+            rec.frames, len(full_audio),
+            unless=usual_decodes(chunk_futs, pre_future))
+        if answer is None:
+            return None
+        recognition = _parakeet_crosschecked(
+            full_audio, rec.prompt, verify=False, answer=answer)
+        if recognition is None or not recognition.text:
+            return None
+        if PARAKEET_CROSSCHECK:
+            if not PARAKEET_CONFIDENT_SKIPS_ESCALATION:
+                return None
+            if recognition.word_evidence_status != "native":
+                return None
+            confidences = [recognition.confidence]
+            for scheduled in chunk_futs:
+                result = getattr(scheduled, "future", scheduled).result()
+                if (not isinstance(result, Recognition)
+                        or result.engine != "parakeet-unified"):
+                    return None
+                confidences.append(float(result.confidence))
+            cut_seconds = cut / SAMPLE_RATE
+            unchecked = [word for word in recognition.words
+                         if float(word.end) > cut_seconds]
+            if unchecked and not words_settle_route(unchecked, "native"):
+                return None
+            recognition.confidence = min(confidences)
+        used = True
+        return recognition
+    except Exception as error:
+        print(f"! speech session not used: {type(error).__name__}")
+        return None
+    finally:
+        if not used:
+            session.cancel()
 
 
 def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     """Runs at key release: chunks cut during the hold are already decoding;
-    kick off the remainder in parallel with the tail capture, then join."""
+    the last part decodes while the tail is captured (capture_release), then
+    everything is joined, compiled, cleaned and pasted. Each stage's end is
+    marked on the monotonic clock for the release-path trace."""
     global LAST_INSERTION
     released_at = rec.released_at or time.perf_counter()
+    dispatched_at = time.perf_counter()
     phase = "capture-finalize"
     delivery_reported = False
+    # The id under which this dictation's words are in the delivery journal,
+    # once they are; whether its one paste has been attempted; and whether a
+    # failure must leave the entry for the next start to recover.
+    journaled = ""
+    insertion_committed = False
+    keep_journal = False
+    # Whatever was already being handled when this began, so the ``finally``
+    # below can tell it from something escaping this function.
+    handling_already = sys.exc_info()[1]
     try:
-        wait_for_tail = release_should_wait_for_tail(rec)
-        pre_future = None
-        if wait_for_tail:
-            # Do not start a decode that would be discarded if the tail adds
-            # speech. Capture first, then decode the expanded remainder once.
-            wait_for_tail_silence(rec)
-            full_audio = rec.stop()
-            cut = rec.cut_samples
-            chunk_futs = list(rec.chunks)
-            if can_reuse_speculation(
-                    rec.speculative_future is not None,
-                    rec.speculative_invalid,
-                    rec.speculative_start,
-                    cut):
-                pre_future = BoundedRecognitionFuture(
-                    rec.speculative_future,
-                    rec.speculative_start,
-                    rec.speculative_end,
-                )
-            else:
-                rem = full_audio[cut:]
-                if (len(rem) / SAMPLE_RATE >= 0.25
-                        and peak_rms(rem) >= GATE_PEAK_RMS):
-                    pre_future = BoundedRecognitionFuture(
-                        ASR_POOL.submit(
-                            transcribe_detailed, rem, rec.prompt,
-                            language=rec.language),
-                        cut,
-                        cut + len(rem),
-                    )
-        else:
-            # Speech already ended. Quiesce the callback before reading the
-            # chunk/cut plan so one final callback cannot add an overlapping
-            # rolling chunk after the remainder boundary was captured.
-            full_audio = rec.stop()
-            cut = rec.cut_samples
-            chunk_futs = list(rec.chunks)
-            rem = full_audio[cut:]
-            if can_reuse_speculation(
-                    rec.speculative_future is not None,
-                    rec.speculative_invalid,
-                    rec.speculative_start,
-                    cut):
-                pre_future = BoundedRecognitionFuture(
-                    rec.speculative_future,
-                    rec.speculative_start,
-                    rec.speculative_end,
-                )
-            else:
-                if (len(rem) / SAMPLE_RATE >= (
-                        MIN_SECONDS if not chunk_futs else 0.25)
-                        and peak_rms(rem) >= GATE_PEAK_RMS):
-                    pre_future = BoundedRecognitionFuture(
-                        ASR_POOL.submit(
-                            transcribe_detailed, rem, rec.prompt,
-                            language=rec.language),
-                        cut,
-                        cut + len(rem),
-                    )
+        full_audio, cut, chunk_futs, pre_future, tail_done_at = \
+            capture_release(rec)
         capture_done_at = time.perf_counter()
 
         duration, peak = audio_gate_measurements(full_audio)
+        if (duration < MIN_SECONDS or peak < GATE_PEAK_RMS) \
+                and getattr(rec, "session", None) is not None:
+            rec.session, session = None, rec.session
+            session.cancel()
         if duration < MIN_SECONDS:
             report_dictation_problem(
                 rec,
@@ -13655,15 +15079,24 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
         phase = "recognition"
         asr_started_at = time.perf_counter()
-        recognition = assemble_raw(
-            chunk_futs, pre_future, full_audio[cut:], rec.prompt,
-            rec.language)
-        t_asr = time.perf_counter() - asr_started_at
+        recognition = session_recognition(
+            rec, full_audio, cut, chunk_futs, pre_future)
+        if recognition is None:
+            recognition = assemble_raw(
+                chunk_futs, pre_future, full_audio[cut:], rec.prompt,
+                rec.language)
+        elif pre_future is not None:
+            # The session decoded the last part; a remainder decode that
+            # has not started is not needed.
+            pre_future.future.cancel()
+        recognized_at = time.perf_counter()
+        t_asr = recognized_at - asr_started_at
         # A later take may finish ASR first, but user-visible cleanup, commands,
         # and insertion must follow release order. Capture is already stopped,
         # so waiting here never holds the microphone.
         phase = "release-order"
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
+        ordered_at = time.perf_counter()
         raw = recognition.text
         if not raw or is_hallucination(raw, rec.language, recognition):
             report_dictation_problem(
@@ -13711,7 +15144,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         bundle = rec.bundle_at_press or frontmost_bundle()
+        # What was heard stays the raw transcript: the history's "raw",
+        # what commands are matched on, and what "Replace with What You
+        # Said" puts back. "Favor my words" then writes the user's own
+        # terms into the recognition the compiler and clean-up start from.
         recognized_raw = raw
+        favored_edits = apply_favored_words(
+            recognition, rec.mode, rec.language, bundle)
         # A new usable result supersedes the previous result's replay audio.
         # This is content-free and does not inspect the current utterance.
         clear_retained_consequence_spans()
@@ -13743,6 +15182,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         # cannot replace this active result or affect downstream routing.
         t_context_firewall = runtime_context_firewall_evidence(
             voice_ir, compiler_result)
+        compiled_at = time.perf_counter()
         raw = compiler_result.text
         alternatives = []
         if recognition.alternative:
@@ -13856,6 +15296,16 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             print(f"[release {release_total:.2f}s | snippet | "
                   f"asr {t_asr:.2f}s]")
             return
+
+        # Journal before paste: from here on the words are on disk, owner
+        # only, until the history line records what became of them. The
+        # clean-up below can take seconds; a stop during it, or anywhere up
+        # to the history line, leaves them for the next start to recover.
+        event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
+        if journal_dictation(
+                event_id, raw=recognized_raw, text="", bundle=bundle,
+                mode=rec.mode, language=rec.language, stage="recognized"):
+            journaled = event_id
 
         # Inline snippet expansion is additive to the whole-utterance command
         # handled above: the same cue inside a longer dictation ("send it to
@@ -14015,7 +15465,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             text = quick_clean(
                 compiled, verbatim=verbatim, continuing=continuing,
                 language=rec.language)
-        cleanup_edits = plan.edits + semantic_edits
+        cleanup_edits = favored_edits + plan.edits + semantic_edits
         PIPELINE_STATE["last_cleanup_edits"] = [
             edit.kind for edit in cleanup_edits]
         PIPELINE_STATE["last_proof_edits_accepted"] = sum(
@@ -14026,7 +15476,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         if tone_key == "casual" and not verbatim:
             # belt for both paths
             text = strip_casual_period(text, rec.language)
-        text = apply_vocabulary_casing(text)   # user's canonical term casing
+        # The user's dictionary terms in their own form.
+        vocabulary_edits: list[CleanupEdit] = []
+        text = apply_vocabulary_casing(
+            text, vocabulary_edits,
+            getattr(recognition, "vocabulary_evidence", ()))
+        PIPELINE_STATE["last_cleanup_edits"].extend(
+            edit.kind for edit in vocabulary_edits)
         if PIPELINE_STATE["last_alternatives"]:
             cleaned_alternatives = []
             for alternative in PIPELINE_STATE["last_alternatives"]:
@@ -14064,17 +15520,26 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             )
             return
 
+        text_ready_at = time.perf_counter()
         learn_correction = not verbatim and rec.mode != "edit"
         if rec.insertion_lease is not None:
             insertion_target = resolve_insertion_target(rec)
         else:
             insertion_target = focused_snapshot() if learn_correction else None
-        event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
+        # The final text replaces the raw words in the journal before the
+        # one paste attempt, so what a stop leaves behind is what would have
+        # been pasted, marked as possibly sent.
+        if journal_dictation(
+                event_id, raw=recognized_raw, text=text, bundle=bundle,
+                mode=rec.mode, language=rec.language, stage="pasting"):
+            journaled = event_id
         phase = "insertion"
         insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
-        t_insert = time.perf_counter() - insertion_started_at
+        receipt_at = time.perf_counter()
+        insertion_committed = True
+        t_insert = receipt_at - insertion_started_at
         receipt = committed_paste_receipt(
             rec, insertion_target, text, bundle, rec.mode, event_id) \
             if learn_correction else None
@@ -14117,8 +15582,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # A new dictation replaces whatever was undoable; a destination
             # the runtime could not read is not undoable at all, because
             # there is no prior state to restore.
+            # Only a plain dictation offers its raw words back: in the
+            # rewriting modes they were an instruction, and in code mode
+            # spoken symbols, not the text anyone wants in place.
             record_undoable_insertion(build_undoable_insertion(
-                rec, insertion_target, bundle, event_id)
+                rec, insertion_target, bundle, event_id,
+                said=recognized_raw if rec.mode == "capture" else "")
                 if text_verified else None)
         elif integrity_receipt.pasted_unchecked:
             # Sent into an app that hides its text, so there was never
@@ -14214,7 +15683,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         PIPELINE_STATE["last_result_evidence"] = {
             "alternatives": list(PIPELINE_STATE["last_alternatives"])[:3],
             "protected_anchors": list(compiler_result.anchors)[:64],
+            # The user's own words written by "Favor my words" lead the
+            # edits, each with why; then the clean-up model's proof edits.
             "proof_edits": [{
+                "kind": edit.kind,
+                "before": edit.before,
+                "after": edit.after,
+                "accepted": True,
+                "reason": VOCABULARY_EDIT_REASON,
+            } for edit in favored_edits] + [{
                 "kind": edit.kind,
                 "before": edit.before,
                 "after": edit.after,
@@ -14274,6 +15751,20 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 })
         except Exception:
             pass
+        # The release path, stage by stage, from the key-up event to the
+        # paste keystroke. Contiguous stages that add up to the headline,
+        # release_to_paste_ms; None when no paste was sent.
+        release_path = release_path_metrics(
+            (released_at, dispatched_at, tail_done_at, capture_done_at,
+             recognized_at, ordered_at, compiled_at, text_ready_at,
+             getattr(rec, "paste_posted_at", None), receipt_at),
+            recognition, duration)
+        if release_path is not None:
+            try:
+                emit_performance_trace("release_path", release_path)
+            except Exception:
+                pass
+        drift_detail = getattr(integrity_receipt, "selection_drift", None)
         append_transcript(recognized_raw, text, bundle, path, metrics={
             "release_s": round(release_total, 4),
             "press_s": round(press_total, 4),
@@ -14288,6 +15779,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "context_firewall_s": round(t_context_firewall, 4),
             "cleanup_s": round(t_clean, 4),
             "insertion_s": round(t_insert, 4),
+            # Milliseconds per release-path stage (RELEASE_PATH_STAGES);
+            # None when no paste was sent.
+            "release_path_ms": release_path,
             "asr_engine": recognition.engine or "unknown",
             "confidence": round(compiler_result.confidence, 4),
             # Second-pass ASR agreement, never insertion. Insertion truth is
@@ -14345,6 +15839,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "proof_edits_rejected": sum(
                 1 for edit in proof_edits if not edit.accepted),
             "proof_reconstruction_match": proof_reconstruction_match,
+            # "Favor my words": the term pass's reports for this dictation
+            # and how many of the user's terms were written. Counts only.
+            "vocabulary_reported": len(
+                getattr(recognition, "vocabulary_evidence", ()) or ()),
+            "vocabulary_applied": len(favored_edits),
             "insertion_state": (
                 integrity_receipt.state.value
                 if integrity_receipt is not None else "legacy"),
@@ -14375,6 +15874,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_position_count": (
                 integrity_receipt.position_count or None
                 if integrity_receipt is not None else None),
+            # Absent (None) unless the selection moved between key-down and
+            # the paste. Categories and bucketed small counts only: which
+            # way and how far the caret went, whether a range appeared or
+            # went, whether the field's text changed, whether a key or a
+            # click came in between, and whether the lease was refused or
+            # renewed and pasted.
+            **{f"insertion_drift_{field}": getattr(drift_detail, field, None)
+               for field in ("direction", "distance", "selection", "text",
+                             "input", "stage")},
             "paste_attempted": attempted,
             "insertion_verified": verified,
             # The capability half of a compatibility observation. Absent
@@ -14392,6 +15900,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_focus_subrole": opaque_evidence.get("subrole"),
             "insertion_value_kind": opaque_evidence.get("value"),
             "insertion_selection_kind": opaque_evidence.get("selection"),
+            # Absent (None) unless key-down had to wake an Electron app's
+            # accessibility tree; then one of ELECTRON_WAKE_OUTCOMES.
+            "insertion_ax_wake": getattr(rec, "insertion_ax_wake", None),
             "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
         }, event_id=event_id, language=rec.language)
     except Exception as error:
@@ -14399,13 +15910,37 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             print(
                 f"! post-delivery follow-up failed: {type(error).__name__}")
         else:
+            # Words that were recognised and never reached the paste are
+            # not thrown away with the failure: they go to the Voice Outbox
+            # now. If even that fails they stay journaled for the next start.
+            kept = False
+            if journaled and not insertion_committed:
+                try:
+                    kept = recover_journaled_dictations(only=journaled) > 0
+                except Exception:
+                    kept = False
+                keep_journal = not kept
             report_dictation_problem(
                 rec,
                 hud,
-                "Dictation failed — try again",
+                "Dictation failed — saved in Voice Outbox" if kept
+                else "Dictation failed — try again",
                 f"! dictation failed during {phase}: {type(error).__name__}",
             )
     finally:
+        # Something that is not an ``Exception`` escaping (the interpreter
+        # going down, a thread being torn out) is a stop, not an outcome:
+        # the words stay journaled for the next start, as after a kill.
+        escaping = sys.exc_info()[1]
+        stopping = escaping is not None and escaping is not handling_already
+        if journaled and not keep_journal and not stopping:
+            # The history line is written (or the dictation was set aside on
+            # purpose), so the journal no longer needs to hold it.
+            try:
+                settle_journaled_dictation(journaled)
+            except Exception as error:
+                print("! delivery journal settle failed: "
+                      f"{type(error).__name__}")
         if rec.recording:
             try:
                 rec.stop()
@@ -15097,6 +16632,12 @@ def main():
         print(line)
     load_app_tones()
     load_preferences()
+    # Before anything can dictate: words a previous run recognised and never
+    # recorded the delivery of go to the history and the Voice Outbox.
+    try:
+        recover_journaled_dictations()
+    except Exception as error:
+        print(f"! delivery journal recovery failed: {type(error).__name__}")
     apply_speech_runtime()
     load_delayed_cleanup_activation()
     refresh_acoustic_calibration()
@@ -15140,6 +16681,7 @@ def main():
             set_recent_dictations=set_recent_dictations_enabled,
             set_self_correction=set_self_correction,
             set_remove_repeats=set_remove_repeats,
+            set_favor_my_words=set_favor_my_words,
             set_new_speech_runtime=set_new_speech_runtime,
             recent_dictations=recent_dictation_metadata,
             reveal_recent_dictation=reveal_recent_dictation,
@@ -15327,6 +16869,9 @@ def main():
                         rec.language = current_language()
                         active["rec"] = rec
                         rec.start(event_at)
+                        rec.whole_take_samples = whole_take_limit_samples(
+                            rec.language)
+                        rec.session = speech_session_for(rec)
                         rec.bundle_at_press = frontmost_bundle()
                         if IS_MACOS:
                             rec.input_signature_at_press = user_input_signature()
@@ -15341,9 +16886,13 @@ def main():
                         set_status("rec")
                         AppHelper.callAfter(hud.showMode_, "recording")
                         play("Tink")              # the cue now means capture-ready
+                        take_electron_wake_note()
                         (rec.focus_at_press, rec.context_terms,
                          rec.context_pack) = capture_recognition_context(
                              rec.bundle_at_press)
+                        # Content-free: whether this take woke an Electron
+                        # app's accessibility tree, and what that gave.
+                        rec.insertion_ax_wake = take_electron_wake_note()
                         rec.insertion_lease = (
                             capture_insertion_lease(
                                 rec.focus_at_press,

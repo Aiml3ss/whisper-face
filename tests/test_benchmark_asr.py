@@ -649,5 +649,70 @@ class ManifestCorpusTests(unittest.TestCase):
             self.assertEqual(samples[0].reference, "HELLO WORLD")
 
 
+class VocabularyReceiptTests(unittest.TestCase):
+    """benchmark_asr.py --vocabulary: the term pass, measured."""
+
+    def test_a_term_is_present_ignoring_case_punctuation_and_possessive(self):
+        present = benchmark_asr.vocabulary_term_present
+        self.assertTrue(present("Ask priyanka's team.", "Priyanka"))
+        self.assertTrue(present("Use real debrid now", "Real-Debrid"))
+        self.assertTrue(present("Use Real-Debrid now", "Real-Debrid"))
+        self.assertFalse(present("Ask Prea ka now", "Priyanka"))
+        self.assertFalse(present("Use realdebrid", "Real Debrid"))
+
+    def test_dictionary_terms_stop_at_the_auto_learned_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dictionary.txt"
+            path.write_text("# mine\nGitHub\n-banned\nQwen\n"
+                            "# --- auto-learned (managed by dictate.py) ---\n"
+                            "Mined\n", encoding="utf-8")
+            self.assertEqual(benchmark_asr.read_dictionary_terms(path),
+                             ["GitHub", "Qwen"])
+
+    def test_a_clip_is_scored_from_what_the_app_writes(self):
+        from voice_compiler import VocabularyTerm
+        words = [{"word": "Ask", "start": 0.0, "end": 0.3, "confidence": 0.9},
+                 {"word": "Prea", "start": 0.4, "end": 0.7,
+                  "confidence": 0.6},
+                 {"word": "ka.", "start": 0.8, "end": 1.1,
+                  "confidence": 0.6}]
+        plain = {"ok": True, "text": "Ask Prea ka.", "words": words,
+                 "avg_confidence": 0.7}
+        biased = dict(plain, bias={"version": 5, "detours": [{
+            "term": "Priyanka", "written": "Priyanka", "heard": "Prea ka.",
+            "heard_word_starts": [0.4, 0.8], "end": 1.0, "debt": 2.0,
+            "max_step_gap": 1.0, "heard_min_prob": 0.6, "steps": [
+                {"frame": 5, "piece": "\u2581Pri", "rank": 1,
+                 "gap": 1.0}]}]})
+        terms = (VocabularyTerm("Priyanka"),)
+        fixed = benchmark_asr.score_vocabulary_clip(
+            plain, biased, "Ask Priyanka.", ["Priyanka"], terms, 5,
+            ["Priyanka"])
+        self.assertTrue(fixed["identical_text_and_words"])
+        self.assertEqual(fixed["terms_right_before"], [])
+        self.assertEqual(fixed["terms_right_after"], ["Priyanka"])
+        # Written by the app's own applying path.
+        self.assertEqual(fixed["applied"], 1)
+        self.assertEqual(fixed["false_insertions"], 0)
+        # The same detour where the speaker never said the term.
+        false = benchmark_asr.score_vocabulary_clip(
+            plain, biased, "Ask Prea ka.", [], terms, 5, ["Priyanka"])
+        self.assertEqual(false["false_insertions"], 1)
+        self.assertEqual(false["correct_words_changed"], 2)
+        # Text that moved under the term list is reported, not hidden.
+        moved = benchmark_asr.score_vocabulary_clip(
+            plain, dict(biased, text="Ask Priyanka."), "Ask Priyanka.",
+            ["Priyanka"], terms, 5, ["Priyanka"])
+        self.assertFalse(moved["identical_text_and_words"])
+
+    def test_main_hands_vocabulary_runs_to_their_own_parser(self):
+        with mock.patch.object(sys, "argv", ["benchmark_asr.py",
+                                             "--vocabulary", "--x"]), \
+                mock.patch.object(benchmark_asr, "vocabulary_main",
+                                  return_value=0) as run:
+            self.assertEqual(benchmark_asr.main(), 0)
+        run.assert_called_once_with(["--vocabulary", "--x"])
+
+
 if __name__ == "__main__":
     unittest.main()

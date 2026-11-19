@@ -12,6 +12,7 @@ matches on ``git -C <checkout> ...`` argv and never reads ``cwd``.
 """
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -709,6 +710,125 @@ class AppManagedTests(unittest.TestCase):
         self.assertLess(check.index("self_update.check_for_update("),
                         check.index('self._release_update_command("check")'))
 
+
+
+class VoiceCheckedUpdateTests(unittest.TestCase):
+    """Before anything moves, the candidate is tried on the person's own
+    recordings (voice_check.py); a held update moves nothing."""
+
+    def test_a_held_update_moves_nothing_and_runs_no_installer(self):
+        runner = FakeRunner(head=CURRENT, installer_rcs=[0])
+        asked = []
+
+        def held(checkout, target):
+            asked.append((checkout, target))
+            return {"status": "held", "worse": ["terms_right"]}
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT,
+            voice_check=held)
+        self.assertEqual(outcome["status"], "held")
+        self.assertEqual(outcome["voice_check"]["worse"], ["terms_right"])
+        self.assertEqual(asked, [(CHECKOUT, LATEST)])
+        self.assertEqual(runner.checkouts, [])
+        self.assertEqual(runner.installer_runs, 0)
+
+    def test_a_passed_or_unchecked_update_goes_on_and_says_so(self):
+        for checked in ({"status": "passed"}, {"status": "no-corpus"},
+                        {"status": "not-checked", "reason": "not-built"}):
+            with self.subTest(checked=checked):
+                runner = FakeRunner(head=CURRENT, installer_rcs=[0])
+                outcome = self_update.apply_update(
+                    CHECKOUT, LATEST, runner=runner,
+                    install_receipt=NO_RECEIPT,
+                    voice_check=lambda *_args, c=checked: c)
+                self.assertEqual(outcome["status"], "applied")
+                self.assertEqual(outcome["voice_check"], checked)
+                self.assertEqual(runner.checkouts, [LATEST])
+
+    def test_a_check_that_breaks_never_breaks_the_update(self):
+        def broken(*_args):
+            raise RuntimeError("boom")
+        runner = FakeRunner(head=CURRENT, installer_rcs=[0])
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT,
+            voice_check=broken)
+        self.assertEqual(outcome["status"], "applied")
+        self.assertEqual(outcome["voice_check"],
+                         {"status": "not-checked", "reason": "failed"})
+
+    def test_the_check_runs_only_when_there_is_something_to_switch_to(self):
+        runner = FakeRunner(head=LATEST, installer_rcs=[0])
+        asked = []
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT,
+            voice_check=lambda *args: asked.append(args))
+        self.assertEqual(outcome["status"], "applied")
+        self.assertEqual(asked, [])
+
+    def detached(self, voice_check, *, update_anyway=False):
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "update-result.json"
+            git = FakeRunner(head=CURRENT, installer_rcs=[0])
+            services = []
+
+            def runner(command, **kwargs):
+                if command[0] == "/bin/launchctl":
+                    services.append(command[1])
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return git(command, **{key: value for key, value
+                                       in kwargs.items()
+                                       if key in ("capture_output", "text",
+                                                  "timeout", "cwd")})
+            status = self_update.apply_update_detached(
+                CHECKOUT, LATEST, result, label="job", runner=runner,
+                voice_check=voice_check, update_anyway=update_anyway)
+            written = json.loads(result.read_text())
+        return status, written, services, git
+
+    def test_a_held_update_leaves_the_running_app_alone(self):
+        status, written, services, git = self.detached(
+            lambda *_args: {"status": "held"})
+        self.assertEqual(status, 1)
+        self.assertEqual(written["status"], "held")
+        # Nothing changed, so nothing restarts: the running app reads the
+        # result itself. Only the finished job is removed.
+        self.assertEqual(services, ["remove"])
+        self.assertEqual(git.installer_runs, 0)
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "launchd is a Mac service")
+    def test_update_anyway_skips_the_check_and_restarts_as_before(self):
+        asked = []
+        status, written, services, git = self.detached(
+            lambda *args: asked.append(args) or {"status": "held"},
+            update_anyway=True)
+        self.assertEqual(status, 0)
+        self.assertEqual(written["status"], "applied")
+        self.assertEqual(written["voice_check"], {"status": "skipped"})
+        self.assertEqual(asked, [])
+        self.assertEqual(services, ["kickstart", "remove"])
+        self.assertEqual(git.installer_runs, 1)
+
+    def test_the_menu_waits_for_a_held_answer_and_offers_the_choice(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        begin = source[source.index("    def _begin_update(self, target_rev"):]
+        begin = begin[:begin.index("\n    def ", 10)]
+        self.assertIn('command.append("--update-anyway")', begin)
+        self.assertLess(begin.index("if update_anyway:"),
+                        begin.index('command.append("--update-anyway")'))
+        self.assertIn("self._await_held_update", begin)
+        present = source[source.index("    def _present_update_result(self"):]
+        present = present[:present.index("\n    def ", 10)]
+        self.assertIn('status == "held"', present)
+        self.assertIn("update_anyway=True", present)
+        hold = source[source.index("    def _present_voice_hold(self"):]
+        hold = hold[:hold.index("\n    def ", 10)]
+        # Wait is the default button; only the second one updates anyway.
+        self.assertLess(hold.index("update.voice_check.held.wait"),
+                        hold.index("update.voice_check.held.anyway"))
+        self.assertIn("== NSAlertSecondButtonReturn", hold)
+        consume = source[source.index("    def _consume_update_result(self"):]
+        consume = consume[:consume.index("\n    def ", 10)]
+        self.assertIn('"held"', consume)
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,8 @@
 
 # personal data — never ship these to another machine or a repo
 transcripts.jsonl
+delivery_journal.json
+.delivery_journal.json.*
 learned.json
 voice_inbox.json
 .voice_inbox.json.*.tmp

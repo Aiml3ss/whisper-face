@@ -14,6 +14,22 @@ part of an Utterance, including confidence and optional word timing evidence.
 **Word Evidence** — a word candidate with its engine, confidence, and audio
 time range.
 
+**Vocabulary Evidence** — what the speech runtime's term pass reports beside
+its transcript: a place where one of the user's own terms could have been
+emitted instead of the words heard, with the heard words, the summed logit
+gap the term's path paid ("debt"), and each piece it took with its rank among
+the model's candidates at that step. It is evidence, never text: the runtime
+changes nothing, and the voice compiler's policy decides whether the term
+would be written. **Favor my words**, a saved preference on by default,
+writes the accepted ones (`apply_vocabulary_decisions`) before the voice
+compiler and the clean-up, as `vocabulary_term` clean-up edits; off, they are
+only counted.
+
+**Dictionary Spelling** — the clean-up's deterministic rule that writes a
+dictionary term in its own form where the words heard equal it ignoring only
+spaces, hyphens and letter case ("git hub" → "GitHub"), recorded as a
+`dictionary_spelling` clean-up edit.
+
 **VoiceIR** — the intermediate representation of an Utterance: Recognition
 Hypotheses, Context Candidates, Prosody Events, Correction Signals, and mode.
 VoiceIR is the input to the Voice Compiler.
@@ -91,6 +107,14 @@ promotions are restored with a conflict check rather than by replaying the
 gate. Conflicting or stale candidates are quarantined rather than applied, and
 evidence against a candidate (a revert, the heard word left alone, a paste
 sent unedited) counts too.
+
+**Voice-Checked Update** — an update tried on the person's own accuracy
+recordings before it replaces what they run (`voice_check.py`): the candidate's
+speech engine and clean-up against the running version's, scored on word
+mistakes, names written right and names written that were not said. Worse
+beyond the stated tolerance holds the update until the person waits or
+updates anyway. It is not the Personal Regression Lab, which tests learned
+text mappings and knows nothing of audio.
 
 **Prosody Event** — a pause, emphasis, pitch movement, or end-of-speech signal
 derived from audio and aligned to Word Evidence.

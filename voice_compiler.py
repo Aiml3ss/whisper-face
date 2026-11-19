@@ -17,11 +17,14 @@ from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
 from parrot_core import (
+    CONFIDENT_WORD,
     HELPER_WORD_SOURCE,
+    VOCABULARY_CANDIDATES_PER_STEP,
     RecognitionWord,
+    VocabularyCandidate,
     find_self_correction,
 )
-from personal_regression import is_common_word
+from personal_regression import is_common_word, is_negation
 from phonetic_keys import double_metaphone
 from process_verifier import RefusalReason, VerificationReceipt
 
@@ -1123,7 +1126,7 @@ def build_consequence_plan(
             uncertainty.append("word-evidence-unavailable")
         elif not voice.trust_word_confidence:
             uncertainty.append("word-confidence-uncalibrated")
-        elif min(word.confidence for word in evidence) < 0.78:
+        elif min(word.confidence for word in evidence) < CONFIDENT_WORD:
             uncertainty.append("word-confidence")
         if any(_change_affects_span(
                 change, (char_start, char_end)) for change in disagreements):
@@ -1975,3 +1978,615 @@ def analyze_prosody(samples: Sequence[float], sample_rate: int = 16_000,
                 "end", start * frame / sample_rate,
                 duration, min(1.0, duration / 0.6)))
     return tuple(events)
+
+
+# --- dictionary spelling: the clean-up's deterministic rule -----------------
+#
+# When the words heard equal a term the user typed into the dictionary,
+# ignoring only spaces, hyphens and letter case, the term is written in its
+# own form: "git hub" and "Git-Hub" become "GitHub", "whisperface" becomes
+# "Whisper Face", "iphone" becomes "iPhone". Nothing else is compared, so no
+# sound-alike, no other letter and no punctuation between the words can
+# make a match.
+
+# Ordinary words that are also names, which a dictionary holds as names.
+# They join personal_regression's common words for this rule only, so that
+# "Mark" in the dictionary never capitalises "mark" and "Grace" never
+# capitalises "grace".
+NAME_LIKE_ORDINARY_WORDS = frozenset("""
+mark bill frank grace rose will may june april august art bob jack pat sue
+joy hope faith dawn rich rob gene earl guy max ray rod don dean drew lane
+chase hunter mason grant page reed wade wells summer autumn winter amber
+ruby pearl iris violet lily daisy holly ivy heather olive penny sandy
+crystal brook river sky storm robin jay wren finch bishop baker cook
+miller smith carter porter cooper fisher hunt price rice young king
+""".split())
+# The longest run of written words one term may be heard across.
+DICTIONARY_SPELLING_MAX_WORDS = 4
+_SPELLING_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:[._+#-][0-9A-Za-z]+)*")
+_SPELLING_SPACE_RE = re.compile(r"[ \t]+")
+# A word touching one of these is part of an address, a path or a handle.
+_SPELLING_IDENTIFIER_NEIGHBOURS = frozenset("@/\\:_~=")
+
+
+def is_ordinary_word(word: str) -> bool:
+    """A common English word, or an ordinary word that is also a name."""
+    return is_common_word(word) or word.casefold() in NAME_LIKE_ORDINARY_WORDS
+
+
+def _spelling_key(value: str) -> str:
+    return re.sub(r"[\s-]+", "", value).casefold()
+
+
+def _ordinary_term(term: str) -> bool:
+    """Whether a term is an ordinary word: no digit, no capital after a
+    word's first letter, and every word of it ordinary."""
+    if any(char.isdigit() for char in term):
+        return False
+    words = [word for word in re.split(r"[\s-]+", term) if word]
+    if any(any(char.isupper() for char in word[1:]) for word in words):
+        return False
+    return all(is_ordinary_word(word) for word in words)
+
+
+def apply_dictionary_spelling(
+        text: str, terms: Iterable[str],
+        evidence: Iterable[VocabularyCandidate] = ()) \
+        -> tuple[str, list[str]]:
+    """Write each dictionary term in its own form where it was heard.
+
+    Returns the text and, for each change, the heard words it replaced.
+    ``evidence`` is the term pass's report for this dictation
+    (``Recognition.vocabulary_evidence``), when there is one. The guards,
+    all of them deliberate:
+
+    - A change of letter case alone is made only for a term that is not an
+      ordinary word, and never to a heard word that is one: "Mark" listed
+      leaves "mark" alone and "US" listed leaves "us" alone. It only raises
+      letters, as the casing rule before it did, so "GITHUB" and a capital
+      the recognizer placed stay.
+    - Joining words needs at least two heard words ("git hub", "co-pilot");
+      no join or split writes an ordinary word, or starts from one heard
+      word that is ordinary, and none takes away a negation ("not able").
+    - A join that takes in an ordinary word ("tail scale" for "Tailscale")
+      is the near miss itself: someone saying "a shiny tail scale" said
+      those words. It is written only where the term pass found the term
+      over those same words within its debt budget
+      (``_supported_joins``); otherwise the words stay as heard, for the
+      term pass to decide. Parts that are none of them ordinary words
+      ("Chi Din Ma" for "Chidinma", "git hub") join as before.
+    - Only spaces may separate the heard words: a comma, a full stop or a
+      line break between them means they were not said as one term.
+    - A word touching ``@``, ``/``, ``:`` or ``_`` belongs to an address,
+      a path or a handle and is never part of a match.
+    - At the start of a sentence a lower-case term keeps the capital
+      ("Kube ctl" there is written "Kubectl").
+    """
+    by_key: dict[str, str] = {}
+    for term in terms:
+        if not isinstance(term, str):
+            continue
+        term = term.strip()
+        key = _spelling_key(term)
+        if key and key not in by_key and _SPELLING_WORD_RE.fullmatch(
+                re.sub(r"[\s-]+", "", term) or "-"):
+            by_key[key] = term
+    if not text or not by_key:
+        return text, []
+    supported = _supported_joins(evidence)
+    words = list(_SPELLING_WORD_RE.finditer(text))
+    replacements: list[tuple[int, int, str]] = []
+    changed: list[str] = []
+    index = 0
+    while index < len(words):
+        matched = 0
+        for count in range(min(DICTIONARY_SPELLING_MAX_WORDS,
+                               len(words) - index), 0, -1):
+            span = words[index:index + count]
+            if any(text[left.end():right.start()] != ""
+                   and not _SPELLING_SPACE_RE.fullmatch(
+                       text[left.end():right.start()])
+                   for left, right in zip(span, span[1:])):
+                continue
+            start, end = span[0].start(), span[-1].end()
+            before = text[start - 1] if start else " "
+            after = text[end] if end < len(text) else " "
+            if (before in _SPELLING_IDENTIFIER_NEIGHBOURS
+                    or after in _SPELLING_IDENTIFIER_NEIGHBOURS):
+                continue
+            heard = text[start:end]
+            term = by_key.get(_spelling_key(heard))
+            if term is None:
+                continue
+            written = _spelling_for(text, start, heard, term, supported)
+            if written is not None and written != heard:
+                replacements.append((start, end, written))
+                changed.append(heard)
+            matched = count
+            break
+        index += matched or 1
+    return _replace_spans(text, replacements), changed
+
+
+def _evidence_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", value.casefold())
+
+
+def _supported_joins(
+        evidence: Iterable[VocabularyCandidate]) -> frozenset:
+    """The (term, heard words) pairs the term pass found within budget,
+    each compared on its letters and digits alone."""
+    supported = set()
+    for candidate in evidence or ():
+        try:
+            if float(candidate.debt) <= VOCABULARY_DEBT_BUDGET:
+                supported.add((_evidence_key(candidate.term),
+                               _evidence_key(candidate.heard)))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return frozenset(supported)
+
+
+def _spelling_for(text: str, start: int, heard: str, term: str,
+                  supported: frozenset = frozenset()) -> str | None:
+    """The form to write for ``heard``, or None when a guard refuses."""
+    heard_words = [word for word in re.split(r"[\s-]+", heard) if word]
+    term_words = [word for word in re.split(r"[\s-]+", term) if word]
+    if [word.casefold() for word in heard_words] \
+            == [word.casefold() for word in term_words]:
+        # The same words: only letter case, or a hyphen for a space,
+        # differs. Never for an ordinary term or ordinary heard words.
+        if _ordinary_term(term) or all(
+                is_ordinary_word(word) for word in heard_words):
+            return None
+        if heard.casefold() != term.casefold():
+            return _sentence_case(text, start, heard, term)
+        if any(have.isupper() and not want.isupper()
+               for have, want in zip(heard, term)):
+            return None
+        return term
+    # A join or a split.
+    if _ordinary_term(term):
+        return None
+    if len(heard_words) == 1 and is_ordinary_word(heard_words[0]):
+        return None
+    if any(is_negation(word) for word in heard_words):
+        return None
+    if (len(heard_words) > 1
+            and any(is_ordinary_word(word) for word in heard_words)
+            and (_evidence_key(term), _evidence_key(heard)) not in supported):
+        return None
+    return _sentence_case(text, start, heard, term)
+
+
+def _sentence_case(text: str, start: int, heard: str, term: str) -> str:
+    """Keep a sentence-start capital on a term typed in lower case."""
+    preceding = text[:start].rstrip()
+    sentence_start = not preceding or preceding[-1] in ".!?\n"
+    if (sentence_start and heard[:1].isupper() and term[:1].islower()
+            and not any(char.isupper() for char in term)):
+        return term[:1].upper() + term[1:]
+    return term
+
+
+# --- vocabulary evidence: the decision policy ------------------------------
+#
+# The speech runtime's term pass reports where a listed term could have been
+# emitted instead of what was heard (parrot_core.VocabularyCandidate). This
+# decides, for each report, whether the app would write the term; the
+# decision itself changes nothing. ``apply_vocabulary_decisions`` is what
+# writes the accepted ones, behind its own rails, when the person's "Favor
+# my words" switch is on; with it off they are counted and the text is the
+# recognizer's. Each threshold is a named constant beside the measurement
+# it came from (research-2026-11-17/names-probe, on the owner's 40
+# recordings and 60 synthetic control clips; a best-timing search, so an
+# upper bound for what the runtime's pass finds).
+
+# Summed logit gap a detour may pay. Probe: 5 fixed 15 of the 21 missed
+# terms with no false insertion on the owner's 10 ordinary recordings and
+# 1 on 60 synthetic control clips (2 fixed 5; 10 fixed 20 with 3 false).
+VOCABULARY_DEBT_BUDGET = 5.0
+# What the runtime is asked to report. The pass's time grows with it: on
+# the owner's 40 recordings, 8 took 19 ms at p95 and 5 took 9 ms, with the
+# same decisions at the budget.
+VOCABULARY_REPORT_DEBT = VOCABULARY_DEBT_BUDGET
+# Letter-based sound-alike similarity the heard words must reach (below).
+# Probe: at 0.7 with the budget of 5 it removed the one synthetic false
+# insertion and kept all 15 fixes. Chosen after seeing that data: a
+# hypothesis until a held-out set confirms it.
+VOCABULARY_SOUND_ALIKE_MIN = 0.7
+# The normal pass must have been unsure of the heard words: their lowest
+# token probability below this. Probe: below 0.99 lost no fix at the budget
+# of 5; below 0.9 lost one. A weak guard while the model's probabilities are
+# uncalibrated (DESIGN-accuracy.md section 6.1).
+VOCABULARY_UNSURE_BELOW = 0.99
+# Blast radius (DESIGN-accuracy.md section 3.0).
+VOCABULARY_MAX_PER_DICTATION = 2
+VOCABULARY_MAX_HEARD_WORDS = 3
+# A heard word's start and the report's agree to the runtime's 1 ms rounding.
+_VOCABULARY_TIME_TOLERANCE = 0.0015
+VOCABULARY_SOURCES = frozenset({"typed", "corrected"})
+# The recognizer that reports term-pass evidence hears English only
+# (dictate.PARAKEET_LANGUAGES); a decision is never applied for another.
+VOCABULARY_LANGUAGES = frozenset({"en"})
+# The clean-up edit kind an applied decision is recorded as.
+VOCABULARY_EDIT_KIND = "vocabulary_term"
+
+
+@dataclass(frozen=True)
+class VocabularyTerm:
+    """A term the term pass may look for: typed into the dictionary, or the
+    target of a correction the Personal Regression Lab proved. A heard form
+    the user corrected to it is an alias."""
+    text: str
+    source: str = "typed"
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class VocabularyDecision:
+    term: str
+    heard: str
+    start: int
+    end: int
+    debt: float
+    similarity: float
+    accepted: bool
+    reason: str
+    # What would be written over text[start:end]: the term, keeping the
+    # heard words' leading and trailing punctuation and a possessive.
+    written: str = ""
+
+
+_VOCABULARY_EDGES_RE = re.compile(
+    r"\A([^\w\s]*)(.*?)((?:['\u2019]s)?[^\w\s]*)\Z", re.S)
+
+
+def _letter_sound_key(value: str) -> str:
+    """A crude English sound key from letters, as the probe measured it."""
+    key = re.sub(r"[^a-z0-9]", "", value.lower())
+    for old, new in (("tch", "ch"), ("sch", "sk"), ("ph", "f"), ("gh", ""),
+                     ("ck", "k"), ("qu", "kw"), ("q", "k"), ("x", "ks"),
+                     ("wh", "w"), ("dg", "j"), ("th", "t"), ("sh", "s"),
+                     ("ch", "s"), ("z", "s"), ("v", "f"), ("w", "u"),
+                     ("y", "i")):
+        key = key.replace(old, new)
+    key = re.sub(r"c(?=[eiy])", "s", key).replace("c", "k")
+    key = re.sub(r"[aeiou]+", "a", key)
+    return re.sub(r"(.)\1+", r"\1", key)
+
+
+def letter_sound_similarity(heard: str, term: str) -> float:
+    """1 minus the edit distance of the two sound keys over the longer."""
+    left, right = _letter_sound_key(heard), _letter_sound_key(term)
+    if not left or not right:
+        return 0.0
+    row = list(range(len(right) + 1))
+    for i in range(1, len(left) + 1):
+        previous, row[0] = row[0], i
+        for j in range(1, len(right) + 1):
+            current = row[j]
+            row[j] = min(row[j] + 1, row[j - 1] + 1,
+                         previous + (left[i - 1] != right[j - 1]))
+            previous = current
+    return 1 - row[len(right)] / max(len(left), len(right))
+
+
+def _word_spans(text: str, words: Sequence) -> list[tuple[int, int]] | None:
+    """Each word's character span in ``text``, found in order."""
+    spans, cursor = [], 0
+    for word in words:
+        found = text.find(word.text, cursor)
+        if found < 0:
+            return None
+        spans.append((found, found + len(word.text)))
+        cursor = found + len(word.text)
+    return spans
+
+
+def _heard_key(value: str) -> str:
+    """Heard words compared for placement: case, spaces and the punctuation
+    at either end aside. The runtime reports its own words ("Prea,"); the
+    recognition's are the compiler's lexical tokens ("Prea"), with the
+    punctuation outside them, where it stays."""
+    return re.sub(r"\s+", "", re.sub(r"\A[^\w]+|[^\w]+\Z", "",
+                                     value)).casefold()
+
+
+def _pieces_were_candidates(candidate: VocabularyCandidate) -> bool:
+    """Whether the detour took at least one piece and each was ranked among
+    that step's candidates: the model itself offered every piece written."""
+    steps = getattr(candidate, "steps", None) or ()
+    try:
+        return bool(steps) and all(
+            type(step.rank) is int
+            and 0 <= step.rank < VOCABULARY_CANDIDATES_PER_STEP
+            for step in steps)
+    except AttributeError:
+        return False
+
+
+def apply_vocabulary_evidence(
+        text: str,
+        words: Sequence,
+        candidates: Iterable[VocabularyCandidate],
+        terms: Iterable[VocabularyTerm],
+        *,
+        mode: str = "capture",
+        budget: float = VOCABULARY_DEBT_BUDGET,
+        sound_alike_min: float = VOCABULARY_SOUND_ALIKE_MIN,
+        unsure_below: float = VOCABULARY_UNSURE_BELOW,
+) -> tuple[VocabularyDecision, ...]:
+    """Decide, for each reported detour, whether the term would be written.
+
+    Pure, and in shadow: it returns decisions and changes nothing; the text
+    a decision would give is ``vocabulary_alternative``'s. ``words`` are the
+    recognition's timed words (``.text``, ``.start``) on the same clock as
+    the candidates. A candidate is accepted only if every one of these
+    holds, checked in this order, and the first that fails is its reason:
+
+    - its heard words are the recognition's own words at those times
+      (``not-placed``), and every piece the detour took was among its
+      step's candidates (``not-a-candidate``), at most
+      ``VOCABULARY_MAX_HEARD_WORDS`` heard words (``too-long``), in capture
+      mode (``mode``);
+    - the term is listed, typed or proved by a correction
+      (``not-listed``), and is not what the dictionary spelling rule
+      already writes (``spelling-rule``);
+    - the debt is within ``budget`` (``over-budget``);
+    - no digit, negation, address, handle or path in the heard words
+      (``protected``), and not one heard word that is a common word
+      unless it is an alias (``common-word``);
+    - the heard words sound like the term, or are an alias
+      (``not-sound-alike``);
+    - the normal pass was unsure of them (``sure``);
+    - and it is among the ``VOCABULARY_MAX_PER_DICTATION`` cheapest that
+      do not overlap (``overlap``, ``limit``).
+    """
+    listed = {term.text: term for term in terms
+              if term.source in VOCABULARY_SOURCES}
+    spans = _word_spans(text, words) if words else None
+    pending: list[tuple[VocabularyCandidate, int, int, float, str]] = []
+    decisions: list[VocabularyDecision] = []
+
+    def refuse(candidate, start, end, similarity, reason):
+        decisions.append(VocabularyDecision(
+            candidate.term, candidate.heard, start, end, candidate.debt,
+            similarity, False, reason))
+
+    for candidate in candidates:
+        indices = [
+            index for index, word in enumerate(words or ())
+            if any(abs(float(word.start) - start) <= _VOCABULARY_TIME_TOLERANCE
+                   for start in candidate.heard_word_starts)]
+        start = end = -1
+        if (spans is not None and indices
+                and len(indices) == len(candidate.heard_word_starts)
+                and indices == list(range(indices[0], indices[-1] + 1))):
+            start, end = spans[indices[0]][0], spans[indices[-1]][1]
+            if _heard_key(text[start:end]) != _heard_key(candidate.heard):
+                start = end = -1
+        heard = text[start:end] if start >= 0 else candidate.heard
+        lead, core, tail = _VOCABULARY_EDGES_RE.match(heard).groups()
+        heard_words = heard.split()
+        similarity = letter_sound_similarity(core, candidate.term)
+        term = listed.get(candidate.term)
+        aliases = {alias.casefold() for alias in term.aliases} if term else set()
+        run = (re.search(r"\S*\Z", text[:start]).group()
+               + heard + re.match(r"\S*", text[end:]).group()) \
+            if start >= 0 else heard
+        if start < 0:
+            reason = "not-placed"
+        elif not _pieces_were_candidates(candidate):
+            reason = "not-a-candidate"
+        elif len(heard_words) > VOCABULARY_MAX_HEARD_WORDS:
+            reason = "too-long"
+        elif mode != "capture":
+            reason = "mode"
+        elif term is None:
+            reason = "not-listed"
+        elif _spelling_key(core) == _spelling_key(candidate.term):
+            reason = "spelling-rule"
+        elif candidate.debt > budget:
+            reason = "over-budget"
+        elif (any(char.isdigit() for char in heard)
+              or any(is_negation(word.strip(".,;:!?")) for word in heard_words)
+              or "@" in run or "://" in run or "/" in run):
+            reason = "protected"
+        elif (len(heard_words) == 1
+              and is_ordinary_word(heard_words[0].strip(".,;:!?"))
+              and core.casefold() not in aliases):
+            reason = "common-word"
+        elif similarity < sound_alike_min and core.casefold() not in aliases:
+            reason = "not-sound-alike"
+        elif candidate.heard_min_prob >= unsure_below:
+            reason = "sure"
+        else:
+            pending.append((candidate, start, end, similarity,
+                            lead + candidate.term + tail))
+            continue
+        refuse(candidate, start, end, similarity, reason)
+
+    taken: list[tuple[int, int]] = []
+    for candidate, start, end, similarity, written in sorted(
+            pending, key=lambda item: (item[0].debt, item[1])):
+        if any(start < right and left < end for left, right in taken):
+            refuse(candidate, start, end, similarity, "overlap")
+        elif len(taken) >= VOCABULARY_MAX_PER_DICTATION:
+            refuse(candidate, start, end, similarity, "limit")
+        else:
+            taken.append((start, end))
+            decisions.append(VocabularyDecision(
+                candidate.term, candidate.heard, start, end, candidate.debt,
+                similarity, True, "would-write", written))
+    return tuple(sorted(decisions, key=lambda item: (item.start, item.debt)))
+
+
+VOCABULARY_MAX_TERMS = 100
+_VOCABULARY_TERM_RE = re.compile(r"[A-Za-z]+(?:[ '\u2019-][A-Za-z]+)*")
+
+
+def vocabulary_terms(typed: Iterable[str],
+                     corrected: Iterable[tuple[str, str]] = ()) \
+        -> tuple[VocabularyTerm, ...]:
+    """The terms the term pass may look for (DESIGN-accuracy.md 3.0):
+    the dictionary's typed terms, then targets of corrections the Personal
+    Regression Lab proved (``(heard, preferred)``), whose heard form becomes
+    an alias. Left out: a term of fewer than 4 letters, an ordinary word, a
+    term with a digit or a symbol (this first version), and anything past
+    ``VOCABULARY_MAX_TERMS``. Screen, app and window text, selections, the
+    clipboard and mined terms never reach this list."""
+    found: dict[str, VocabularyTerm] = {}
+
+    def eligible(term: str) -> bool:
+        return (bool(_VOCABULARY_TERM_RE.fullmatch(term))
+                and sum(char.isalpha() for char in term) >= 4
+                and not is_ordinary_word(term))
+
+    for term in typed:
+        term = " ".join(str(term).split())
+        if eligible(term) and term.casefold() not in found:
+            found[term.casefold()] = VocabularyTerm(term, "typed")
+    for heard, preferred in corrected:
+        preferred = " ".join(str(preferred).split())
+        if not eligible(preferred):
+            continue
+        known = found.get(preferred.casefold())
+        if known is None:
+            found[preferred.casefold()] = VocabularyTerm(
+                preferred, "corrected", (heard,))
+        elif heard not in known.aliases:
+            found[preferred.casefold()] = replace(
+                known, aliases=known.aliases + (heard,))
+    return tuple(found.values())[:VOCABULARY_MAX_TERMS]
+
+
+def vocabulary_alternative(
+        text: str, decisions: Iterable[VocabularyDecision]) -> str:
+    """The text the accepted decisions would give: the "Alt:" a shadow run
+    shows."""
+    return _replace_spans(text, [
+        (decision.start, decision.end, decision.written or decision.term)
+        for decision in decisions if decision.accepted])
+
+
+# --- vocabulary evidence, applied ------------------------------------------
+#
+# "Favor my words": the policy's accepted decisions written into the text
+# before the voice compiler and the clean-up see it. Each one is recorded as
+# a clean-up edit of its own kind, so the evidence inspector and the history
+# show it, and the words heard stay the dictation's raw transcript, which is
+# what "Replace with What You Said" puts back.
+
+
+@dataclass(frozen=True)
+class VocabularyApplication:
+    """What applying a dictation's decisions gave.
+
+    ``changes`` pairs, for each applied decision, the text it replaced with
+    what it wrote. ``refused`` names the rail that stopped the whole
+    application ("" when one ran, even with nothing accepted)."""
+    text: str
+    words: tuple
+    applied: tuple[VocabularyDecision, ...] = ()
+    changes: tuple[tuple[str, str], ...] = ()
+    refused: str = ""
+
+
+def apply_vocabulary_decisions(
+        text: str,
+        words: Sequence,
+        decisions: Iterable[VocabularyDecision],
+        *,
+        mode: str = "capture",
+        language: str = "en",
+        verbatim: bool = False,
+        limit: int = VOCABULARY_MAX_PER_DICTATION,
+) -> VocabularyApplication:
+    """Write the accepted decisions into ``text`` and its timed ``words``.
+
+    Pure. The policy (``apply_vocabulary_evidence``) already holds every
+    rule; these rails hold again here, so that nothing reaches the text
+    unless all of them do, and any one that fails applies nothing at all:
+
+    - capture mode only (``mode``), English only (``language``), and never
+      where the words must stay as said (``verbatim``: the apps the runtime
+      treats as verbatim, or a spoken "verbatim");
+    - at most ``limit`` accepted decisions (``limit``), none overlapping
+      another (``overlap``);
+    - each one's span still holds the words it was decided on, and is the
+      recognition's own whole words (``span``);
+    - what it writes is the term, kept with the heard words' punctuation
+      (``written``).
+
+    The heard words become the written words' tokens, sharing the heard
+    span's time and keeping its lowest confidence.
+    """
+    words = tuple(words or ())
+    accepted = sorted((decision for decision in decisions
+                       if decision.accepted), key=lambda item: item.start)
+
+    def refuse(reason: str) -> VocabularyApplication:
+        return VocabularyApplication(text, words, refused=reason)
+
+    if not accepted:
+        return VocabularyApplication(text, words)
+    if mode != "capture":
+        return refuse("mode")
+    if str(language or "").strip().casefold() not in VOCABULARY_LANGUAGES:
+        return refuse("language")
+    if verbatim:
+        return refuse("verbatim")
+    if len(accepted) > limit:
+        return refuse("limit")
+    spans = _word_spans(text, words) if words else None
+    if spans is None:
+        return refuse("span")
+    replacements: list[tuple[int, int, str]] = []
+    changes: list[tuple[str, str]] = []
+    merged: list[tuple[int, int, str]] = []
+    previous_end = -1
+    for decision in accepted:
+        start, end = decision.start, decision.end
+        if not (isinstance(start, int) and isinstance(end, int)
+                and 0 <= start < end <= len(text)):
+            return refuse("span")
+        if start < previous_end:
+            return refuse("overlap")
+        previous_end = end
+        heard = text[start:end]
+        if _heard_key(heard) != _heard_key(decision.heard):
+            return refuse("span")
+        indices = [index for index, (left, right) in enumerate(spans)
+                   if left < end and start < right]
+        if (not indices or spans[indices[0]][0] != start
+                or spans[indices[-1]][1] != end):
+            return refuse("span")
+        written = decision.written or decision.term
+        if not decision.term or decision.term not in written \
+                or "\n" in written:
+            return refuse("written")
+        replacements.append((start, end, written))
+        changes.append((heard, written))
+        merged.append((indices[0], indices[-1], written))
+    new_words: list = []
+    cursor = 0
+    for first, last, written in merged:
+        new_words.extend(words[cursor:first])
+        heard_words = words[first:last + 1]
+        tokens = _lexical_tokens(written) or [_Token(written, 0, len(written))]
+        begin = float(heard_words[0].start)
+        finish = max(begin, float(heard_words[-1].end))
+        confidence = min(float(getattr(word, "confidence", 0.5))
+                         for word in heard_words)
+        for token, (piece_start, piece_end) in zip(tokens, _divide_interval(
+                begin, finish, [max(1, len(token.text)) for token in tokens])):
+            new_words.append(RecognitionWord(
+                token.text, piece_start, piece_end, confidence,
+                getattr(heard_words[0], "timing", "native"),
+                getattr(heard_words[0], "source", "")))
+        cursor = last + 1
+    new_words.extend(words[cursor:])
+    return VocabularyApplication(
+        _replace_spans(text, replacements), tuple(new_words),
+        tuple(accepted), tuple(changes))

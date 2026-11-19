@@ -171,7 +171,8 @@ Two rules matter more than the list:
    `set_self_correction` defaults to returning `False`, so an unwired switch
    stays off; `set_remove_repeats` defaults to returning `True`, the
    runtime's own default, so an unwired switch never claims the repair was
-   turned off; `set_new_speech_runtime` defaults to returning `False`, so an
+   turned off; `set_favor_my_words` defaults to returning `True` for the same
+   reason; `set_new_speech_runtime` defaults to returning `False`, so an
    unwired switch never claims the new speech runtime is in use. If you add a field, give it a default that fails closed, and
    wire it in `main()`: a whole-program test should call the window's own
    action object, because a missing wiring line otherwise passes every test.

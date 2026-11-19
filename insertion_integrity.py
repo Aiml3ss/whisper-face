@@ -37,6 +37,9 @@ class ReceiptReason(str, Enum):
     READBACK_UNAVAILABLE = "readback_unavailable"
     READBACK_CONFLICT = "readback_conflict"
     PASTE_OUTCOME_UNKNOWN = "paste_outcome_unknown"
+    # Whisper Face stopped after the dictation was journaled and before its
+    # history line was written: delivery was never settled in this process.
+    INTERRUPTED = "interrupted"
 
 
 def fingerprint_surrounding(text: str) -> str:
@@ -108,6 +111,175 @@ class InsertionLease:
             fingerprint_surrounding(destination_context),
             True,
         )
+
+    def renewed_for(self, current: DestinationObservation) \
+            -> "InsertionLease":
+        """This lease, taken again from what ``current`` observed.
+
+        Only for a readable lease on the same destination; the caller
+        decides when a renewal is earned (see ``review_selection_drift``).
+        """
+        if self.opaque:
+            raise ValueError("an opaque lease has no selection to renew")
+        if (current.destination_id != self.destination_id
+                or current.selection is None
+                or current.surrounding_fingerprint is None):
+            raise ValueError("a lease is renewed only on its own destination")
+        return InsertionLease(
+            self.utterance_id, self.destination_id,
+            (int(current.selection[0]), int(current.selection[1])),
+            current.surrounding_fingerprint)
+
+
+# What a system-wide input signature counts, in the order the platform
+# adapter writes its counters (``user_input_signature`` in dictate.py, which a
+# test holds to this order). Only the counts are ever compared.
+USER_INPUT_EVENTS = (
+    "key-down", "left-down", "left-up", "right-down", "right-up",
+    "other-down", "other-up", "moved", "left-dragged", "right-dragged",
+    "other-dragged", "scroll",
+)
+# The events that can move a caret or a selection. Moving the pointer and
+# scrolling cannot; a button coming up only ends what its press began.
+_CARET_KEY_EVENTS = frozenset({"key-down"})
+_CARET_CLICK_EVENTS = frozenset({
+    "left-down", "right-down", "other-down",
+    "left-dragged", "right-dragged", "other-dragged",
+})
+USER_INPUT_SINCE = frozenset({
+    "none",              # no key went down and no button went down or dragged
+    "keys",
+    "clicks",
+    "keys-and-clicks",
+    "unavailable",       # a signature was missing, malformed or went backwards
+})
+
+
+def user_input_since(at_press: str | None, now: str | None) -> str:
+    """What the person did between two input signatures, as a category.
+
+    Counters only, never which key: a key that went down, a button that
+    went down or dragged, both, or neither. Anything that cannot be read
+    as two comparable signatures is "unavailable", never "none".
+    """
+    def counts(signature):
+        if not isinstance(signature, str):
+            return None
+        parts = signature.split(":")
+        if len(parts) != len(USER_INPUT_EVENTS):
+            return None
+        try:
+            return dict(zip(USER_INPUT_EVENTS, (int(part) for part in parts)))
+        except ValueError:
+            return None
+
+    before, after = counts(at_press), counts(now)
+    if before is None or after is None:
+        return "unavailable"
+    if any(after[name] < before[name] for name in USER_INPUT_EVENTS):
+        return "unavailable"
+    keys = any(after[name] != before[name] for name in _CARET_KEY_EVENTS)
+    clicks = any(after[name] != before[name] for name in _CARET_CLICK_EVENTS)
+    return {(False, False): "none", (True, False): "keys",
+            (False, True): "clicks",
+            (True, True): "keys-and-clicks"}[(keys, clicks)]
+
+
+# How a leased selection differed from the one seen when the paste was due:
+# categories and bucketed small counts only, never text, a length of text or
+# a position in it.
+SELECTION_DRIFT_DIRECTIONS = frozenset({
+    "forward", "backward",
+    "same-start",        # the start held and only the selected length changed
+})
+SELECTION_DRIFT_DISTANCES = frozenset({"0", "1", "2", "3-8", "9+"})
+SELECTION_DRIFT_SHAPES = frozenset({
+    "cursor-to-cursor", "cursor-to-range", "range-to-cursor",
+    "range-to-range",
+})
+SELECTION_DRIFT_TEXT = frozenset({
+    "same", "changed",
+    "unknown",           # one of the two reads had no text to compare
+})
+SELECTION_DRIFT_STAGES = frozenset({
+    "refused",           # refused before the paste, as every drift used to be
+    "renewed",           # nothing was typed or clicked since the dictation
+                         # began, so the lease was taken again from the field
+                         # as it stands and the paste went ahead, still
+                         # checked by readback against that field
+})
+
+
+def _drift_distance(moved: int) -> str:
+    if moved <= 2:
+        return str(moved)
+    return "3-8" if moved <= 8 else "9+"
+
+
+@dataclass(frozen=True)
+class SelectionDrift:
+    """How a selection drifted between the lease and the paste: no content."""
+    direction: str
+    distance: str
+    selection: str
+    text: str
+    input: str
+    stage: str
+
+    def __post_init__(self):
+        for value, allowed in (
+                (self.direction, SELECTION_DRIFT_DIRECTIONS),
+                (self.distance, SELECTION_DRIFT_DISTANCES),
+                (self.selection, SELECTION_DRIFT_SHAPES),
+                (self.text, SELECTION_DRIFT_TEXT),
+                (self.input, USER_INPUT_SINCE),
+                (self.stage, SELECTION_DRIFT_STAGES)):
+            if value not in allowed:
+                raise ValueError(f"unknown selection drift category: {value}")
+
+    @property
+    def log_detail(self) -> str:
+        return (f"drift {self.direction} {self.distance}; "
+                f"selection {self.selection}; text {self.text}; "
+                f"input {self.input}; {self.stage}")
+
+
+def review_selection_drift(lease: InsertionLease,
+                           current: DestinationObservation, *,
+                           text_changed: bool | None,
+                           input_since: str) \
+        -> tuple[InsertionLease, SelectionDrift | None]:
+    """The lease to stage, and how its selection drifted if it did.
+
+    A drift is only this: the same destination, readable at both ends, at
+    another selection. Anything else (another destination, an unreadable
+    one, changed text at the same selection) is left to the strict check,
+    unchanged. A selection that moved while the person neither typed nor
+    clicked was not moved by them: the earlier read lagged the field, or the
+    field moved its own caret, and the paste goes where their own Cmd-V
+    would go now. Any key or click since the dictation began, or input
+    that cannot be counted, keeps the refusal.
+    """
+    if input_since not in USER_INPUT_SINCE:
+        raise ValueError(f"unknown input category: {input_since}")
+    if (lease.opaque or InsertionCoordinator.validate(lease, current)
+            != ReceiptReason.SELECTION_DRIFT):
+        return lease, None
+    (start, length), (now_start, now_length) = lease.selection, \
+        current.selection
+    moved = now_start - start
+    direction = ("forward" if moved > 0 else "backward" if moved < 0
+                 else "same-start")
+    shape = (f"{'range' if length else 'cursor'}-to-"
+             f"{'range' if now_length else 'cursor'}")
+    stage = "renewed" if input_since == "none" else "refused"
+    drift = SelectionDrift(
+        direction, _drift_distance(abs(moved)), shape,
+        "unknown" if text_changed is None
+        else "changed" if text_changed else "same",
+        input_since, stage)
+    return (lease.renewed_for(current) if stage == "renewed" else lease,
+            drift)
 
 
 # How an observed destination differed from the expected one. These are
@@ -412,6 +584,9 @@ class InsertionReceipt:
     readback_stage: str = ""
     position_check: str = ""
     position_count: str = ""
+    # How the selection drifted between the lease and the paste, for this
+    # utterance alone: refused, or renewed and pasted. None when it held.
+    selection_drift: SelectionDrift | None = None
 
     @property
     def checked_by_position(self) -> bool:
@@ -437,6 +612,8 @@ class InsertionReceipt:
             parts.append(f"position {self.position_check}")
         if self.position_count:
             parts.append(f"count {self.position_count}")
+        if self.selection_drift is not None:
+            parts.append(self.selection_drift.log_detail)
         return "; ".join(parts)
 
     @property
@@ -504,7 +681,14 @@ class InsertionCoordinator:
     def commit(self, utterance_id: str,
                current: DestinationObservation,
                paste: Callable[[str], None],
-               readback: Callable[[], ReadbackResult]) -> InsertionReceipt:
+               readback: Callable[[], ReadbackResult], *,
+               drift: SelectionDrift | None = None) -> InsertionReceipt:
+        """Validate, paste once, and read back.
+
+        ``drift`` is how the caller saw the selection drift before staging
+        (``review_selection_drift``); every receipt this commit writes
+        carries it, so the record says why a lease was refused or renewed.
+        """
         with self._lock:
             tombstone = self._tombstones.get(utterance_id)
             if tombstone is not None:
@@ -520,7 +704,8 @@ class InsertionCoordinator:
                          else ReceiptState.CONFLICT)
                 entry.receipt = InsertionReceipt(
                     utterance_id, state, reason, False,
-                    destination_opaque=entry.lease.opaque)
+                    destination_opaque=entry.lease.opaque,
+                    selection_drift=drift)
                 entry.terminal = True
                 self._settle_locked(utterance_id, entry)
                 return entry.receipt
@@ -534,6 +719,7 @@ class InsertionCoordinator:
                 ReceiptReason.PASTE_OUTCOME_UNKNOWN,
                 True,
                 destination_opaque=opaque,
+                selection_drift=drift,
             )
             entry.terminal = True
             entry.in_flight = True
@@ -548,6 +734,7 @@ class InsertionCoordinator:
             ReceiptReason.PASTE_OUTCOME_UNKNOWN,
             True,
             destination_opaque=opaque,
+            selection_drift=drift,
         )
         try:
             paste(text)
@@ -560,7 +747,8 @@ class InsertionCoordinator:
                 readback_difference=proof.difference,
                 readback_stage=proof.stage,
                 position_check=proof.position,
-                position_count=proof.position_count)
+                position_count=proof.position_count,
+                selection_drift=drift)
         except Exception:
             # Delivery may precede failure. Retrying risks duplication, so
             # the unresolved entry remains recoverable.
@@ -625,6 +813,35 @@ class InsertionCoordinator:
                     and entry.receipt.state != ReceiptState.VERIFIED
                     and not entry.receipt.pasted_unchecked)
             )
+
+    def keep(self, utterance_id: str, text: str, *,
+             paste_attempted: bool) -> InsertionReceipt:
+        """Hold text that was never settled here as recoverable.
+
+        For a dictation the delivery journal still held when Whisper Face
+        started: it was recognised, and then the app stopped before its
+        delivery was recorded. Nothing is pasted and nothing can be: the
+        entry is terminal from the start, unresolved, and says whether a
+        paste may already have been sent. An id already known keeps what it
+        has, so a recovery that runs twice cannot make two copies.
+        """
+        with self._lock:
+            if utterance_id in self._entries \
+                    or utterance_id in self._tombstones:
+                return self.receipt(utterance_id)
+            lease = InsertionLease(
+                utterance_id, "recovered", (0, 0),
+                fingerprint_surrounding(""))
+            receipt = InsertionReceipt(
+                utterance_id,
+                ReceiptState.UNRESOLVED,
+                ReceiptReason.INTERRUPTED,
+                bool(paste_attempted),
+            )
+            entry = _OutboxEntry(lease, text, receipt, terminal=True)
+            self._entries[utterance_id] = entry
+            self._settle_locked(utterance_id, entry)
+            return receipt
 
     def acknowledge(self, utterance_id: str) -> bool:
         """Dismiss one recoverable payload while retaining bounded dedupe."""
@@ -714,12 +931,22 @@ __all__ = [
     "ReadbackResult",
     "ReceiptReason",
     "ReceiptState",
+    "SELECTION_DRIFT_DIRECTIONS",
+    "SELECTION_DRIFT_DISTANCES",
+    "SELECTION_DRIFT_SHAPES",
+    "SELECTION_DRIFT_STAGES",
+    "SELECTION_DRIFT_TEXT",
+    "SelectionDrift",
+    "USER_INPUT_EVENTS",
+    "USER_INPUT_SINCE",
     "fingerprint_surrounding",
     "position_check",
     "position_count",
     "readback_difference",
     "readback_stage",
+    "review_selection_drift",
     "same_but_whitespace_form",
+    "user_input_since",
     "utf16_units",
     "whitespace_form",
 ]

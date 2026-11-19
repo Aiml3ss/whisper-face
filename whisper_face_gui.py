@@ -358,6 +358,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.outbox.summary.paste_attempted": "Paste may have landed — verify before reusing",
         "overview.outbox.summary.not_pasted": "Not pasted — destination changed",
         "overview.outbox.summary.pasted_unchecked": "Pasted, not double-checked",
+        "overview.outbox.summary.interrupted": "Kept when Whisper Face stopped — check before reusing",
         "overview.action.pause": "Pause",
         "overview.action.resume": "Resume",
         "overview.action.pause.help": "Pause or resume the global dictation hotkey.",
@@ -678,11 +679,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.recent.label": "Recent dictations",
         "settings.accessibility.remove_repeats.label": "Repeated words",
         "settings.accessibility.remove_repeats.help": "On by default. A phrase said twice by accident is typed once: “I have nothing I have nothing going on” types “I have nothing going on”. Anything said three times, like “no way no way no way”, stays as you said it.",
+        "settings.accessibility.favor_words.label": "Favor my words",
+        "settings.accessibility.favor_words.help": "On by default. Where the recognizer nearly heard a name or term from your vocabulary, Whisper Face writes yours instead: at most two in a dictation, in English, and never in code mode or in apps kept word for word. Each change is listed under Inspect Evidence, and Replace with What You Said in the menu bar puts back what was heard.",
         "settings.accessibility.self_correction.label": "“Actually” corrections",
         "settings.accessibility.self_correction.help": "Off by default. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm”: between two numbers, days, months or times, only the second is kept. A sentence contrasting two things, like “I thought it was Tuesday, actually Wednesday”, changes too.",
         "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",
         "settings.dialog.recent.title": "Recent dictations",
-        "settings.dialog.recent.message": "Metadata only. Reveal a dictation to see its words. To insert one again, click where it should go and use Recent Dictations in the menu bar.",
+        "settings.dialog.recent.message": "What became of each dictation. Words stay hidden until you show them; to insert one again, use Recent Dictations in the menu bar.",
         "settings.dialog.recent.empty": "Nothing recorded yet.",
         "settings.dialog.recent.row": "{when} · {words} · {app}",
         "settings.dialog.recent.words": "{count} words",
@@ -695,8 +698,15 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.recent.reveal": "Reveal Text…",
         "settings.dialog.recent.revealed.title": "Recent dictation",
         "settings.dialog.recent.revealed.gone": "That dictation is no longer in the local log.",
-        "settings.accessibility.recent_list.label": "Recent dictations list",
-        "settings.accessibility.recent_list.help": "Choose one recent dictation to reveal.",
+        "settings.accessibility.recent_list.label": "Show the words of the dictation from {when} in {app}",
+        "settings.accessibility.recent_list.help": "Shows this dictation's words here. Nothing is pasted.",
+        "recent.receipt.proven": "In your document · checked word for word",
+        "recent.receipt.position": "In your document · checked by the cursor",
+        "recent.receipt.unchecked": "Pasted · this app could not be checked",
+        "recent.receipt.not_pasted": "Not pasted · a copy went to the Voice Outbox",
+        "recent.receipt.unconfirmed": "May not have landed · a copy went to the Voice Outbox",
+        "recent.receipt.interrupted": "Not delivered · Whisper Face stopped, a copy went to the Voice Outbox",
+        "recent.receipt.unknown": "No delivery record",
         "settings.notice.hotkey": "Capture key is now {hotkey}.",
         "settings.notice.undo_hotkey": "Undo key is now {hotkey}.",
         "settings.notice.undo_hotkey.cleared": "Undo key cleared.",
@@ -757,6 +767,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.personalize.vocabulary.exclusions.one": "1 exclusion",
         "settings.personalize.vocabulary.exclusions.many": "{count} exclusions",
         "settings.personalize.vocabulary.empty": "Teach me the names I keep getting wrong",
+        "settings.personalize.favor_words": "Favor my words",
+        "settings.personalize.favor_words.on": "On. Writes a vocabulary word where it nearly heard one. Each change can be\u00a0undone.",
+        "settings.personalize.favor_words.off": "Off. When on, it writes a vocabulary word where it nearly heard\u00a0one.",
         "settings.personalize.corrections": "Learned corrections",
         "settings.personalize.corrections.empty": "Fix the same word a few times and I’ll remember it",
         "settings.personalize.keywords": "Pronunciation keywords",
@@ -939,6 +952,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.remove_repeats.update_failed": "Could not change Repeated words: {error}. It stayed exactly as it was — try the switch again.",
         "operation.speech_runtime.update_failed": "Could not change New speech runtime: {error}. It stayed exactly as it was — try the switch again.",
         "operation.self_correction.update_failed": "Could not change “Actually” corrections: {error}. It stayed exactly as it was — try the switch again.",
+        "operation.favor_words.update_failed": "Could not change Favor my words: {error}. It stayed exactly as it was — try the switch again.",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}. It stayed exactly as it was — try the switch again.",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}. It stayed exactly as it was — try the switch again.",
         "operation.relisten.update_failed": "Could not update Selective Re-listen: {error}. It stayed exactly as it was — try the switch again.",
@@ -1015,6 +1029,36 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.notice.demonstration_cancelled": "Demonstration draft rolled back",
         "settings.notice.demonstration_deleted": "Approved demonstration recipe deleted",
         "diagnostics.notice.support_snapshot.copied": "Transcript-free support snapshot copied",
+        # An update tried on the person's own recordings before it takes
+        # over (voice_check.py). Counts only: never a word they said.
+        "update.voice_check.ahead.one": "Before it replaces this version, it’s tried on your recording. If it hears you less well, you’ll be asked first.",
+        "update.voice_check.ahead.many": "Before it replaces this version, it’s tried on your {recordings} recordings. If it hears you less well, you’ll be asked first.",
+        "update.voice_check.held.title": "This update hears you less well",
+        "update.voice_check.held.body.one": "Before installing {update}, Whisper Face tried it on your recording. Compared with the version you have now:",
+        "update.voice_check.held.body.many": "Before installing {update}, Whisper Face tried it on your {recordings} recordings. Compared with the version you have now:",
+        "update.voice_check.held.terms_right": "Names and terms right: {before} of {total} now, {after} with the update.",
+        "update.voice_check.held.word_errors": "Word mistakes: {before} now, {after} with the update.",
+        "update.voice_check.held.false_insertions": "Names written that you didn’t say: {before} now, {after} with the update.",
+        "update.voice_check.held.unanswered": "Recordings it couldn’t finish: {after} of {recordings}.",
+        "update.voice_check.held.footer": "Nothing has changed. You can wait for a later update, or update anyway.",
+        "update.voice_check.held.wait": "Wait",
+        "update.voice_check.held.anyway": "Update Anyway",
+        "update.voice_check.passed.one": "It was tried on your recording first: names and terms right {terms_after} of {terms_total} ({terms_before} before), word mistakes {errors_after} ({errors_before} before).",
+        "update.voice_check.passed.many": "It was tried on your {recordings} recordings first: names and terms right {terms_after} of {terms_total} ({terms_before} before), word mistakes {errors_after} ({errors_before} before).",
+        "update.voice_check.not_checked": "It couldn’t be tried on your recordings first: {reason}.",
+        "update.voice_check.skipped": "You chose to update without trying it on your recordings.",
+        "update.voice_check.version": "version {version}",
+        "update.voice_check.build": "build {build}",
+        "update.voice_check.reason.not-mac": "that only works on a Mac",
+        "update.voice_check.reason.no-sandbox": "this Mac can’t keep the check offline",
+        "update.voice_check.reason.no-recogniser": "this version’s speech engine isn’t installed",
+        "update.voice_check.reason.current-did-not-start": "this version’s speech engine didn’t start",
+        "update.voice_check.reason.candidate-too-old": "the new version can’t replay recordings",
+        "update.voice_check.reason.not-built": "the new version’s speech engine couldn’t be built offline",
+        "update.voice_check.reason.candidate-did-not-start": "the new version’s speech engine didn’t start offline",
+        "update.voice_check.reason.candidate-failed": "the new version couldn’t replay them",
+        "update.voice_check.reason.unreadable": "the recordings couldn’t be read",
+        "update.voice_check.reason.failed": "the check stopped unexpectedly",
 
         # --- new look: shell
 
@@ -1120,6 +1164,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
 
         "sheets.notice.error.label": "Problem",
         "sheets.notice.result.label": "Result",
+        "sheets.recent.show": "Show Words",
+        "sheets.recent.back": "Back",
+        "sheets.recent.back.help": "Back to the list of recent dictations.",
+        "sheets.recent.tally": "{proven} of {count} checked in your document after pasting.",
+        "sheets.recent.words.label": "Words of this dictation",
+        "sheets.recent.words.help": "Select and copy them if you need them. Nothing here is pasted.",
         "sheets.tones.message": "Choose how cleanup should sound in each app.",
         "sheets.tones.choice.label": "Cleanup tone for {app}",
         "sheets.tones.refused": "{app}: {reason}",
@@ -1318,6 +1368,95 @@ def plural_key(base: str, count: int) -> str:
     """
 
     return f"{base}.one" if count == 1 else f"{base}.many"
+
+
+# The order a held update lists what got worse in: names first, because
+# they are what the recordings exist for.
+VOICE_CHECK_WORSE_ORDER = (
+    "terms_right", "false_insertions", "word_errors", "unanswered")
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) \
+        and value >= 0 else 0
+
+
+def voice_check_update_label(*, version: str = "", build: str = "",
+                             locale: str = "en") -> str:
+    """How a held update names itself: a release's version, or a build."""
+    if version:
+        return localized_string("update.voice_check.version", locale=locale,
+                                version=version)
+    return localized_string("update.voice_check.build", locale=locale,
+                            build=str(build)[:7])
+
+
+def voice_check_ahead(recordings: int, *, locale: str = "en") -> str:
+    """The sentence an update's start adds when it will be tried first, or
+    nothing when there are no recordings to try it on."""
+    recordings = _count(recordings)
+    if not recordings:
+        return ""
+    return localized_string(plural_key("update.voice_check.ahead", recordings),
+                            locale=locale, recordings=recordings)
+
+
+def voice_check_held(outcome: Mapping[str, Any], update: str, *,
+                     locale: str = "en") -> tuple[str, str]:
+    """(title, detail) for an update held because it heard the person less
+    well: each measure that got worse, as counts. Built from the outcome's
+    numbers alone, so no word the person said can reach it."""
+    before = outcome.get("current") or {}
+    after = outcome.get("candidate") or {}
+    recordings = _count(outcome.get("recordings"))
+    lines = [localized_string(
+        plural_key("update.voice_check.held.body", recordings), locale=locale,
+        update=update, recordings=recordings)]
+    worse = set(outcome.get("worse") or ())
+    for measure in VOICE_CHECK_WORSE_ORDER:
+        if measure not in worse:
+            continue
+        lines.append("• " + localized_string(
+            f"update.voice_check.held.{measure}", locale=locale,
+            before=_count(before.get(measure)),
+            after=_count(after.get(measure)),
+            total=_count(after.get("terms_total")), recordings=recordings))
+    lines.append(localized_string("update.voice_check.held.footer",
+                                  locale=locale))
+    return (localized_string("update.voice_check.held.title", locale=locale),
+            "\n\n".join([lines[0], "\n".join(lines[1:-1]), lines[-1]]))
+
+
+def voice_check_note(outcome: Any, *, locale: str = "en") -> str:
+    """One sentence on how an update that went ahead fared on the person's
+    recordings; empty when there were none to try it on."""
+    if not isinstance(outcome, Mapping):
+        return ""
+    status = outcome.get("status")
+    if status == "passed":
+        before = outcome.get("current") or {}
+        after = outcome.get("candidate") or {}
+        recordings = _count(outcome.get("recordings"))
+        return localized_string(
+            plural_key("update.voice_check.passed", recordings),
+            locale=locale, recordings=recordings,
+            terms_before=_count(before.get("terms_right")),
+            terms_after=_count(after.get("terms_right")),
+            terms_total=_count(after.get("terms_total")),
+            errors_before=_count(before.get("word_errors")),
+            errors_after=_count(after.get("word_errors")))
+    if status == "skipped":
+        return localized_string("update.voice_check.skipped", locale=locale)
+    if status == "not-checked":
+        key = f"update.voice_check.reason.{outcome.get('reason')}"
+        if key not in STRING_CATALOGS["en"]:
+            key = "update.voice_check.reason.failed"
+        return localized_string(
+            "update.voice_check.not_checked", locale=locale,
+            reason=localized_string(key, locale=locale))
+    return ""
+
+
 FACES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
@@ -1439,6 +1578,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.flight.label",
             "settings.accessibility.acoustic.label",
             "settings.accessibility.remove_repeats.label",
+            "settings.accessibility.favor_words.label",
             "settings.accessibility.self_correction.label",
             "settings.accessibility.voice_objects.label",
             "settings.accessibility.voice_objects.chooser",
@@ -1510,6 +1650,7 @@ class GUIActions:
     set_recent_dictations: Callable[[bool], bool] = lambda _enabled: False
     set_self_correction: Callable[[bool], bool] = lambda _enabled: False
     set_remove_repeats: Callable[[bool], bool] = lambda _enabled: True
+    set_favor_my_words: Callable[[bool], bool] = lambda _enabled: True
     set_new_speech_runtime: Callable[[bool], bool] = lambda _enabled: False
     recent_dictations: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()
     reveal_recent_dictation: Callable[[str], str | None] = (
@@ -1903,6 +2044,7 @@ class UnifiedSettings:
     corrections: tuple[CorrectionSetting, ...] = field(default_factory=tuple)
     self_correction: bool = False
     remove_repeats: bool = True
+    favor_my_words: bool = True
 
 
 def tone_for_app_index(
@@ -2196,6 +2338,19 @@ def recent_dictation_row(entry: Mapping[str, Any], *,
     words = words if isinstance(words, int) and not isinstance(words, bool) \
         else 0
     words = max(0, words)
+    when, app = recent_dictation_when_app(entry, locale=locale)
+    return localized_string(
+        "settings.dialog.recent.row", locale=locale, when=when,
+        words=(localized_string("settings.dialog.recent.word", locale=locale)
+               if words == 1 else localized_string(
+                   "settings.dialog.recent.words", locale=locale,
+                   count=words)),
+        app=app)
+
+
+def recent_dictation_when_app(entry: Mapping[str, Any], *,
+                              locale: str = "en") -> tuple[str, str]:
+    """A coarse "when" and the app's name for one dictation's row."""
     seconds = entry.get("age_seconds")
     try:
         seconds = float(seconds)
@@ -2213,14 +2368,44 @@ def recent_dictation_row(entry: Mapping[str, Any], *,
         when = localized_string(
             "recent.age.days", locale=locale, count=int(seconds // 86400))
     app = entry.get("app")
+    return when, (str(app) if isinstance(app, str) and app
+                  else localized_string("recent.app.unknown", locale=locale))
+
+
+# What became of a dictation, by the runtime's closed receipt name: the
+# SF Symbol its row leads with, and whether it counts as checked in place.
+RECENT_RECEIPTS = {
+    "proven": ("checkmark.circle", True),
+    "position": ("checkmark.circle", True),
+    "unchecked": ("circle.dashed", False),
+    "not_pasted": ("tray.and.arrow.down", False),
+    "unconfirmed": ("tray.and.arrow.down", False),
+    "interrupted": ("tray.and.arrow.down", False),
+    "unknown": ("minus.circle", False),
+}
+
+
+def recent_dictation_receipt(entry: Mapping[str, Any]) -> str:
+    """The entry's receipt name, or "unknown" for anything not in the set."""
+    receipt = entry.get("receipt")
+    return receipt if isinstance(receipt, str) and receipt in RECENT_RECEIPTS \
+        else "unknown"
+
+
+def recent_dictation_receipt_text(entry: Mapping[str, Any], *,
+                                  locale: str = "en") -> str:
+    """What became of one dictation, in plain words — never its text."""
     return localized_string(
-        "settings.dialog.recent.row", locale=locale, when=when,
-        words=(localized_string("settings.dialog.recent.word", locale=locale)
-               if words == 1 else localized_string(
-                   "settings.dialog.recent.words", locale=locale,
-                   count=words)),
-        app=str(app) if isinstance(app, str) and app else localized_string(
-            "recent.app.unknown", locale=locale))
+        f"recent.receipt.{recent_dictation_receipt(entry)}", locale=locale)
+
+
+def recent_dictations_tally(entries: Sequence[Mapping[str, Any]], *,
+                            locale: str = "en") -> str:
+    """How many of the listed dictations were checked in place."""
+    proven = sum(1 for entry in entries
+                 if RECENT_RECEIPTS[recent_dictation_receipt(entry)][1])
+    return localized_string("sheets.recent.tally", locale=locale,
+                            proven=proven, count=len(entries))
 
 
 def support_snapshot_text(state: GUIState) -> str:
@@ -2838,6 +3023,7 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
         corrections=tuple(corrections),
         self_correction=source.get("self_correction") is True,
         remove_repeats=source.get("remove_repeats") is not False,
+        favor_my_words=source.get("favor_my_words") is not False,
     )
 
 
@@ -4056,6 +4242,7 @@ def _localized_runtime_overview_copy(
             "overview.outbox.summary.paste_attempted",
             "overview.outbox.summary.not_pasted",
             "overview.outbox.summary.pasted_unchecked",
+            "overview.outbox.summary.interrupted",
         ),
     }.get(kind, ())
     key = next((
@@ -4891,6 +5078,21 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state, notice=self.localized(
                     "operation.remove_repeats.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def set_favor_my_words(self, enabled: bool) -> GUIState:
+        try:
+            stored = self.actions.set_favor_my_words(bool(enabled)) is True
+            self.state = replace(
+                self.state, settings=replace(
+                    self.state.settings, favor_my_words=stored),
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.favor_words.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -7310,6 +7512,29 @@ if APPKIT_AVAILABLE:
                 y += NOTE_GAP + height
         return y
 
+    def sheet_fold(document: Any, fold: float) -> float:
+        """Where a scrolling sheet body may stop: ``fold``, or higher, so
+        that no header or note of ``document`` is cut in two by it.
+
+        A row may be cut; text outside a group may not. A line that the
+        fold would cut moves below it whole, with a gap above it.
+        """
+        texts = [view for header, _group, notes, trailing
+                 in document.sections
+                 for view in (header, trailing, *notes)
+                 if view is not None and not bool(view.isHidden())]
+        moved = True
+        while moved:
+            moved = False
+            for view in texts:
+                frame = view.frame()
+                top = float(frame.origin.y)
+                bottom = top + float(frame.size.height)
+                if top < fold - 0.5 and bottom > fold + 0.5:
+                    fold = max(0.0, top - SHEET_FOLD_GAP)
+                    moved = True
+        return fold
+
     class GroupedPageView(NSView):
         """A settings page's scrolling document: headers, groups, notes.
 
@@ -8455,6 +8680,8 @@ if APPKIT_AVAILABLE:
     # ------------------------------------------------------------------
 
     SHEET_WIDTH = 540.0
+    # The receipt symbol that leads each recent dictation's row.
+    SHEET_RECEIPT_ICON_SIZE = 18.0
     # Sheet edge to the header, the body and the footer's buttons.
     SHEET_INSET = 20.0
     SHEET_FACE_SIZE = 40.0
@@ -8465,6 +8692,9 @@ if APPKIT_AVAILABLE:
     # as far from the footer's rule as from the header.
     SHEET_BODY_FOOT = PAGE_TOP
     SHEET_FOOTER_GAP = 16.0     # body to the footer's buttons
+    # Clear space left above a header or note that a scrolling sheet body
+    # moved below its fold rather than cut in two.
+    SHEET_FOLD_GAP = 6.0
     SHEET_BUTTON_MIN_WIDTH = 76.0
     # The sheet stays this far inside the window at its minimum size; a
     # body taller than that leaves scrolls.
@@ -10679,6 +10909,9 @@ if APPKIT_AVAILABLE:
                 ("tones", "settings.personalize.tones", "editTone:"),
                 ("snippets", "settings.personalize.snippets", "editSnippets:"),
                 ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
+                # Under the list it acts on: whether the list's words are
+                # written where the recognizer nearly heard them.
+                ("favor_words", "settings.personalize.favor_words", None),
                 ("corrections", "settings.personalize.corrections", "reviewCorrections:"),
                 ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
             )
@@ -10703,6 +10936,22 @@ if APPKIT_AVAILABLE:
                     personalize_key_views.append(popup)
                     self.dynamic["settings_language_detail"] = detail
                     self.dynamic["settings_language_popup"] = popup
+                    continue
+                if key == "favor_words":
+                    # A switch: what it does is its caption.
+                    favor_switch = self._switch(
+                        NSMakeRect(0, 0, 40, 22), "favorMyWordsChanged:",
+                        label=self._l(
+                            "settings.accessibility.favor_words.label"),
+                        help_text=self._l(
+                            "settings.accessibility.favor_words.help"))
+                    row, _title, detail = self._settings_row(
+                        self._l(title_key), caption="",
+                        accessories=(favor_switch,))
+                    row_views.append(row)
+                    personalize_key_views.append(favor_switch)
+                    self.dynamic["favor_words_toggle"] = favor_switch
+                    self.dynamic["favor_words_detail"] = detail
                     continue
                 action_key = (
                     "settings.action.review" if key == "corrections" else
@@ -11755,6 +12004,21 @@ if APPKIT_AVAILABLE:
             sync_accessibility(
                 self.dynamic["settings_language_popup"], language_name,
                 label=self._l("settings.accessibility.language.label"))
+            favor_words = settings.favor_my_words
+            self.dynamic["favor_words_toggle"].setState_(
+                NSControlStateValueOn if favor_words
+                else NSControlStateValueOff)
+            set_accessible_text(
+                self.dynamic["favor_words_detail"],
+                self._l("settings.personalize.favor_words.on"
+                        if favor_words
+                        else "settings.personalize.favor_words.off"),
+                label=self._l("settings.accessibility.favor_words.label"))
+            sync_accessibility(
+                self.dynamic["favor_words_toggle"],
+                self._l("settings.state.enabled") if favor_words
+                else self._l("settings.state.disabled"),
+                label=self._l("settings.accessibility.favor_words.label"))
             self.dynamic["settings_tones_button"].setEnabled_(
                 bool(settings.app_tones))
             self.dynamic["settings_snippets_button"].setEnabled_(True)
@@ -12467,6 +12731,17 @@ if APPKIT_AVAILABLE:
             sheet.scroll.setFrame_(NSMakeRect(
                 SHEET_INSET, body_top, body_width, body_height))
             document.arrange(force=True)
+            if content_height > body_height + 0.5:
+                # The body scrolls. Where it stops, it may cut a group's
+                # row (the group's edge goes on, so more is plainly
+                # there), but never a line of a header or a note: that
+                # reads as text clipped by mistake. Such a line goes
+                # below the fold whole, and is reached by scrolling.
+                folded = sheet_fold(document, body_height)
+                if folded < body_height:
+                    body_height = folded
+                    sheet.scroll.setFrame_(NSMakeRect(
+                        SHEET_INSET, body_top, body_width, body_height))
             document.scrollPoint_((0.0, 0.0))
             self._tip_what_is_cut(document)
             body_foot = body_top + body_height
@@ -13552,6 +13827,11 @@ if APPKIT_AVAILABLE:
             self.view_model.set_remove_repeats(enabled)
             self.render()
 
+        def favorMyWordsChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_favor_my_words(enabled)
+            self.render()
+
         def recentDictationsChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_recent_dictations(enabled)
@@ -13665,52 +13945,111 @@ if APPKIT_AVAILABLE:
                 current_label=self.view_model.state.undo_hotkey_label,
                 allow_unbound=True)
 
+        @objc.python_method
+        def _recent_page(self, sheet: Any,
+                         entries: Sequence[Mapping[str, Any]]
+                         ) -> Mapping[str, Any]:
+            """Each recent dictation as a row: when, how long, which app,
+            and what became of it, with Show Words. The words themselves
+            are never on this page."""
+            locale = self.view_model.locale
+            rows = []
+            for entry in entries:
+                when, app = recent_dictation_when_app(entry, locale=locale)
+                show = self._sheet_button(
+                    sheet, f"show:{entry.get('id') or ''}",
+                    self._l("sheets.recent.show"),
+                    label=self._l("settings.accessibility.recent_list.label",
+                                  when=when, app=app),
+                    help_text=self._l(
+                        "settings.accessibility.recent_list.help"),
+                    item=entry)
+                icon = NSImageView.alloc().initWithFrame_(NSMakeRect(
+                    0, 0, SHEET_RECEIPT_ICON_SIZE, SHEET_RECEIPT_ICON_SIZE))
+                icon.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+                icon.setEditable_(False)
+                image = _symbol_image(
+                    RECENT_RECEIPTS[recent_dictation_receipt(entry)][0],
+                    size=15.0)
+                if image is not None:
+                    icon.setImage_(image)
+                # The caption says what the symbol shows.
+                _silence_image(icon)
+                self._register("symbol", icon)
+                row, _title, _caption = self._sheet_row(
+                    recent_dictation_row(entry, locale=locale),
+                    caption=recent_dictation_receipt_text(
+                        entry, locale=locale),
+                    accessories=(show,), leading=icon)
+                rows.append(row)
+            notes = ([self._page_note(recent_dictations_tally(
+                entries, locale=locale))] if entries else [])
+            if not rows:
+                rows = [self._sheet_empty_row(
+                    self._l("settings.dialog.recent.empty"))]
+            return {
+                "title": self._l("settings.dialog.recent.title"),
+                "message": self._l("settings.dialog.recent.message"),
+                "sections": [(None, rows, notes)],
+                "buttons": self._sheet_footer(sheet, save=False),
+            }
+
+        @objc.python_method
+        def _recent_words_page(self, sheet: Any, entry: Mapping[str, Any],
+                               words: str) -> Mapping[str, Any]:
+            """One dictation's words, shown because they were asked for:
+            read-only and selectable, with what became of it above."""
+            locale = self.view_model.locale
+            if words:
+                row = self._sheet_editor_row(
+                    sheet, "words", words,
+                    label=self._l("sheets.recent.words.label"),
+                    help_text=self._l("sheets.recent.words.help"))
+                sheet.controls["words"].setEditable_(False)
+            else:
+                row = self._sheet_empty_row(
+                    self._l("settings.dialog.recent.revealed.gone"))
+            back = self._sheet_button(
+                sheet, "back", self._l("sheets.recent.back"),
+                help_text=self._l("sheets.recent.back.help"))
+            return {
+                "title": self._l("settings.dialog.recent.revealed.title"),
+                "message": " · ".join((
+                    recent_dictation_row(entry, locale=locale),
+                    recent_dictation_receipt_text(entry, locale=locale))),
+                "sections": [(None, [row], [])],
+                "buttons": self._sheet_footer(sheet, save=False),
+                "leading": [back],
+            }
+
         def browseRecentDictations_(self, _sender: Any) -> None:
-            """List recent dictations as metadata; text needs a second step."""
+            """List recent dictations with what became of each; a
+            dictation's words take a second, explicit step."""
             entries = self.view_model.recent_dictations()
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l("settings.dialog.recent.title"))
-            alert.setInformativeText_(
-                self._l("settings.dialog.recent.message") if entries
-                else self._l("settings.dialog.recent.empty"))
-            chooser = None
-            if entries:
-                chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                    NSMakeRect(0, 0, 460, 26), False)
-                # Rows are metadata, so two can read the same, and
-                # addItemWithTitle: drops duplicates. Each item carries its
-                # entry id instead.
-                for entry in entries:
-                    item = NSMenuItem.alloc() \
-                        .initWithTitle_action_keyEquivalent_(
-                            recent_dictation_row(
-                                entry, locale=self.view_model.locale),
-                            None, "")
-                    item.setRepresentedObject_(str(entry.get("id") or ""))
-                    chooser.menu().addItem_(item)
-                _accessible(
-                    chooser,
-                    self._l("settings.accessibility.recent_list.label"),
-                    self._l("settings.accessibility.recent_list.help"))
-                alert.setAccessoryView_(chooser)
-                alert.addButtonWithTitle_(
-                    self._l("settings.dialog.recent.reveal"))
-            alert.addButtonWithTitle_(self._l("settings.action.done"))
-            response = self._run_modal(alert)
-            if chooser is None or chooser.selectedItem() is None:
-                return
-            entry_id = str(chooser.selectedItem().representedObject() or "")
-            if response == 1000:
-                revealed = self.view_model.reveal_recent_dictation(entry_id)
-                detail = NSAlert.alloc().init()
-                detail.setMessageText_(
-                    self._l("settings.dialog.recent.revealed.title"))
-                detail.setInformativeText_(
-                    revealed or self._l(
-                        "settings.dialog.recent.revealed.gone"))
-                detail.addButtonWithTitle_(self._l("settings.action.done"))
-                self._run_modal(detail)
-            self.render()
+            sheet = self._new_sheet()
+            shown: tuple[Mapping[str, Any], str] | None = None
+            try:
+                while True:
+                    if shown is None:
+                        self._sheet_fill(sheet, lambda: self._recent_page(
+                            sheet, entries))
+                    else:
+                        entry, words = shown
+                        self._sheet_fill(
+                            sheet, lambda: self._recent_words_page(
+                                sheet, entry, words))
+                    action, selected = self._run_sheet(sheet)
+                    if action == "show":
+                        shown = (selected, self.view_model
+                                 .reveal_recent_dictation(
+                                     str(selected.get("id") or "")))
+                    elif action == "back":
+                        shown = None
+                    else:
+                        return
+            finally:
+                self._end_sheet(sheet)
+                self.render()
 
         def viewModes_(self, _sender: Any) -> None:
             """Show the six voice-mode shortcuts, using the key that is bound."""
@@ -14163,6 +14502,11 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         private_settings["remove_repeats"] = bool(enabled)
         return bool(enabled)
 
+    def set_favor_my_words(enabled: bool) -> bool:
+        calls.append(("favor_my_words", enabled))
+        private_settings["favor_my_words"] = bool(enabled)
+        return bool(enabled)
+
     def set_new_speech_runtime(enabled: bool) -> bool:
         calls.append(("new_speech_runtime", enabled))
         runtime["new_speech_runtime"] = bool(enabled)
@@ -14181,16 +14525,17 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         set_recent_dictations=set_recent_dictations,
         set_self_correction=set_self_correction,
         set_remove_repeats=set_remove_repeats,
+        set_favor_my_words=set_favor_my_words,
         set_new_speech_runtime=set_new_speech_runtime,
         # Two entries share one metadata row, as two short dictations into
         # the same app within a minute do.
         recent_dictations=lambda: (
             {"id": "smoke-1", "at": 0.0, "age_seconds": 90.0,
-             "words": 4, "app": "Mail"},
+             "words": 4, "app": "Mail", "receipt": "proven"},
             {"id": "smoke-2", "at": 0.0, "age_seconds": 90.0,
-             "words": 1, "app": "Slack"},
+             "words": 1, "app": "Slack", "receipt": "unchecked"},
             {"id": "smoke-3", "at": 0.0, "age_seconds": 90.0,
-             "words": 1, "app": "Slack"}),
+             "words": 1, "app": "Slack", "receipt": "interrupted"}),
         reveal_recent_dictation=lambda entry_id: calls.append(
             ("reveal_recent", entry_id)) and None,
         insert_recent_dictation=lambda entry_id: {
@@ -16282,6 +16627,39 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         require(model.state.settings.remove_repeats
                 and private_settings["remove_repeats"] is True,
                 "the repeated words switch turns the repair back on")
+        # Favor my words sits under Vocabulary on Personalize. The smoke's
+        # settings file predates the key, as an updated install's does: on.
+        favor_toggle = controller.dynamic["favor_words_toggle"]
+        require(
+            accessible_value(favor_toggle, "accessibilityLabel")
+            == localized_string("settings.accessibility.favor_words.label")
+            and favor_toggle in controller.dynamic[
+                "settings_key_views"]["Personalize"],
+            "the favor my words switch is labelled and reachable by keyboard")
+        require(
+            "favor_my_words" not in private_settings
+            and int(favor_toggle.state()) == int(NSControlStateValueOn)
+            and str(controller.dynamic["favor_words_detail"]
+                    .stringValue()) == localized_string(
+                        "settings.personalize.favor_words.on"),
+            "favor my words starts on and says so")
+        favor_toggle.setState_(NSControlStateValueOff)
+        controller.favorMyWordsChanged_(favor_toggle)
+        require(
+            ("favor_my_words", False) in calls
+            and not model.state.settings.favor_my_words
+            and int(favor_toggle.state()) == int(NSControlStateValueOff)
+            and str(controller.dynamic["favor_words_detail"]
+                    .stringValue()) == localized_string(
+                        "settings.personalize.favor_words.off")
+            and accessible_value(favor_toggle, "accessibilityValue") ==
+            localized_string("settings.state.disabled"),
+            "the favor my words switch turns it off")
+        favor_toggle.setState_(NSControlStateValueOn)
+        controller.favorMyWordsChanged_(favor_toggle)
+        require(model.state.settings.favor_my_words
+                and private_settings["favor_my_words"] is True,
+                "the favor my words switch turns it back on")
         # New speech runtime: off for a new install, labelled, reachable by
         # keyboard on Advanced, and its caption names which program answered
         # the last dictation once the runtime says so.
@@ -16375,28 +16753,44 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             "recent dictations become browsable once enabled")
         require(
             len(model.recent_dictations()) == 3, "recent metadata reaches UI")
-        recent_dialogs: list[Any] = []
+        recent_pages: list[tuple[str, tuple[str, ...], str]] = []
 
-        def reveal_last_row(alert: Any) -> int:
-            recent_dialogs.append(alert)
-            if len(recent_dialogs) == 1:
-                alert.accessoryView().selectItemAtIndex_(2)
-            return 1000
+        def show_last_row(sheet: Any) -> str:
+            # Each page as drawn: its title, its buttons and what it says.
+            recent_pages.append((
+                str(sheet.title.stringValue()), tuple(sheet.buttons),
+                " ".join(str(label.stringValue())
+                         for role in sheet.themed.values()
+                         for label in role
+                         if label.respondsToSelector_("stringValue"))))
+            return ("show:smoke-3", "back", "done")[len(recent_pages) - 1]
 
-        controller.modal_responder = reveal_last_row
+        controller.modal_responder = show_last_row
         controller.browseRecentDictations_(None)
         controller.modal_responder = None
+        require(len(recent_pages) == 3, "recent dictations list, words, back")
+        listing, words, back = recent_pages
         require(
-            int(recent_dialogs[0].accessoryView().numberOfItems()) == 3,
+            sorted(name for name in listing[1] if name.startswith("show:"))
+            == ["show:smoke-1", "show:smoke-2", "show:smoke-3"],
             "every recent dictation is listed, even with equal rows")
+        require(
+            set(listing[1]) == {
+                "show:smoke-1", "show:smoke-2", "show:smoke-3", "done"},
+            "recent dictations offer their words and nothing else")
+        require(
+            all(localized_string(f"recent.receipt.{kind}") in listing[2]
+                for kind in ("proven", "unchecked", "interrupted")),
+            "each recent dictation says what became of it")
         require(
             ("reveal_recent", "smoke-3") in calls,
             "recent dictation acts on the selected entry")
         require(
-            localized_string("settings.dialog.recent.reveal") in [
-                str(button.title()) for button in recent_dialogs[0].buttons()]
-            and len(recent_dialogs[0].buttons()) == 2,
-            "recent dictations offer reveal only")
+            words[0] == localized_string(
+                "settings.dialog.recent.revealed.title")
+            and set(words[1]) == {"back", "done"},
+            "a dictation's words are a page of their own")
+        require(back[:2] == listing[:2], "back returns to the same list")
         require(
             recent_dictation_row(model.recent_dictations()[0])
             == "1 min ago · 4 words · Mail", "recent row is metadata only")
@@ -17079,7 +17473,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         require(
             face_icon is not None
             and all(dialog.icon() == face_icon
-                    for dialog in dialogs + [recent_dialogs[0]]),
+                    for dialog in dialogs),
             "a system alert's icon is the chosen face")
         model.choose_face("owl")
         model.choose_language("ja")
@@ -17179,8 +17573,10 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             whole without scrolling, and the three settings panes show
             every group without scrolling at all. ``may_scroll`` names the
             panes let off that last rule here: Personalize, whose face
-            grid fills its group, and only at the window minimum while a
-            two-line notice has taken the foot of the page.
+            grid fills its group, and only while a notice has taken the
+            foot of the page (at the window minimum under a two-line one,
+            and at the default size, where the grid is taller, under one
+            line since "Favor my words" joined its rows).
             """
             documents = controller.dynamic["page_documents"]
             scrolls = controller.dynamic["page_scrolls"]
@@ -17632,7 +18028,8 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         root_view.layoutSubtreeIfNeeded()
         controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
         root_view.layoutSubtreeIfNeeded()
-        check_grouped_pages("the default size under a notice")
+        check_grouped_pages("the default size under a notice",
+                            may_scroll=("Personalize",))
         model.state = replace(fitted_state, notice="", notice_level="info")
         controller.render()
         root_view.layoutSubtreeIfNeeded()
@@ -20125,6 +20522,10 @@ __all__ = [
     "setup_rows_turned_good",
     "setup_waits_on_a_row",
     "plural_key",
+    "voice_check_ahead",
+    "voice_check_held",
+    "voice_check_note",
+    "voice_check_update_label",
     "normalize_snapshot",
     "normalize_acoustic_keyword_inspection",
     "normalize_point_and_speak_preview",

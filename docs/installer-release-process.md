@@ -9,7 +9,7 @@ machine without maintaining a second copy of the application.
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
 `process_verifier.py`, `prewarmed_verifier.py`,
 `whisper_verifier_adapter.py`, `relisten_activation.py`,
-`insertion_integrity.py`, `personal_regression.py`,
+`insertion_integrity.py`, `personal_regression.py`, `voice_check.py`,
 `shadow_candidate_gate.py`, `cleanup_circuit_breaker.py`,
 `delayed_cleanup_activation.py`, `delayed_cleanup_merge.py`,
 `macos_delayed_cleanup_destination.py`,
@@ -67,6 +67,7 @@ uv run tests/test_benchmark_cleanup_proof_recovery.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_benchmark_macos_asr_warm_path.py
 uv run tests/test_performance_lab.py
+uv run tests/test_release_latency_probe.py
 uv run tests/test_dictate.py
 uv run tests/test_whole_program.py
 uv run tests/test_gui_settings_runtime.py
@@ -121,6 +122,7 @@ uv run tests/test_safe_update_advisor.py
 uv run tests/test_side_by_side_update.py
 uv run tests/test_app_update.py
 uv run tests/test_self_update.py
+uv run tests/test_voice_check.py
 ```
 
 ## Where the gate list lives, and why it is duplicated

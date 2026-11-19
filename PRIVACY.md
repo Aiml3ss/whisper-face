@@ -92,6 +92,14 @@ time a dictation is appended, whether or not the cleanup model is installed.
 There is no switch that turns the history off: the window's **Recent
 dictations** setting only controls whether recent entries are listed.
 
+`delivery_journal.json` holds a dictation only while it is being delivered:
+its raw text as soon as it is recognised, then the text about to be pasted,
+the app, and a timestamp. It is written owner-only (mode 600 on a Mac) and
+atomically before anything is pasted, and the entry is removed once the
+dictation's line is in `transcripts.jsonl`, so the file is normally absent.
+If Whisper Face stops in between, the next start moves what the journal holds
+into `transcripts.jsonl`, marked as not delivered, and into the Voice Outbox.
+
 `learned.json`, `dictionary.txt`, and `snippets.json` hold local
 personalization. `learned.json` also holds pending snippet suggestions (an
 edit you made to a pasted snippet, which is never applied on its own) and a
@@ -124,9 +132,9 @@ clears `transcripts.jsonl`; delete the file, or use the uninstaller's
 `--remove-personal-data` option. Removing a local file cannot remove copies
 already captured by backups or external tools.
 
-On Windows, the installer does not yet give `transcripts.jsonl` and
-`learned.json` owner-only access control lists; they inherit whatever the
-install folder grants.
+On Windows, the installer does not yet give `transcripts.jsonl`,
+`delivery_journal.json` and `learned.json` owner-only access control lists;
+they inherit whatever the install folder grants.
 
 ## The clipboard
 
@@ -157,6 +165,13 @@ Install**. These requests carry nothing of yours beyond what any download
 does (your address, and a fixed `WhisperFace-updater` user agent), run in a
 process of their own that the dictation path never loads, and can reach only
 the project's releases over HTTPS.
+
+If you have recorded the accuracy set in `~/whisper-face-evidence/accuracy/`,
+a chosen update is tried on those recordings before it takes over
+(`voice_check.py`). That adds no network request: the recordings are read in
+place, every program the check starts runs with the network denied, and what
+each version wrote is compared in memory and never saved. The receipt it
+leaves in `~/whisper-face-evidence/runs/` holds counts only.
 
 That is a testable claim, so it is tested. `tests/test_network_egress.py` runs
 on every pull request. It fails if any module on the dictation path gains the
