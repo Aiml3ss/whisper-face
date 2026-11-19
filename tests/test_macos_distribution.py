@@ -226,6 +226,36 @@ class MacDistributionContractTests(unittest.TestCase):
     def read(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
 
+    def assert_notary_log_check(self, script: str) -> None:
+        """Run the packaging script's own check of Apple's notarization log.
+
+        Apple writes ``"issues": null`` on a clean acceptance; the check
+        must pass that, and still refuse reported issues, a log that was
+        not accepted, and a malformed one.
+        """
+        start = script.index('xcrun notarytool log "$notary_id"')
+        begin = script.index("python3 -c '", start) + len("python3 -c '")
+        end = script.index("' \"$notary_log\"", begin)
+        check = script[begin:end]
+        cases = (
+            ({"status": "Accepted", "issues": None}, True),
+            ({"status": "Accepted"}, True),
+            ({"status": "Accepted", "issues": []}, True),
+            ({"status": "Accepted", "issues": [{"message": "x"}]}, False),
+            ({"status": "Invalid", "issues": None}, False),
+            ({"status": "Accepted", "issues": "x"}, False),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for payload, passes in cases:
+                with self.subTest(payload=payload):
+                    log = Path(directory) / "log.json"
+                    log.write_text(json.dumps(payload), encoding="utf-8")
+                    result = subprocess.run(
+                        [sys.executable, "-c", check, str(log)],
+                        capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, passes,
+                                     result.stderr)
+
     def run_package_verifier(self, *arguments: str, check: bool = True):
         return subprocess.run(
             [sys.executable, str(PACKAGE_VERIFIER), *arguments],
@@ -603,6 +633,7 @@ class MacDistributionContractTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, script)
+        self.assert_notary_log_check(script)
         self.assertIn("PACKAGE-CONTENTS.json", self.read(
             "scripts/verify_macos_package.py"))
         verifier = self.read("scripts/verify_macos_package.py")

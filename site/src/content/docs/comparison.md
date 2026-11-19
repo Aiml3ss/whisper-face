@@ -126,15 +126,14 @@ ten run on Whisper, and on a default install that is the small Whisper Tiny
 model until you add large-v3-turbo. Cleanup outside English is rule-based only.
 If your language is not on that list, this is not the tool for you yet.
 
-**Signed, frictionless installation.** Commercial alternatives are signed and
-notarized, so they open without a warning and keep their permissions across
-updates. Whisper Face is currently distributed as an unsigned preview: macOS
-will say it cannot verify the developer (on macOS 15 and later you get past it
-in System Settings → Privacy & Security → Open Anyway), setting up needs
-Apple's command line tools, and because ad-hoc
-signatures change every build, you may need to re-grant Input Monitoring,
-Accessibility, and Microphone permission after an update. This is the most annoying thing about using it right now, and
-it is being worked on.
+**Installation.** From 0.7.1, Whisper Face is signed with an Apple Developer
+ID and notarized by Apple, like the commercial alternatives, so it opens
+without Open Anyway and keeps its permissions from one signed release to the
+next. (Releases up to 0.7.0 were unsigned: they needed Open Anyway, and
+permissions could need re-granting after every update, including once more
+when moving to the first signed release.) Setting up still needs Apple's
+command line tools and downloads about 1 GB of models and the parts they run
+on.
 
 **MacWhisper is stronger for files and meetings.** Whisper Face is built for
 dictating into whatever app you are already in, not for transcribing recorded

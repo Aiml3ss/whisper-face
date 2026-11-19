@@ -18,35 +18,77 @@ this path: the app contains the source, so the source can no longer record the
 app. An unsigned app is accepted only from a preview build. A signed build
 signs `uv` and then the app with the hardened runtime, a secure timestamp and
 the microphone entitlement, then notarizes and staples the app before the disk
-image is made; none of that has run yet, for want of the Developer ID.
+image is made, and signs, notarizes and staples the disk image too. v0.7.1 is
+the first release built that way.
 
 ## What published releases carry today
 
-Every release published so far (through v0.7.0) was built and uploaded by
-hand. The release workflow has not completed on any tag, so **no published
-release has a Developer ID signature, notarization, a stapled ticket, or a
-build-provenance attestation**. The launcher app inside the disk image is
-ad-hoc signed, and the disk image is not notarized.
+**From v0.7.1**, the Mac disk image carries:
 
-What a published release does carry is checksums: `SHA256SUMS` for the Mac
-assets, and, from v0.4.0, a separate `SHA256SUMS-windows` for the Windows zip
-(the Mac file is not built to include it). So for a published release today, the
-only check available is the checksum:
+- `Whisper Face.app` signed with `Developer ID Application: Andrew Bergstrom
+  (Z6Q832529P)`, the team pinned in `config/macos-signing-policy.json`, with
+  the hardened runtime and a secure timestamp;
+- Apple's notarization of the app, with the ticket stapled to it;
+- a Developer ID signature on the disk image itself, its notarization, and
+  its stapled ticket.
+
+So macOS opens it without **Open Anyway**, and because the app's identity is
+its bundle identifier plus the team, Input Monitoring and Accessibility
+grants carry over from one signed release to the next.
+
+Releases are still built and uploaded **by hand**, on the Project Owner's Mac,
+with `scripts/package_macos.sh --sign --notarize`. The release workflow has
+not completed on any tag, so **no published release has a build-provenance
+attestation**: nothing ties a release to a CI run or proves which machine
+built it. The Developer ID signature says who signed it; the exact-source
+archive and its sealed digest say which source it carries.
+
+**Up to v0.7.0**, every release was an unsigned preview: the app inside the
+disk image is ad-hoc signed, the disk image is not notarized, and macOS
+blocks the first open until you choose **Open Anyway** in System Settings →
+Privacy & Security. For those, the checksum is the only check.
+
+Every release carries checksums: `SHA256SUMS` for the Mac assets, and, from
+v0.4.0, a separate `SHA256SUMS-windows` for the Windows zip (the Mac file is
+not built to include it). The Windows zip is not code-signed.
+
+## Verifying a v0.7.1 or later Mac download
+
+```sh
+# 1. The bytes are the published bytes.
+shasum -a 256 -c SHA256SUMS
+
+# 2. Apple notarized the disk image for this Developer ID, and its ticket is
+#    stapled.
+spctl --assess --type open --context context:primary-signature -vv \
+    WhisperFace-<version>-macOS-arm64.dmg
+xcrun stapler validate WhisperFace-<version>-macOS-arm64.dmg
+
+# 3. The same for the app, once it is in Applications.
+spctl --assess --type execute -vv "/Applications/Whisper Face.app"
+xcrun stapler validate "/Applications/Whisper Face.app"
+```
+
+Each `spctl` line should end `accepted`, with `source=Notarized Developer ID`
+and `origin=Developer ID Application: Andrew Bergstrom (Z6Q832529P)`; each
+`stapler` line should say `The validate action worked!`. A different origin,
+`source=Unnotarized Developer ID`, or `rejected` means the file is not the
+one this project published. For v0.7.0 and earlier only the checksum line
+applies:
 
 ```sh
 shasum -a 256 -c SHA256SUMS            # Mac assets
 shasum -a 256 -c SHA256SUMS-windows    # Windows zip
 ```
 
-That proves the bytes match the checksum file published beside them, and
-nothing about who produced either. The rest of this document describes the
-signed path the workflow is built for, which becomes available only once the
-production Apple Team ID is recorded and a tagged release completes in CI.
+A checksum proves the bytes match the checksum file published beside them,
+and nothing about who produced either.
 
 ## Verifying a download from the signed workflow
 
-A release published by the tagged release workflow would carry four files.
-Verify them in this order.
+The rest of this document describes what the tagged release workflow adds,
+which becomes available only once a tagged release completes in CI. A release
+published by that workflow would carry four files. Verify them in this order.
 
 ```sh
 # 1. The bytes are the published bytes.
@@ -85,8 +127,8 @@ gh attestation verify update-manifest.json --repo Aiml3ss/whisper-face
 |---|---|---|
 | `SHA256SUMS` | The file you have is byte-identical to the one whose digest was published alongside it. | Anything about who produced it. Whoever can replace the artifact can replace the checksum file next to it. |
 | `update-manifest.json` | The release names one full Git revision, the source URLs for it, and the previous version for rollback. | That the manifest itself was written by the project. It is not independently signed. |
-| Apple Developer ID signature (not yet on any published release) | The disk image was signed by this project's Apple team identifier and has not been altered since. | That the contents match any particular source revision. Apple attests to the signer, not to the build. |
-| Apple notarization and stapling (not yet on any published release) | Apple scanned the artifact and issued a ticket that travels with it. | That the artifact was built from reviewed source, or by CI at all. |
+| Apple Developer ID signature (from v0.7.1) | The disk image was signed by this project's Apple team identifier and has not been altered since. | That the contents match any particular source revision. Apple attests to the signer, not to the build. |
+| Apple notarization and stapling (from v0.7.1) | Apple scanned the artifact and issued a ticket that travels with it. | That the artifact was built from reviewed source, or by CI at all. |
 | Exact-source archive plus tree digest | The shipped source is a specific Git tree, and the source in the disk image and in the zip are identical. | That the compiled launcher inside the image was built from that tree. |
 | **Build provenance attestation** (not yet on any published release) | A named GitHub Actions workflow, in this repository, at a specific commit, produced artifacts with these digests. | That the source at that commit is trustworthy, or that a human reviewed it. Provenance is about origin, not quality. |
 
@@ -120,11 +162,16 @@ The trade-offs are real and worth stating:
 
 ## What is still open
 
-- No published release has gone through the signed, notarized, attested
-  workflow. Until one does, a downloader has only `SHA256SUMS`.
-- The menu updater (**Check for Updates…**) does not use releases at all: it
-  fetches the tip of the checkout's tracked branch and runs that revision's
-  installer, with no tag, signature, or provenance check.
+- No published release has gone through the attested workflow. From v0.7.1 a
+  downloader can check the Developer ID signature, notarization and stapled
+  ticket as well as `SHA256SUMS`, but not which machine or run built the
+  release; up to v0.7.0 a downloader has only `SHA256SUMS`.
+- For a folder or clone install, the menu updater (**Check for Updates…**)
+  does not use releases at all: it fetches the tip of the checkout's tracked
+  branch and runs that revision's installer, with no tag, signature, or
+  provenance check. The drag-install app's copy follows published releases
+  and, for a stable release, checks `codesign`, `stapler` and the pinned
+  Developer ID ([how](../distribution/update-and-rollback.md)).
 - The update manifest is not independently signed. A recipient who trusts the
   provenance of a *release* still has no signature over the *update metadata*
   that a future automatic updater would consume.
