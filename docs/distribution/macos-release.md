@@ -54,7 +54,10 @@ launcher a folder install built only once it proves to be ours, refuses a
 checkout of another release, and writes a schema 2 receipt naming the app.
 App mode sticks to that checkout through reruns and the git updater, which
 refuses it. `setup.sh --app <app> --dry-run` checks all of it and prints the
-plan without changing anything. The ZIP still expands to a writable source
+plan without changing anything. Opened on a Mac with a folder install, the
+app offers to move it into itself, carrying the personal files over and
+putting the folder install back if setup fails
+([how](update-and-rollback.md#moving-a-folder-install-into-the-app)). The ZIP still expands to a writable source
 folder whose `Install.command` builds an unsigned local launcher, exactly as
 before.
 

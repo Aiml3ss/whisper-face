@@ -875,6 +875,67 @@ class SetupWindowContractTests(unittest.TestCase):
         self.assertEqual(module._source_digest(),
                          hashlib.sha256(source.encode()).hexdigest())
 
+    def test_the_drag_app_offers_to_move_a_folder_install_into_itself(self):
+        module = load_launcher_tool()
+        template = module.SWIFT_TEMPLATE
+
+        def body(start):
+            # Up to the closing brace at the declaration's own indent.
+            text = template[template.index(start):]
+            indent = start[:len(start) - len(start.lstrip())]
+            end = f"\n{indent}}}\n"
+            return text[:text.index(end) + len(end)]
+
+        decide = body("func initialScreen()")
+        # A move that stopped part way comes first, then a drag install's
+        # own release, then a folder install, which is offered the move
+        # before this app would ever start it as it is.
+        order = [decide.index(marker) for marker in (
+            "interruptedAdoption()", "installMatch(", "receipt.app == nil",
+            "launchExistingRuntime(start: false)")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn(".adopt(receipt.checkout)", decide)
+        self.assertIn('.adoptStuck("installer.adopt.interrupted", folder)', decide)
+        # The app reads the journal app_update.py writes, and runs that
+        # module's move from the copy it unpacked, with its own uv.
+        app_update = (ROOT / "scripts/app_update.py").read_text(encoding="utf-8")
+        self.assertIn('MOVE_JOURNAL = "move-in-progress.json"', app_update)
+        self.assertIn('let adoptJournal = "move-in-progress.json"', template)
+        start = body("    func startAdopt(")
+        self.assertIn('"adopt-folder", "--app", ownBundlePath()', start)
+        self.assertIn("checkout.appendingPathComponent(updateScript)", start)
+        # Moved: the window stays to say the folder can go, and only then
+        # hands over to the runtime and its permissions window. Put back,
+        # or not: the window says which.
+        finished = body("    func adoptFinished(")
+        self.assertIn("case 0: show(.adopted(folder))", finished)
+        self.assertIn("case 4: show(.adoptStuck(", finished)
+        self.assertIn("default: show(.adoptFailed(", finished)
+        self.assertNotIn("terminate", finished)
+        pressed = body("    @objc func primaryPressed(")
+        handover = pressed[pressed.index("case .adopted:"):]
+        handover = handover[:handover.index("case .tools")]
+        self.assertIn("launchExistingRuntime(start: true)", handover)
+        # Keeping the folder version is never a dead end: one that starts
+        # is started, and one that doesn't says how to set it up, with the
+        # move still on offer.
+        keep = body("    func keepFolder(")
+        self.assertIn("launchExistingRuntime(start: true)", keep)
+        self.assertIn("show(.folder(folder))", keep)
+        secondary = body("    @objc func secondaryPressed(")
+        self.assertIn("case .adopt(let folder): keepFolder(folder)", secondary)
+        self.assertIn("case .folder(let folder): show(.adopt(folder))", secondary)
+        copy = module.setup_copy()
+        for key in ("installer.adopt.action", "installer.adopt.keep",
+                    "installer.folder.adopt", "installer.adopted.show"):
+            self.assertIn(key, copy)
+        for key in ("installer.adopt.body", "installer.adopt.note",
+                    "installer.adopted.body"):
+            self.assertIn("delete" if key != "installer.adopt.body" else
+                          "dictionary, settings, history and downloaded models",
+                          copy[key])
+        self.assertIn("Install.command", copy["installer.folder.body"])
+
     def test_drag_install_info_plist_names_the_real_release(self):
         module = load_launcher_tool()
         plist = module._drag_plist("0.6.0-drag.1", REVISION, "a" * 64, "preview")
@@ -1289,7 +1350,9 @@ class DragInstallAppTests(unittest.TestCase):
         names = {path.name for path in out.iterdir()}
         for screen in ("welcome", "move", "tools", "running", "failed",
                        "repair", "folder", "unset", "update", "updating",
-                       "update-failed", "update-stuck", "older", "conflict"):
+                       "update-failed", "update-stuck", "older", "conflict",
+                       "adopt", "adopting", "adopt-failed", "adopt-stuck",
+                       "adopted", "folder-keep"):
             for appearance in ("light", "dark"):
                 with self.subTest(screen=screen, appearance=appearance):
                     picture = out / f"installer-{screen}-{appearance}.png"
@@ -1301,6 +1364,10 @@ class DragInstallAppTests(unittest.TestCase):
         self.assertNotEqual(
             (out / "installer-welcome-light.png").read_bytes(),
             (out / "installer-welcome-dark.png").read_bytes())
+        # Keeping the folder version from this app offers the move back.
+        self.assertNotEqual(
+            (out / "installer-folder-light.png").read_bytes(),
+            (out / "installer-folder-keep-light.png").read_bytes())
 
 
 if __name__ == "__main__":

@@ -67,8 +67,9 @@ REMOVE_PERSONAL=0
 APP_BUNDLE=""
 APP_REQUESTED=0
 DRY_RUN=0
-# An update of a drag install: the checkout this one replaces, whose private
-# files come across. See carry_over_private_files below.
+# An update of a drag install, or a folder install moving into the app: the
+# copy this one replaces, whose private files come across. See
+# carry_over_private_files below.
 CARRY_FROM=""
 CARRY_REQUESTED=0
 expect_app_path=0
@@ -114,7 +115,8 @@ for arg in "$@"; do
             echo "                 launcher, or receipt change"
             echo "  --carry-over-from PATH  with app mode, first copy your private"
             echo "                 files (the --remove-personal-data list) from the"
-            echo "                 copy at PATH that this release replaces"
+            echo "                 copy at PATH that the app takes over: its older"
+            echo "                 release, or a folder install moving into it"
             echo
             echo "Uninstall (prints a plan and changes nothing unless --yes):"
             echo "  --uninstall    list every file and service this installer"
@@ -159,7 +161,7 @@ fi
 if [ "$CARRY_REQUESTED" -eq 1 ] && { [ "$APP_REQUESTED" -ne 1 ] \
         || [ "$UNINSTALL" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ] \
         || [ "$MODELS_ONLY" -eq 1 ]; }; then
-    echo "!! --carry-over-from is for the Whisper Face app's update; it needs --app and an install" >&2
+    echo "!! --carry-over-from is for the Whisper Face app's update or move; it needs --app and an install" >&2
     exit 2
 fi
 if [ "$UNINSTALL" -eq 1 ]; then
@@ -525,9 +527,11 @@ fi
 
 # --- Carrying private files into an update ----------------------------------
 # A drag install updates by unpacking the newer release beside the old copy
-# and switching to it (scripts/app_update.py). That copy's setup runs with
-# --carry-over-from naming the copy it replaces, and before anything else it
-# copies every personal file across, over any copy an earlier attempt left.
+# and switching to it (scripts/app_update.py apply); a folder install moves
+# into the app the same way, from its own folder (app_update.py adopt-folder).
+# That setup runs with --carry-over-from naming the copy it replaces, and
+# before anything else it copies every personal file across, over any copy an
+# earlier attempt left.
 # The copy being replaced keeps its own files untouched, so an update that
 # fails goes back to exactly what was there. Only regular files are copied,
 # never a link, and each arrives readable by you alone.

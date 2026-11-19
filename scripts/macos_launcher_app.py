@@ -487,6 +487,8 @@ enum Screen: Equatable {
     // Updating a drag install: (from, to) versions, and a failure's reason.
     case update(String, String), updating(String, String), updateFailed(String, String), updateStuck(String)
     case older(String, String), conflict(String)
+    // Moving a folder install into this app: the folder, and a failure's reason.
+    case adopt(String), adopting(String), adoptFailed(String, String), adoptStuck(String, String), adopted(String)
 }
 
 // Where an update unpacks the newer release, beside the install, and what
@@ -494,6 +496,8 @@ enum Screen: Equatable {
 let updateFolder = "checkout.incoming"
 let updateScript = "scripts/app_update.py"
 let pythonVersion = /*PYTHON_VERSION*/
+// app_update.py's record of a move of a folder install that has not ended.
+let adoptJournal = "move-in-progress.json"
 
 // Draws the theme's window colour; a layer-free view so a cached render shows
 // exactly what the window does.
@@ -524,6 +528,10 @@ final class SetupController: NSObject, NSWindowDelegate {
     var toolsTimer: Timer? = nil
     // Set while this window updates an install: the two versions.
     var pendingUpdate: (from: String, to: String)? = nil
+    // Set while this window offers or makes the move of a folder install.
+    var pendingMove: String? = nil
+    // Only the app built for drag install can take a folder install over.
+    var canAdopt = isDragApp()
 
     override init() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: 400), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: true)
@@ -608,7 +616,28 @@ final class SetupController: NSObject, NSWindowDelegate {
             }
             if logURL() != nil { secondaryTitle = localized("installer.failed.log") }
         case .repair: title = localized("installer.repair.title"); body = localized("installer.repair.body"); primaryTitle = localized("installer.repair.action")
-        case .folder(let folder): title = localized("installer.folder.title"); body = localized("installer.folder.body", ["folder": folder]); primaryTitle = localized("installer.folder.action")
+        case .folder(let folder):
+            title = localized("installer.folder.title"); body = localized("installer.folder.body", ["folder": folder]); primaryTitle = localized("installer.folder.action")
+            if canAdopt { pendingMove = folder; secondaryTitle = localized("installer.folder.adopt") }
+        case .adopt(let folder):
+            pendingMove = folder
+            title = localized("installer.adopt.title"); body = localized("installer.adopt.body", ["folder": folder]); note = localized("installer.adopt.note")
+            primaryTitle = localized("installer.adopt.action"); secondaryTitle = localized("installer.adopt.keep")
+        case .adopting(let folder):
+            title = localized("installer.adopting.title"); body = localized("installer.adopting.body", ["folder": folder]); listVisible = true; progressVisible = true
+        case .adoptFailed(let reason, let folder):
+            title = localized("installer.adopt.failed.title"); body = localized(reason); listVisible = currentPhase != nil
+            note = localized("installer.adopt.failed.note", ["folder": folder])
+            if !["installer.reason.damaged", "installer.reason.version"].contains(reason) { primaryTitle = localized("installer.failed.retry") }
+            if logURL() != nil { secondaryTitle = localized("installer.failed.log") }
+        case .adoptStuck(let reason, let folder):
+            pendingMove = folder
+            title = localized("installer.adopt.stuck.title"); body = localized(reason); listVisible = currentPhase != nil
+            note = localized("installer.adopt.stuck.note"); primaryTitle = localized("installer.failed.retry")
+            if logURL() != nil { secondaryTitle = localized("installer.failed.log") }
+        case .adopted(let folder):
+            title = localized("installer.adopted.title"); body = localized("installer.adopted.body", ["folder": folder]); note = localized("installer.adopted.note")
+            primaryTitle = localized("installer.adopted.action"); secondaryTitle = localized("installer.adopted.show")
         case .elsewhere(let app): title = localized("installer.elsewhere.title"); body = localized("installer.elsewhere.body", ["app": app]); primaryTitle = localized("installer.elsewhere.action")
         case .unset: title = localized("installer.unset.title"); body = localized("installer.unset.body")
         case .update(let from, let to):
@@ -643,7 +672,7 @@ final class SetupController: NSObject, NSWindowDelegate {
     func refreshChecklist() {
         let failed: Bool
         switch screen {
-        case .failed, .updateFailed, .updateStuck: failed = true
+        case .failed, .updateFailed, .updateStuck, .adoptFailed, .adoptStuck: failed = true
         default: failed = false
         }
         for phase in setupPhases {
@@ -669,8 +698,9 @@ final class SetupController: NSObject, NSWindowDelegate {
 
     func logURL() -> URL? {
         // After an update is put back, the newer copy and its log wait in
-        // checkout.incoming, which is where `checkout` points then.
-        let candidates = [checkout, pendingUpdate == nil ? nil : supportDirectory().appendingPathComponent("checkout")]
+        // checkout.incoming, which is where `checkout` points then. A move
+        // logs in the app's own copy.
+        let candidates = [checkout, pendingUpdate == nil && pendingMove == nil ? nil : supportDirectory().appendingPathComponent("checkout")]
         for folder in candidates.compactMap({ $0 }) {
             let log = folder.appendingPathComponent("install.log")
             if FileManager.default.fileExists(atPath: log.path) { return log }
@@ -682,8 +712,14 @@ final class SetupController: NSObject, NSWindowDelegate {
         switch screen {
         case .move: moveToApplications()
         case .welcome, .repair, .failed: beginSetup()
-        case .space: if pendingUpdate != nil { beginUpdate() } else { beginSetup() }
+        case .space: if pendingUpdate != nil { beginUpdate() } else if pendingMove != nil { beginAdopt() } else { beginSetup() }
         case .update, .updateFailed, .updateStuck: beginUpdate()
+        case .adopt, .adoptFailed, .adoptStuck: beginAdopt()
+        case .adopted:
+            // The runtime takes over, and its permissions window asks for
+            // what macOS gives this app afresh.
+            try? launchExistingRuntime(start: true)
+            NSApp.terminate(nil)
         case .tools: installTools()
         case .folder(let folder): NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder).appendingPathComponent("Install.command")])
         case .elsewhere(let app): NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: app)])
@@ -692,7 +728,20 @@ final class SetupController: NSObject, NSWindowDelegate {
     }
 
     @objc func secondaryPressed(_ sender: Any?) {
-        if let log = logURL() { NSWorkspace.shared.activateFileViewerSelecting([log]) }
+        switch screen {
+        case .adopt(let folder): keepFolder(folder)
+        case .folder(let folder): show(.adopt(folder))
+        case .adopted(let folder): NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)])
+        default: if let log = logURL() { NSWorkspace.shared.activateFileViewerSelecting([log]) }
+        }
+    }
+
+    // Keep using the folder version: one that still starts runs as it always
+    // has and this window steps aside; one that doesn't says how to set it
+    // up again, and the move stays one click away.
+    func keepFolder(_ folder: String) {
+        if (try? launchExistingRuntime(start: true)) != nil { NSApp.terminate(nil); return }
+        show(.folder(folder))
     }
 
     @objc func quitPressed(_ sender: Any?) { requestQuit() }
@@ -709,7 +758,7 @@ final class SetupController: NSObject, NSWindowDelegate {
         guard let running = setupRun, !stopping else { NSApp.terminate(nil); return }
         let alert = NSAlert()
         alert.messageText = localized("installer.stop.title")
-        alert.informativeText = localized(pendingUpdate == nil ? "installer.stop.body" : "installer.update.stop.body")
+        alert.informativeText = localized(pendingUpdate != nil ? "installer.update.stop.body" : pendingMove != nil ? "installer.adopt.stop.body" : "installer.stop.body")
         alert.addButton(withTitle: localized("installer.stop.cancel"))
         let stop = alert.addButton(withTitle: localized("installer.stop.action")); stop.hasDestructiveAction = true
         alert.beginSheetModal(for: window) { response in
@@ -725,7 +774,9 @@ final class SetupController: NSObject, NSWindowDelegate {
         toolsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
             guard toolsInstalled() else { return }
             timer.invalidate(); self?.toolsTimer = nil
-            if let update = self?.pendingUpdate { self?.show(.update(update.from, update.to)) } else { self?.show(firstSetupScreen()) }
+            if let update = self?.pendingUpdate { self?.show(.update(update.from, update.to)) }
+            else if let folder = self?.pendingMove { self?.show(.adopt(folder)) }
+            else { self?.show(firstSetupScreen()) }
         }
     }
 
@@ -819,6 +870,56 @@ final class SetupController: NSObject, NSWindowDelegate {
         }
     }
 
+    // Move a folder install into this app: unpack this app's release as its
+    // own copy, then let that copy's updater take the folder install over.
+    // app_update.py keeps what it replaces, runs setup.sh --app carrying the
+    // personal files across from the folder, and puts the folder install
+    // back if setup fails. The folder itself is only read.
+    func beginAdopt() {
+        guard let folder = pendingMove else { return }
+        if !toolsInstalled() { show(.tools); return }
+        if !enoughSpace() { show(.space); return }
+        completed = []; finishedPhase = nil; output = []; currentPhase = setupPhases.first
+        show(.adopting(folder))
+        DispatchQueue.global().async {
+            do {
+                let prepared = try prepareCheckout()
+                DispatchQueue.main.async { self.checkout = prepared; self.startAdopt(prepared) }
+            } catch let failure as SetupFailure {
+                DispatchQueue.main.async { self.currentPhase = nil; self.show(.adoptFailed(failure.reasonKey, folder)) }
+            } catch {
+                DispatchQueue.main.async { self.currentPhase = nil; self.show(.adoptFailed("installer.reason.generic", folder)) }
+            }
+        }
+    }
+
+    func startAdopt(_ checkout: URL) {
+        let uv = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/uv").path
+        let setup = SetupRun()
+        setupRun = setup
+        do {
+            try setup.start([uv, "run", "--quiet", "--no-project", "--python", pythonVersion,
+                             checkout.appendingPathComponent(updateScript).path, "adopt-folder", "--app", ownBundlePath()],
+                            onLine: { [weak self] line in self?.receive(line) },
+                            onExit: { [weak self] status in self?.adoptFinished(status) })
+        } catch {
+            setupRun = nil; show(.adoptFailed("installer.reason.generic", pendingMove ?? ""))
+        }
+    }
+
+    // The same exit statuses as an update: 0 moved, 3 put back and running,
+    // 4 could not be put back; anything else changed nothing.
+    func adoptFinished(_ status: Int32) {
+        setupRun = nil
+        if stopping { return }
+        let folder = pendingMove ?? ""
+        switch status {
+        case 0: show(.adopted(folder))
+        case 4: show(.adoptStuck(plainReason(output), folder))
+        default: show(.adoptFailed(plainReason(output), folder))
+        }
+    }
+
     func startSetup(_ checkout: URL) {
         let setup = SetupRun()
         setupRun = setup
@@ -872,9 +973,29 @@ func firstSetupScreen() -> Screen {
     return enoughSpace() ? .welcome : .space
 }
 
+// The folder a move into this app was taking over, when that move stopped
+// before it finished or was undone.
+func interruptedAdoption() -> String? {
+    let journal = supportDirectory().appendingPathComponent(adoptJournal)
+    guard let data = FileManager.default.contents(atPath: journal.path),
+          let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+        return FileManager.default.fileExists(atPath: journal.path) ? "" : nil
+    }
+    return object["folder"] as? String ?? ""
+}
+
+// A folder install can come along only while its folder still holds it.
+func folderHoldsInstall(_ folder: String) -> Bool {
+    let files = FileManager.default
+    return files.fileExists(atPath: folder + "/dictate.py") && files.fileExists(atPath: folder + "/setup.sh")
+}
+
 func initialScreen() -> Screen? {
     let drag = isDragApp()
     if drag && needsMove() { return .move }
+    // A move into this app that stopped part way is finished or undone
+    // before anything else is decided.
+    if drag, let folder = interruptedAdoption() { return .adoptStuck("installer.adopt.interrupted", folder) }
     // A drag install whose app is now another release: offer to move the
     // install forward to this one, or say why this one cannot run it.
     if drag, let receipt = try? binding(), let match = installMatch(receipt, info: Bundle.main.infoDictionary ?? [:]) {
@@ -884,6 +1005,12 @@ func initialScreen() -> Screen? {
         case .conflict(let installed): return .conflict(installed)
         case .current: break
         }
+    }
+    // A folder install (every Mac install before 0.6.0): offer to move it
+    // into this app, whether or not it still starts. One whose folder is
+    // gone has nothing to bring along, so this app sets up afresh.
+    if drag, let receipt = try? binding(), receipt.app == nil {
+        return folderHoldsInstall(receipt.checkout) ? .adopt(receipt.checkout) : firstSetupScreen()
     }
     if (try? launchExistingRuntime(start: false)) != nil { return nil }
     guard receiptExists() else { return drag ? firstSetupScreen() : .unset }
@@ -909,7 +1036,13 @@ func renderSetupWindow(to directory: String) -> Int32 {
         ("failed", .failed("installer.reason.network"), { controller.completed = ["prepare"]; controller.currentPhase = "python" }),
         ("failed-before-start", .failed("installer.reason.damaged"), { controller.completed = []; controller.currentPhase = nil }),
         ("repair", .repair, {}),
-        ("folder", .folder("/Users/you/Whisper Face"), {}),
+        ("folder", .folder("/Users/you/Projects/whisper-face"), { controller.canAdopt = false }),
+        ("folder-keep", .folder("/Users/you/Projects/whisper-face"), { controller.canAdopt = true }),
+        ("adopt", .adopt("/Users/you/Projects/whisper-face"), {}),
+        ("adopting", .adopting("/Users/you/Projects/whisper-face"), { controller.completed = ["prepare", "python", "speech-model"]; controller.currentPhase = "helpers" }),
+        ("adopt-failed", .adoptFailed("installer.reason.tools", "/Users/you/Projects/whisper-face"), { controller.completed = ["prepare", "python", "speech-model"]; controller.currentPhase = "helpers" }),
+        ("adopt-stuck", .adoptStuck("installer.adopt.interrupted", "/Users/you/Projects/whisper-face"), { controller.completed = []; controller.currentPhase = nil }),
+        ("adopted", .adopted("/Users/you/Projects/whisper-face"), { controller.completed = []; controller.currentPhase = nil }),
         ("elsewhere", .elsewhere("/Applications/Whisper Face.app"), {}),
         ("unset", .unset, {}),
         ("update", .update("0.6.0", "0.6.1"), {}),
@@ -928,7 +1061,7 @@ func renderSetupWindow(to directory: String) -> Int32 {
             // The failure screen offers Show Log only once a log exists; the
             // sample shows the button the way a real failure would.
             switch screen {
-            case .failed, .updateFailed, .updateStuck:
+            case .failed, .updateFailed, .updateStuck, .adoptFailed, .adoptStuck:
                 if controller.currentPhase != nil { controller.secondary.isHidden = false; controller.secondary.title = localized("installer.failed.log") }
             default: break
             }
