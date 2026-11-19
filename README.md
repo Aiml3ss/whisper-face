@@ -472,7 +472,12 @@ must be re-audited if it moves.
    not working, Whisper Face opens a small window with one button per missing
    permission.
 
-Opening the app again later simply starts Whisper Face.
+Opening the app again later simply starts Whisper Face. If Whisper Face is
+already set up from a folder with `Install.command` (every Mac install before
+0.6.0), the app offers to move it into itself: your dictionary, settings,
+history and models come along, the folder is left as it is for you to delete,
+and if anything fails the folder version is put back and keeps working
+([details](docs/distribution/update-and-rollback.md#moving-a-folder-install-into-the-app)).
 
 The app carries its release's exact source archive (the same bytes as the
 published `WhisperFace-<version>-source.zip`), checks it against its

@@ -76,6 +76,49 @@ identity is the bundle identifier plus the Team ID, which stay the same from
 release to release, so the grants are expected to survive an update; that is
 unverified until a signed build exists.
 
+## Moving a folder install into the app
+
+Every Mac install before 0.6.0 is a folder install: `Install.command` set it
+up in a folder you chose, such as `~/Projects/whisper-face`. When you open
+the downloaded app on such a Mac, it offers **Move Into This App**, with
+**Keep Using the Folder Version** beside it. Keeping the folder version
+starts it as it is, or, if it no longer starts, says to run `Install.command`
+in that folder again and keeps the move one click away.
+
+The app recognises a folder install by what its installer wrote: a schema 1
+receipt naming the folder, and a `com.berg.dictate` login service run from
+that folder. Moving it unpacks the app's own release into
+`~/Library/Application Support/Whisper Face/checkout`, as a first setup
+does, and runs that copy's `scripts/app_update.py adopt-folder`, which:
+
+1. keeps copies of the login service's definition, the Ollama service's
+   definition and load receipt if there are any, the launcher receipt, and
+   the launcher in `~/Applications/Whisper Face.app` (only once it proves to
+   be one the installer built), and writes a journal,
+   `move-in-progress.json`, before anything changes;
+2. stops the folder's dictation service, so nothing in the folder changes
+   while its files are copied;
+3. runs the app's `setup.sh --app … --carry-over-from <the folder>`. That
+   copies every personal file across from the same `personal_files` list an
+   update uses, and it is that setup which replaces the login services,
+   retires the folder's launcher and rebinds the receipt to the app, exactly
+   as it does for any app install. Models are shared and are not downloaded
+   again.
+
+If setup fails, the copies go back, the launcher is put back byte for byte,
+and the services that were loaded are started again; the window says
+Whisper Face runs from the folder again only once launchd shows it running.
+If that cannot be shown, the window says so, and **Try Again** (or the next
+open of the app, after a crash) finishes putting the folder version back
+before it moves it again. The folder itself is only ever read: when the move
+is done, the window says it is no longer used and offers **Show Folder** so
+you can delete it. macOS asks again for Input Monitoring and Accessibility,
+because the app is a different program from the folder's launcher; the
+runtime's permissions window opens by itself. To see the plan without
+changing anything, run the unpacked copy's
+`scripts/app_update.py adopt-folder --app "/Applications/Whisper Face.app" --dry-run`
+with the app's own `uv`.
+
 ## Check for Updates… for a folder or clone install
 
 For a folder or clone install, when you choose it, `self_update.py`:
