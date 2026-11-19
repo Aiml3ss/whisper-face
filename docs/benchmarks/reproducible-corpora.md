@@ -77,11 +77,24 @@ The aggregate view is one command:
 uv run public_scorecard.py
 ```
 
+`public_benchmark_corpus.json` (116 takes) is the public benchmark's corpus:
+names, terms, near misses, numbers, everyday sentences and long takes, all
+written for it or copied from `default_path_sentences.json`, with no audio
+stored. `uv run benchmark_public.py check` validates it from a clone; the run
+itself speaks every take with macOS system voices and needs an Apple Silicon
+Mac, the built speech runtime and the pinned model. Beside it,
+`public_benchmark_rivals.json` holds the rule that nothing is published about
+another product until the owner has recorded an account and terms that allow
+it. [The public benchmark](public-benchmark.md) is the method and says what
+the synthetic speech cannot show.
+
 ## What a third party cannot run today, and why
 
 | Corpus | Class | What is missing |
 |---|---|---|
 | `cleanup_latency_cases.json` | `needs-local-service` | The latency half needs a local Ollama serving the pinned cleanup model, and refuses to start without `--run`. The proof-recovery half of the same 30 cases is clone-only. |
+| `public_benchmark_corpus.json` | `needs-apple-silicon` | `check` runs from a clone. The run needs macOS system voices, the built speech runtime and the pinned Parakeet model. |
+| `public_benchmark_rivals.json` | `reference-data` | Not a corpus: the publication rule for other products, with no entries. |
 | `competitor_tasks.json` | `needs-external-observations` | The six-task protocol is reproducible; the runs are not. A real observation file needs clean machines, the other products, and a human observer. |
 | `model_scorecard.json` | `needs-apple-silicon` | Ranking the checked-in evidence is clone-only. Regenerating the metrics needs a LibriSpeech download, an Apple Silicon Mac, the MLX snapshots, and the installed Parakeet helper. |
 | `performance_budgets.json` | `reference-data` | Only the `ci_warm_path` profile is reachable from a clone. `product_quality`, `warm_path_stage`, and `startup_readiness` all need private runtime logs from an installed machine. |

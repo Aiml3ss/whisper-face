@@ -1,0 +1,1526 @@
+{
+ "schema_version": 1,
+ "corpus_id": "whisper-face-public-v1",
+ "description": "The public benchmark corpus: sentences anyone may rerun through a dictation app. Every sentence was written for this corpus or taken from a sentence the repository already carries (the take's source says which). Every person, place and product named is either a public product name or invented for this corpus. benchmark_public.py speaks each take with a macOS system voice on the machine running it; no audio is stored here. docs/benchmarks/public-benchmark.md is the method.",
+ "licence": {
+  "text": "AGPL-3.0-only, as the rest of this repository (LICENSE_POLICY.md)",
+  "audio": "Not distributed. The audio is synthesised on the machine that runs the benchmark with that machine's macOS system voices, whose output is governed by Apple's macOS licence, not by this repository."
+ },
+ "synthetic_speech": true,
+ "privacy": "No recording, no owner data, no dictation history: written text and public or invented names only.",
+ "seed": 20261117,
+ "speech": {
+  "synthesizer": "say",
+  "voices": [
+   "Samantha",
+   "Daniel",
+   "Karen",
+   "Moira",
+   "Rishi",
+   "Tessa"
+  ],
+  "rate_words_per_minute": 180,
+  "sample_rate": 16000,
+  "pad_seconds": 0.3
+ },
+ "glossary": [
+  {
+   "term": "Siobhan",
+   "kind": "name"
+  },
+  {
+   "term": "Kearney",
+   "kind": "name"
+  },
+  {
+   "term": "Niamh",
+   "kind": "name"
+  },
+  {
+   "term": "Aoife",
+   "kind": "name"
+  },
+  {
+   "term": "Saoirse",
+   "kind": "name"
+  },
+  {
+   "term": "Tadhg",
+   "kind": "name"
+  },
+  {
+   "term": "Xochitl",
+   "kind": "name"
+  },
+  {
+   "term": "Thandiwe",
+   "kind": "name"
+  },
+  {
+   "term": "Oluwaseun",
+   "kind": "name"
+  },
+  {
+   "term": "Chidinma",
+   "kind": "name"
+  },
+  {
+   "term": "Bartholomew",
+   "kind": "name"
+  },
+  {
+   "term": "Haugland",
+   "kind": "name"
+  },
+  {
+   "term": "Venkataraman",
+   "kind": "name"
+  },
+  {
+   "term": "Volkonsky",
+   "kind": "name"
+  },
+  {
+   "term": "Yevgenia",
+   "kind": "name"
+  },
+  {
+   "term": "Leocadia",
+   "kind": "name"
+  },
+  {
+   "term": "Ottoline",
+   "kind": "name"
+  },
+  {
+   "term": "Anouk",
+   "kind": "name"
+  },
+  {
+   "term": "Achterberg",
+   "kind": "name"
+  },
+  {
+   "term": "Zbigniew",
+   "kind": "name"
+  },
+  {
+   "term": "Kwabena",
+   "kind": "name"
+  },
+  {
+   "term": "Haddadin",
+   "kind": "name"
+  },
+  {
+   "term": "Ffion",
+   "kind": "name"
+  },
+  {
+   "term": "Eilidh",
+   "kind": "name"
+  },
+  {
+   "term": "McTavish",
+   "kind": "name"
+  },
+  {
+   "term": "Wojciech",
+   "kind": "name"
+  },
+  {
+   "term": "Hamish",
+   "kind": "name"
+  },
+  {
+   "term": "Isolde",
+   "kind": "name"
+  },
+  {
+   "term": "Callum",
+   "kind": "name"
+  },
+  {
+   "term": "Ingrid",
+   "kind": "name"
+  },
+  {
+   "term": "Leominster",
+   "kind": "place"
+  },
+  {
+   "term": "Kirkcudbright",
+   "kind": "place"
+  },
+  {
+   "term": "Schenectady",
+   "kind": "place"
+  },
+  {
+   "term": "Wollongong",
+   "kind": "place"
+  },
+  {
+   "term": "Llandudno",
+   "kind": "place"
+  },
+  {
+   "term": "Kubernetes",
+   "kind": "term"
+  },
+  {
+   "term": "PostgreSQL",
+   "kind": "term"
+  },
+  {
+   "term": "Terraform",
+   "kind": "term"
+  },
+  {
+   "term": "GraphQL",
+   "kind": "term"
+  },
+  {
+   "term": "Grafana",
+   "kind": "term"
+  },
+  {
+   "term": "Supabase",
+   "kind": "term"
+  },
+  {
+   "term": "Tailscale",
+   "kind": "term"
+  },
+  {
+   "term": "PyTorch",
+   "kind": "term"
+  },
+  {
+   "term": "TypeScript",
+   "kind": "term"
+  },
+  {
+   "term": "Figma",
+   "kind": "term"
+  },
+  {
+   "term": "Vercel",
+   "kind": "term"
+  },
+  {
+   "term": "OAuth",
+   "kind": "term"
+  },
+  {
+   "term": "nginx",
+   "kind": "term"
+  },
+  {
+   "term": "Quillpad",
+   "kind": "invented-term"
+  },
+  {
+   "term": "Tarnwick",
+   "kind": "invented-term"
+  },
+  {
+   "term": "Zephyrine",
+   "kind": "invented-term"
+  },
+  {
+   "term": "Corvantis",
+   "kind": "invented-term"
+  },
+  {
+   "term": "Lumivale",
+   "kind": "invented-term"
+  },
+  {
+   "term": "Brackenfold",
+   "kind": "invented-term"
+  }
+ ],
+ "takes": [
+  {
+   "id": "names-01",
+   "category": "names",
+   "text": "Ask Siobhan Kearney to send the draft before lunch.",
+   "said": "Ask Shivawn Karny to send the draft before lunch.",
+   "terms": [
+    "Siobhan",
+    "Kearney"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-02",
+   "category": "names",
+   "text": "Niamh is presenting the results on Thursday.",
+   "said": "Neev is presenting the results on Thursday.",
+   "terms": [
+    "Niamh"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-03",
+   "category": "names",
+   "text": "Aoife booked the room for the whole team.",
+   "said": "Eefa booked the room for the whole team.",
+   "terms": [
+    "Aoife"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-04",
+   "category": "names",
+   "text": "Saoirse will join the call a few minutes late.",
+   "said": "Seersha will join the call a few minutes late.",
+   "terms": [
+    "Saoirse"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-05",
+   "category": "names",
+   "text": "Can you forward the invoice to Tadhg?",
+   "said": "Can you forward the invoice to Tige?",
+   "terms": [
+    "Tadhg"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-06",
+   "category": "names",
+   "text": "Xochitl wrote the onboarding guide.",
+   "said": "So-cheel wrote the onboarding guide.",
+   "terms": [
+    "Xochitl"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-07",
+   "category": "names",
+   "text": "Thandiwe and Oluwaseun are leading the workshop.",
+   "said": "Tan-dee-way and Oh-loo-wah-shay-oon are leading the workshop.",
+   "terms": [
+    "Thandiwe",
+    "Oluwaseun"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-08",
+   "category": "names",
+   "text": "Chidinma approved the new design.",
+   "said": "Chee-deen-mah approved the new design.",
+   "terms": [
+    "Chidinma"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-09",
+   "category": "names",
+   "text": "Bartholomew Haugland is our new accountant.",
+   "said": "Bartholomew Howg-land is our new accountant.",
+   "terms": [
+    "Bartholomew",
+    "Haugland"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-10",
+   "category": "names",
+   "text": "Please copy Dr. Venkataraman on the reply.",
+   "said": "Please copy Dr. Venka-tah-rah-mun on the reply.",
+   "terms": [
+    "Venkataraman"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-11",
+   "category": "names",
+   "text": "Yevgenia Volkonsky starts on Monday.",
+   "said": "Yev-gay-nya Volkonsky starts on Monday.",
+   "terms": [
+    "Yevgenia",
+    "Volkonsky"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-12",
+   "category": "names",
+   "text": "Leocadia said the shipment is delayed.",
+   "said": "Leo-kah-dia said the shipment is delayed.",
+   "terms": [
+    "Leocadia"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-13",
+   "category": "names",
+   "text": "Ottoline and Anouk will review the contract.",
+   "said": "Otto-leen and Ah-nook will review the contract.",
+   "terms": [
+    "Ottoline",
+    "Anouk"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-14",
+   "category": "names",
+   "text": "Send the slides to Marisol Achterberg.",
+   "terms": [
+    "Achterberg"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-15",
+   "category": "names",
+   "text": "Zbigniew fixed the printer again.",
+   "said": "Zbig-nyev fixed the printer again.",
+   "terms": [
+    "Zbigniew"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-16",
+   "category": "names",
+   "text": "Kwabena Haddadin is visiting the office next week.",
+   "said": "Kwah-bay-nah Hadda-deen is visiting the office next week.",
+   "terms": [
+    "Kwabena",
+    "Haddadin"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-17",
+   "category": "names",
+   "text": "Ffion asked for a copy of the agenda.",
+   "said": "Fee-on asked for a copy of the agenda.",
+   "terms": [
+    "Ffion"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-18",
+   "category": "names",
+   "text": "Eilidh McTavish runs the support team.",
+   "said": "Ay-lee McTavish runs the support team.",
+   "terms": [
+    "Eilidh",
+    "McTavish"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-19",
+   "category": "names",
+   "text": "Wojciech will take notes during the meeting.",
+   "said": "Voy-chekh will take notes during the meeting.",
+   "terms": [
+    "Wojciech"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-20",
+   "category": "names",
+   "text": "Hamish and Isolde are driving up together.",
+   "said": "Hay-mish and Ih-sol-duh are driving up together.",
+   "terms": [
+    "Hamish",
+    "Isolde"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-21",
+   "category": "names",
+   "text": "Callum moved the deadline to Friday.",
+   "terms": [
+    "Callum"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-22",
+   "category": "names",
+   "text": "Ingrid needs the final numbers by noon.",
+   "terms": [
+    "Ingrid"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-23",
+   "category": "names",
+   "text": "Thank Niamh and Siobhan for organizing the dinner.",
+   "said": "Thank Neev and Shivawn for organizing the dinner.",
+   "terms": [
+    "Niamh",
+    "Siobhan"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-24",
+   "category": "names",
+   "text": "The workshop in Leominster was a success.",
+   "said": "The workshop in Lemster was a success.",
+   "terms": [
+    "Leominster"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-25",
+   "category": "names",
+   "text": "We are opening a second shop in Kirkcudbright.",
+   "said": "We are opening a second shop in Kur-coo-bree.",
+   "terms": [
+    "Kirkcudbright"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-26",
+   "category": "names",
+   "text": "Her flight from Schenectady lands at noon.",
+   "terms": [
+    "Schenectady"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-27",
+   "category": "names",
+   "text": "The conference moved from Wollongong to Llandudno.",
+   "said": "The conference moved from Wollongong to Clan-did-no.",
+   "terms": [
+    "Wollongong",
+    "Llandudno"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-28",
+   "category": "names",
+   "text": "Tadhg and Aoife both voted for the second option.",
+   "said": "Tige and Eefa both voted for the second option.",
+   "terms": [
+    "Tadhg",
+    "Aoife"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-29",
+   "category": "names",
+   "text": "Remind Saoirse that Wojciech is out tomorrow.",
+   "said": "Remind Seersha that Voy-chekh is out tomorrow.",
+   "terms": [
+    "Saoirse",
+    "Wojciech"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "names-30",
+   "category": "names",
+   "text": "Isolde wants to meet Kwabena before the launch.",
+   "said": "Ih-sol-duh wants to meet Kwah-bay-nah before the launch.",
+   "terms": [
+    "Isolde",
+    "Kwabena"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-01",
+   "category": "terms",
+   "text": "The Kubernetes cluster restarted overnight.",
+   "terms": [
+    "Kubernetes"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-02",
+   "category": "terms",
+   "text": "We migrated the database to PostgreSQL last month.",
+   "said": "We migrated the database to Postgres Q L last month.",
+   "terms": [
+    "PostgreSQL"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-03",
+   "category": "terms",
+   "text": "Run Terraform before you change the network.",
+   "terms": [
+    "Terraform"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-04",
+   "category": "terms",
+   "text": "The GraphQL endpoint returns an empty list.",
+   "said": "The Graph Q L endpoint returns an empty list.",
+   "terms": [
+    "GraphQL"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-05",
+   "category": "terms",
+   "text": "Add a Grafana panel for the error rate.",
+   "terms": [
+    "Grafana"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-06",
+   "category": "terms",
+   "text": "The prototype stores everything in Supabase.",
+   "said": "The prototype stores everything in Soopa-base.",
+   "terms": [
+    "Supabase"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-07",
+   "category": "terms",
+   "text": "Connect to the server over Tailscale.",
+   "terms": [
+    "Tailscale"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-08",
+   "category": "terms",
+   "text": "The model was trained with PyTorch.",
+   "said": "The model was trained with Pie-torch.",
+   "terms": [
+    "PyTorch"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-09",
+   "category": "terms",
+   "text": "Rewrite the parser in TypeScript.",
+   "terms": [
+    "TypeScript"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-10",
+   "category": "terms",
+   "text": "The mockups are in Figma.",
+   "terms": [
+    "Figma"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-11",
+   "category": "terms",
+   "text": "The preview deploy on Vercel failed.",
+   "said": "The preview deploy on Ver-sell failed.",
+   "terms": [
+    "Vercel"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-12",
+   "category": "terms",
+   "text": "Sign in with OAuth instead of a password.",
+   "said": "Sign in with Oh-auth instead of a password.",
+   "terms": [
+    "OAuth"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-13",
+   "category": "terms",
+   "text": "Restart nginx after you change the config.",
+   "said": "Restart engine X after you change the config.",
+   "terms": [
+    "nginx"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-14",
+   "category": "terms",
+   "text": "Open the notes in Quillpad.",
+   "terms": [
+    "Quillpad"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-15",
+   "category": "terms",
+   "text": "Tarnwick sends the weekly report on Fridays.",
+   "terms": [
+    "Tarnwick"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-16",
+   "category": "terms",
+   "text": "The Zephyrine release fixes the sync bug.",
+   "said": "The Zeffer-een release fixes the sync bug.",
+   "terms": [
+    "Zephyrine"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-17",
+   "category": "terms",
+   "text": "Corvantis is hosting the training session.",
+   "terms": [
+    "Corvantis"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-18",
+   "category": "terms",
+   "text": "Upload the photos to Lumivale.",
+   "said": "Upload the photos to Loomy-vale.",
+   "terms": [
+    "Lumivale"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-19",
+   "category": "terms",
+   "text": "Brackenfold signed the lease yesterday.",
+   "terms": [
+    "Brackenfold"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "terms-20",
+   "category": "terms",
+   "text": "Point Grafana at the PostgreSQL replica.",
+   "said": "Point Grafana at the Postgres Q L replica.",
+   "terms": [
+    "Grafana",
+    "PostgreSQL"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-01",
+   "category": "near_miss",
+   "text": "Add a column to the spreadsheet.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Callum",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-02",
+   "category": "near_miss",
+   "text": "Arrange the photos in a grid.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Ingrid",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-03",
+   "category": "near_miss",
+   "text": "The vessel docked at noon.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Vercel",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-04",
+   "category": "near_miss",
+   "text": "That is a super base for the soup.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Supabase",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-05",
+   "category": "near_miss",
+   "text": "The fish has a shiny tail scale.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Tailscale",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-06",
+   "category": "near_miss",
+   "text": "It felt good to be back on terra firma.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Terraform",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-07",
+   "category": "near_miss",
+   "text": "A zephyr in the morning cooled the porch.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Zephyrine",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-08",
+   "category": "near_miss",
+   "text": "The sheep rested in the bracken by the fold.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Brackenfold",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-09",
+   "category": "near_miss",
+   "text": "She kept a loom and a veil in the attic.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Lumivale",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-10",
+   "category": "near_miss",
+   "text": "From our core vantage point, the plan works.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Corvantis",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-11",
+   "category": "near_miss",
+   "text": "Buy a quill and a pad of paper.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Quillpad",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-12",
+   "category": "near_miss",
+   "text": "The candle has a tar wick.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Tarnwick",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-13",
+   "category": "near_miss",
+   "text": "The fair hired a friendly carny.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Kearney",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-14",
+   "category": "near_miss",
+   "text": "Eva will bring the salad.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Aoife",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-15",
+   "category": "near_miss",
+   "text": "The house is old and drafty.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Isolde",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-16",
+   "category": "near_miss",
+   "text": "The auto line at the factory restarts Monday.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Ottoline",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-17",
+   "category": "near_miss",
+   "text": "We found a nook by the window.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Anouk",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-18",
+   "category": "near_miss",
+   "text": "There is a fee on late returns.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Ffion",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-19",
+   "category": "near_miss",
+   "text": "We sheltered in the lee of the hill.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Eilidh",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "near-miss-20",
+   "category": "near_miss",
+   "text": "The tiger slept in the shade.",
+   "terms": [],
+   "format_targets": [],
+   "near_miss_of": "Tadhg",
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-01",
+   "category": "numbers",
+   "text": "The invoice total is $1,250.50.",
+   "said": "The invoice total is one thousand two hundred fifty dollars and fifty cents.",
+   "terms": [],
+   "format_targets": [
+    [
+     "$1,250.50"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-02",
+   "category": "numbers",
+   "text": "The call starts at 3:30 p.m. on Thursday.",
+   "said": "The call starts at three thirty PM on Thursday.",
+   "terms": [],
+   "format_targets": [
+    [
+     "3:30 p.m.",
+     "3:30 PM",
+     "3:30 pm",
+     "3:30pm",
+     "3:30PM"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-03",
+   "category": "numbers",
+   "text": "Sales grew 25% last quarter.",
+   "said": "Sales grew twenty five percent last quarter.",
+   "terms": [],
+   "format_targets": [
+    [
+     "25%",
+     "25 percent"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-04",
+   "category": "numbers",
+   "text": "Her flight lands on March 4.",
+   "said": "Her flight lands on March fourth.",
+   "terms": [],
+   "format_targets": [
+    [
+     "March 4",
+     "March 4th"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-05",
+   "category": "numbers",
+   "text": "The meeting is in room 214.",
+   "said": "The meeting is in room two fourteen.",
+   "terms": [],
+   "format_targets": [
+    [
+     "214"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-06",
+   "category": "numbers",
+   "text": "Version 2.3 fixes the login bug.",
+   "said": "Version two point three fixes the login bug.",
+   "terms": [],
+   "format_targets": [
+    [
+     "2.3"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-07",
+   "category": "numbers",
+   "text": "Call the front desk at 555-0142.",
+   "said": "Call the front desk at five five five, zero one four two.",
+   "terms": [],
+   "format_targets": [
+    [
+     "555-0142"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-08",
+   "category": "numbers",
+   "text": "The deadline is December 31, 2026.",
+   "said": "The deadline is December thirty first, twenty twenty six.",
+   "terms": [],
+   "format_targets": [
+    [
+     "December 31, 2026",
+     "December 31st, 2026"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-09",
+   "category": "numbers",
+   "text": "Rent went up by $75 a month.",
+   "said": "Rent went up by seventy five dollars a month.",
+   "terms": [],
+   "format_targets": [
+    [
+     "$75"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-10",
+   "category": "numbers",
+   "text": "The package weighs 2.5 kilograms.",
+   "said": "The package weighs two point five kilograms.",
+   "terms": [],
+   "format_targets": [
+    [
+     "2.5 kilograms",
+     "2.5 kg"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-11",
+   "category": "numbers",
+   "text": "Train 47 leaves at 6:15 a.m.",
+   "said": "Train forty seven leaves at six fifteen AM.",
+   "terms": [],
+   "format_targets": [
+    [
+     "47"
+    ],
+    [
+     "6:15 a.m.",
+     "6:15 AM",
+     "6:15 am",
+     "6:15am",
+     "6:15AM"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-12",
+   "category": "numbers",
+   "text": "We sold 1,800 tickets in two days.",
+   "said": "We sold one thousand eight hundred tickets in two days.",
+   "terms": [],
+   "format_targets": [
+    [
+     "1,800",
+     "1800"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-13",
+   "category": "numbers",
+   "text": "The project costs $3.2 million.",
+   "said": "The project costs three point two million dollars.",
+   "terms": [],
+   "format_targets": [
+    [
+     "$3.2 million",
+     "$3.2M"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-14",
+   "category": "numbers",
+   "text": "Chapter 11 starts on page 312.",
+   "said": "Chapter eleven starts on page three twelve.",
+   "terms": [],
+   "format_targets": [
+    [
+     "11"
+    ],
+    [
+     "312"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-15",
+   "category": "numbers",
+   "text": "The meeting moved to 9:45.",
+   "said": "The meeting moved to nine forty five.",
+   "terms": [],
+   "format_targets": [
+    [
+     "9:45"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-16",
+   "category": "numbers",
+   "text": "Interest is fixed at 4.75%.",
+   "said": "Interest is fixed at four point seven five percent.",
+   "terms": [],
+   "format_targets": [
+    [
+     "4.75%",
+     "4.75 percent"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-17",
+   "category": "numbers",
+   "text": "Order 48213 shipped today.",
+   "said": "Order four eight two one three shipped today.",
+   "terms": [],
+   "format_targets": [
+    [
+     "48213"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-18",
+   "category": "numbers",
+   "text": "Our budget for Q3 is $40,000.",
+   "said": "Our budget for Q three is forty thousand dollars.",
+   "terms": [],
+   "format_targets": [
+    [
+     "Q3"
+    ],
+    [
+     "$40,000"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-19",
+   "category": "numbers",
+   "text": "The recipe needs 350 grams of flour.",
+   "said": "The recipe needs three hundred fifty grams of flour.",
+   "terms": [],
+   "format_targets": [
+    [
+     "350 grams",
+     "350 g"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "numbers-20",
+   "category": "numbers",
+   "text": "We expect 12,500 visitors this year.",
+   "said": "We expect twelve thousand five hundred visitors this year.",
+   "terms": [],
+   "format_targets": [
+    [
+     "12,500",
+     "12500"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "everyday-01",
+   "category": "everyday",
+   "text": "I finished the report.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#plain-statement"
+  },
+  {
+   "id": "everyday-02",
+   "category": "everyday",
+   "text": "Can you send me the Q3 numbers?",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#plain-question"
+  },
+  {
+   "id": "everyday-03",
+   "category": "everyday",
+   "text": "Our CEO, Dana, approved the budget.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#plain-names"
+  },
+  {
+   "id": "everyday-04",
+   "category": "everyday",
+   "text": "Wait, what time is it?",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#plain-short-question"
+  },
+  {
+   "id": "everyday-05",
+   "category": "everyday",
+   "text": "Please review the PR before lunch.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#plain-pr"
+  },
+  {
+   "id": "everyday-06",
+   "category": "everyday",
+   "text": "The package arrived, but the box was damaged.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#plain-but"
+  },
+  {
+   "id": "everyday-07",
+   "category": "everyday",
+   "text": "I'm running about ten minutes late.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#plain-late"
+  },
+  {
+   "id": "everyday-08",
+   "category": "everyday",
+   "text": "Let me know if you need anything else.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#plain-anything-else"
+  },
+  {
+   "id": "everyday-09",
+   "category": "everyday",
+   "text": "I didn't actually finish the report.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#actually-after-negation"
+  },
+  {
+   "id": "everyday-10",
+   "category": "everyday",
+   "text": "I actually like the second option.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#actually-before-verb"
+  },
+  {
+   "id": "everyday-11",
+   "category": "everyday",
+   "text": "He never actually signed the contract.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#actually-after-never"
+  },
+  {
+   "id": "everyday-12",
+   "category": "everyday",
+   "text": "We are not actually ready for launch.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#actually-after-not"
+  },
+  {
+   "id": "everyday-13",
+   "category": "everyday",
+   "text": "She doesn't actually know about the move.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#actually-after-doesnt"
+  },
+  {
+   "id": "everyday-14",
+   "category": "everyday",
+   "text": "My email is down again.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#snippet-email-subject"
+  },
+  {
+   "id": "everyday-15",
+   "category": "everyday",
+   "text": "Please send the address of the venue.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#snippet-address-word"
+  },
+  {
+   "id": "everyday-16",
+   "category": "everyday",
+   "text": "Please check the signature on the contract.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#snippet-signature-word"
+  },
+  {
+   "id": "everyday-17",
+   "category": "everyday",
+   "text": "Send me your address, please.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#snippet-address-request"
+  },
+  {
+   "id": "everyday-18",
+   "category": "everyday",
+   "text": "Thank you so much for your help.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#signoff-long"
+  },
+  {
+   "id": "everyday-19",
+   "category": "everyday",
+   "text": "Technical debt is piling up.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#tone-word-technical"
+  },
+  {
+   "id": "everyday-20",
+   "category": "everyday",
+   "text": "Neutral colors work best here.",
+   "terms": [],
+   "format_targets": [],
+   "source": "benchmarks/default_path_sentences.json#tone-word-neutral"
+  },
+  {
+   "id": "long-01",
+   "category": "long",
+   "text": "Hi everyone, quick update on the move. Siobhan Kearney has booked the van for Saturday morning, and Hamish will drive it up from Leominster. We still need about twelve more boxes, so if you have any spare ones, please bring them to the office on Friday. The new address is on the shared calendar. Thanks again for all the help, and let me know if anything changes.",
+   "said": "Hi everyone, quick update on the move. Shivawn Karny has booked the van for Saturday morning, and Hay-mish will drive it up from Lemster. We still need about twelve more boxes, so if you have any spare ones, please bring them to the office on Friday. The new address is on the shared calendar. Thanks again for all the help, and let me know if anything changes.",
+   "terms": [
+    "Siobhan",
+    "Kearney",
+    "Hamish",
+    "Leominster"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "long-02",
+   "category": "long",
+   "text": "For the release notes, please say that the Zephyrine update moves storage from the old file format to PostgreSQL, adds a Grafana dashboard for sync errors, and signs people in with OAuth instead of a password. It also fixes the crash that Wojciech reported when a Kubernetes node restarts in the middle of an upload. We tested it for two weeks on the staging cluster and saw no data loss.",
+   "said": "For the release notes, please say that the Zeffer-een update moves storage from the old file format to Postgres Q L, adds a Grafana dashboard for sync errors, and signs people in with Oh-auth instead of a password. It also fixes the crash that Voy-chekh reported when a Kubernetes node restarts in the middle of an upload. We tested it for two weeks on the staging cluster and saw no data loss.",
+   "terms": [
+    "Zephyrine",
+    "PostgreSQL",
+    "Grafana",
+    "OAuth",
+    "Wojciech",
+    "Kubernetes"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "long-03",
+   "category": "long",
+   "text": "Dear Dr. Venkataraman, thank you for meeting with us last week. As we discussed, the first phase of the project will cost $40,000 and should take about six weeks. Ingrid will send the full proposal by December 31, 2026, and Callum will follow up to schedule a call. We are very excited to work with your team and look forward to hearing from you.",
+   "said": "Dear Dr. Venka-tah-rah-mun, thank you for meeting with us last week. As we discussed, the first phase of the project will cost $40,000 and should take about six weeks. Ingrid will send the full proposal by December 31, 2026, and Callum will follow up to schedule a call. We are very excited to work with your team and look forward to hearing from you.",
+   "terms": [
+    "Venkataraman",
+    "Ingrid",
+    "Callum"
+   ],
+   "format_targets": [
+    [
+     "$40,000"
+    ],
+    [
+     "December 31, 2026",
+     "December 31st, 2026"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "long-04",
+   "category": "long",
+   "text": "Notes from today's planning meeting. The team agreed to finish the TypeScript rewrite before starting anything new. Niamh will own the parser, Tadhg will handle the tests, and Aoife will review every pull request before it is merged. We will check progress again on Thursday afternoon. The main risk is that the old code has very few tests, so we may find bugs that nobody knew about. If that happens, we will write them down and decide together which ones to fix first.",
+   "said": "Notes from today's planning meeting. The team agreed to finish the TypeScript rewrite before starting anything new. Neev will own the parser, Tige will handle the tests, and Eefa will review every pull request before it is merged. We will check progress again on Thursday afternoon. The main risk is that the old code has very few tests, so we may find bugs that nobody knew about. If that happens, we will write them down and decide together which ones to fix first.",
+   "terms": [
+    "TypeScript",
+    "Niamh",
+    "Tadhg",
+    "Aoife"
+   ],
+   "format_targets": [],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "long-05",
+   "category": "long",
+   "text": "I wanted to share a few thoughts about the trip. The train leaves at 6:15 a.m., so we should meet at the station by six. The hotel in Llandudno is about a ten minute walk from the beach, and breakfast is included. Saoirse found a small restaurant near the pier that everyone says is excellent, and she has booked a table for eight on Saturday evening. Please bring a warm jacket, because the forecast says it will be windy and cold most of the weekend.",
+   "said": "I wanted to share a few thoughts about the trip. The train leaves at 6:15 a.m., so we should meet at the station by six. The hotel in Clan-did-no is about a ten minute walk from the beach, and breakfast is included. Seersha found a small restaurant near the pier that everyone says is excellent, and she has booked a table for eight on Saturday evening. Please bring a warm jacket, because the forecast says it will be windy and cold most of the weekend.",
+   "terms": [
+    "Llandudno",
+    "Saoirse"
+   ],
+   "format_targets": [
+    [
+     "6:15 a.m.",
+     "6:15 AM",
+     "6:15 am",
+     "6:15am",
+     "6:15AM"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  },
+  {
+   "id": "long-06",
+   "category": "long",
+   "text": "Here is a summary of the customer call. Kwabena Haddadin from Corvantis said that their team uses Figma for every design and wants to export screens straight into the app. They currently pay $75 a month for a tool that does part of this, and they would switch if we can support comments and version history. Ottoline asked whether they need single sign on, and they said not yet, but probably next year. We agreed to send a short demo video and follow up in two weeks. Overall the call went well, and they seemed genuinely interested in a pilot with around 25 people.",
+   "said": "Here is a summary of the customer call. Kwah-bay-nah Hadda-deen from Corvantis said that their team uses Figma for every design and wants to export screens straight into the app. They currently pay $75 a month for a tool that does part of this, and they would switch if we can support comments and version history. Otto-leen asked whether they need single sign on, and they said not yet, but probably next year. We agreed to send a short demo video and follow up in two weeks. Overall the call went well, and they seemed genuinely interested in a pilot with around 25 people.",
+   "terms": [
+    "Kwabena",
+    "Haddadin",
+    "Corvantis",
+    "Figma",
+    "Ottoline"
+   ],
+   "format_targets": [
+    [
+     "$75"
+    ]
+   ],
+   "source": "written-for-this-corpus"
+  }
+ ]
+}

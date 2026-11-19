@@ -105,6 +105,7 @@ uv run tests/test_risky_action_confirmation.py
 uv run tests/test_demonstration_drafts.py
 uv run tests/test_competitor_benchmark.py
 uv run tests/test_public_scorecard.py
+uv run tests/test_benchmark_public.py
 uv run tests/test_quality_gate.py
 uv run quality_gate.py
 uv run tests/test_personal_regression.py

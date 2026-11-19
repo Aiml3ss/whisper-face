@@ -146,6 +146,24 @@
    "requirement": "reference-data",
    "command": "uv run quality_gate.py",
    "notes": "Pinned deterministic quality metrics, not a corpus: the release gate replays the golden, scorecard, proof-recovery and stress collectors and fails on any difference. --rebaseline rewrites it; the diff rides the causing PR."
+  },
+  {
+   "path": "benchmarks/public_benchmark_corpus.json",
+   "case_key": "takes",
+   "cases": 116,
+   "content": "synthetic-text-spoken-by-system-voices",
+   "requirement": "needs-apple-silicon",
+   "command": "uv run benchmark_public.py check",
+   "notes": "The public benchmark. check validates the corpus from a clone. run speaks every take with macOS system voices and measures Whisper Face's own speech runtime and the app path on the fake Mac, so it needs an Apple Silicon Mac, the built runtime and the pinned Parakeet model. No audio is stored; the sentences are written for the benchmark or copied from default_path_sentences.json. docs/benchmarks/public-benchmark.md is the method."
+  },
+  {
+   "path": "benchmarks/public_benchmark_rivals.json",
+   "case_key": null,
+   "cases": null,
+   "content": "publication-rule",
+   "requirement": "reference-data",
+   "command": "uv run public_scorecard.py benchmark",
+   "notes": "Not a corpus: the rule that nothing is published about another product until the owner has recorded an account and terms that allow it, and the owner's entries (none). public_scorecard.py benchmark refuses any other product without one."
   }
  ]
 }
