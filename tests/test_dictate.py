@@ -11228,6 +11228,101 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
             logged[-1], "! hotkey listener died — restarting it")
         self.assertEqual(len(logged), 3)
 
+    def test_the_event_tap_a_listener_creates_is_kept(self):
+        ns = load_definitions("remember_event_tap")
+        tap = object()
+
+        class Listener:
+            def _create_event_tap(self):
+                return tap
+
+        listener = Listener()
+        ns["remember_event_tap"](listener)
+        self.assertFalse(hasattr(listener, "_whisper_face_tap"))
+        # pynput's run() calls the factory on the instance.
+        self.assertIs(listener._create_event_tap(), tap)
+        self.assertIs(listener._whisper_face_tap, tap)
+
+    def test_a_listener_without_an_event_tap_is_left_as_it_is(self):
+        ns = load_definitions("remember_event_tap")
+        listener = SimpleNamespace(running=True)
+        ns["remember_event_tap"](listener)
+        self.assertEqual(vars(listener), {"running": True})
+
+    def tap_namespace(self, logged):
+        return load_definitions(
+            "reenable_switched_off_tap", extra={"print": logged.append})
+
+    def test_a_switched_off_tap_is_turned_back_on_and_logged_once(self):
+        logged = []
+        ns = self.tap_namespace(logged)
+        tap = object()
+        enabled = {"on": False}
+        calls = []
+
+        def enable(which, on):
+            calls.append((which, on))
+            enabled["on"] = on
+
+        state = {"l": SimpleNamespace(_whisper_face_tap=tap)}
+        reenable = ns["reenable_switched_off_tap"]
+        is_enabled = lambda which: enabled["on"]  # noqa: E731
+
+        self.assertTrue(reenable(is_enabled, enable, state))
+        self.assertEqual(calls, [(tap, True)])
+        self.assertFalse(reenable(is_enabled, enable, state))
+        self.assertEqual(calls, [(tap, True)])
+        self.assertEqual(logged, [
+            "! macOS switched the key listener off — turned it back on"])
+
+        # Switched off on every check: the first line, a second, then quiet.
+        for _ in range(4):
+            self.assertTrue(reenable(lambda which: False, enable, state))
+        self.assertEqual(len(logged), 3)
+        self.assertEqual(logged[1], logged[0])
+        self.assertIn("keeps switching", logged[2])
+
+        # Once it stays on, a later switch-off is reported again.
+        self.assertFalse(reenable(lambda which: True, enable, state))
+        self.assertTrue(reenable(lambda which: False, enable, state))
+        self.assertEqual(logged[-1], logged[0])
+
+    def test_an_enabled_tap_is_left_alone(self):
+        ns = self.tap_namespace([])
+        state = {"l": SimpleNamespace(_whisper_face_tap=object())}
+        self.assertFalse(ns["reenable_switched_off_tap"](
+            lambda which: True,
+            lambda *_: self.fail("an enabled tap was enabled again"),
+            state))
+
+    def test_no_tap_yet_or_on_windows_does_nothing(self):
+        ns = self.tap_namespace([])
+        never = lambda *_: self.fail("tap checked")  # noqa: E731
+        for listener in (None, SimpleNamespace(running=True),
+                         SimpleNamespace(_whisper_face_tap=None)):
+            self.assertFalse(ns["reenable_switched_off_tap"](
+                never, never, {"l": listener}))
+
+    def test_tap_controls_are_off_away_from_macos(self):
+        ns = load_definitions(
+            "macos_event_tap_controls", extra={"IS_MACOS": False})
+        self.assertIsNone(ns["macos_event_tap_controls"]())
+
+    def test_the_watchdog_checks_the_tap_only_when_no_restart_was_needed(self):
+        source = ast.unparse(next(n for n in TREE.body
+                         if isinstance(n, ast.FunctionDef)
+                         and n.name == "hotkey_watchdog_loop"))
+        self.assertIn("tap_controls = macos_event_tap_controls()", source)
+        self.assertIn(
+            "if not restart_dead_hotkey_listener(on_dead) and tap_controls:",
+            source)
+        self.assertIn("reenable_switched_off_tap(*tap_controls)", source)
+        listener = ast.unparse(next(
+            n for n in ast.walk(TREE)
+            if isinstance(n, ast.FunctionDef) and n.name == "make_listener"))
+        self.assertLess(listener.index("remember_event_tap(lst)"),
+                        listener.index("lst.start()"))
+
     def test_a_running_listener_thread_is_left_alone(self):
         ns = load_definitions("restart_dead_hotkey_listener")
         release = threading.Event()

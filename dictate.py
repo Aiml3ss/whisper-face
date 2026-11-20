@@ -8722,6 +8722,67 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
     return True
 
 
+def remember_event_tap(listener) -> None:
+    """Keep the macOS event tap a pynput listener creates.
+
+    pynput creates its tap inside the listener thread and keeps it in a local
+    variable, so nothing else can see it. Wrapping the factory on this one
+    instance keeps a reference the watchdog can check. A listener without the
+    factory (Windows) is left as it is.
+    """
+    create = getattr(listener, "_create_event_tap", None)
+    if not callable(create):
+        return
+
+    def create_and_remember():
+        tap = create()
+        listener._whisper_face_tap = tap
+        return tap
+
+    listener._create_event_tap = create_and_remember
+
+
+def reenable_switched_off_tap(
+        tap_is_enabled, tap_enable, listener_state=None) -> bool:
+    """Turn the key listener back on after macOS switched it off.
+
+    macOS disables an event tap whose callback runs too long, or on some user
+    input, and expects the app to enable it again. pynput never does, so the
+    listener thread stays alive while it hears nothing: the watchdog sees a
+    healthy listener and the app is deaf until it restarts. A key-up missed
+    while the tap was off is handled by the hold supervisor, which reads the
+    physical key, so a hold in progress is left to finish.
+    """
+    state = LISTENER if listener_state is None else listener_state
+    tap = getattr(state.get("l"), "_whisper_face_tap", None)
+    if tap is None:
+        return False
+    if tap_is_enabled(tap):
+        state["tap_reenables"] = 0
+        return False
+    tap_enable(tap, True)
+    reenables = state.get("tap_reenables", 0)
+    if reenables == 0:
+        print("! macOS switched the key listener off — turned it back on")
+    elif reenables == 1:
+        print("! macOS keeps switching the key listener off — "
+              "still turning it back on")
+    state["tap_reenables"] = reenables + 1
+    return True
+
+
+def macos_event_tap_controls():
+    """Return (is_enabled, enable) from Quartz, or None off macOS."""
+    if not IS_MACOS:
+        return None
+    try:
+        from Quartz import CGEventTapEnable, CGEventTapIsEnabled
+    except Exception as e:
+        print(f"! key listener re-enable is unavailable: {e}")
+        return None
+    return CGEventTapIsEnabled, CGEventTapEnable
+
+
 def queue_hotkey_listener_recovery(
         key_down: dict, modifiers: set, events, event_at=None):
     """Unlatch a dead listener and serialize orphaned-capture cleanup."""
@@ -8736,10 +8797,12 @@ def queue_hotkey_listener_recovery(
 
 def hotkey_watchdog_loop(on_dead):
     """Recover input within seconds, independently of model heartbeats."""
+    tap_controls = macos_event_tap_controls()
     while True:
         time.sleep(HOTKEY_WATCHDOG_INTERVAL)
         try:
-            restart_dead_hotkey_listener(on_dead)
+            if not restart_dead_hotkey_listener(on_dead) and tap_controls:
+                reenable_switched_off_tap(*tap_controls)
         except Exception as e:
             print(f"! hotkey watchdog recovered from error: {e}")
 
@@ -17154,6 +17217,7 @@ def main():
         lst = keyboard.Listener(
             on_press=on_press, on_release=on_release,
             win32_event_filter=windows_hotkey_event_filter)
+        remember_event_tap(lst)
         lst.start()
         return lst
 
